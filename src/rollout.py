@@ -10,11 +10,13 @@ from encoding import attach_clue_mask, decode_logits, grid_to_onehot, onehot_to_
 from model import NextStateModel
 
 RolloutMode = Literal["threshold", "categorical"]
+TrainInitMode = Literal["clues", "noisy_gt"]
 
 
 @dataclass(frozen=True)
 class RolloutConfig:
     mode: RolloutMode = "threshold"
+    train_init: TrainInitMode = "clues"
 
 
 @dataclass
@@ -48,6 +50,16 @@ def _noisy_ground_truth_initial(answer: torch.Tensor, clues: torch.Tensor) -> to
     clue_mask = (clues > 0).unsqueeze(-1)
     corrupted = torch.where(replace, random_bits, onehot)
     return torch.where(clue_mask, clue_state, corrupted)
+
+
+def _training_initial_onehot(
+    config: RolloutConfig,
+    answer: torch.Tensor,
+    clues: torch.Tensor,
+) -> torch.Tensor | None:
+    if config.train_init == "noisy_gt":
+        return _noisy_ground_truth_initial(answer, clues)
+    return None
 
 
 def predict_grid(logits: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
@@ -194,7 +206,7 @@ def rollout_train_batch(
     """Rollout with ground-truth targets at every step."""
     config = config or RolloutConfig()
     threshold_state = _threshold_state(config)
-    initial_onehot = _noisy_ground_truth_initial(answer, clues) if model.training else None
+    initial_onehot = _training_initial_onehot(config, answer, clues) if model.training else None
     states, logits_list, cycle_length, hit_max_iter = _run_rollout(
         model,
         clues_onehot,

@@ -442,6 +442,12 @@ def main() -> None:
         default="threshold",
         help="threshold: BCE + threshold rollout; categorical: CE + argmax rollout; acc/viz use argmax final",
     )
+    parser.add_argument(
+        "--train-init",
+        choices=["clues", "noisy-gt"],
+        default="clues",
+        help="clues: clues only, empty elsewhere (same as val/test); noisy-gt: random GT corruption on non-clue cells",
+    )
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
@@ -494,7 +500,8 @@ def main() -> None:
         if args.rollout_mode == "threshold"
         else nn.CrossEntropyLoss()
     )
-    rollout_config = RolloutConfig(mode=args.rollout_mode)
+    train_init = "noisy_gt" if args.train_init == "noisy-gt" else "clues"
+    rollout_config = RolloutConfig(mode=args.rollout_mode, train_init=train_init)
     best_val_loss = float("inf")
     manifest = load_manifest(run_dir)
     viz_rows = {
