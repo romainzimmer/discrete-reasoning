@@ -25,7 +25,7 @@ COPY src ./src
 
 # Torch must come from the Jetson/CUDA index; other deps resolve from PyPI.
 ARG TORCH_INDEX=https://download.pytorch.org/whl/cu132
-RUN pip3 install --no-cache-dir \
+RUN pip3 install --no-cache-dir --break-system-packages \
     . \
     --index-url ${TORCH_INDEX} \
     --extra-index-url https://pypi.org/simple
