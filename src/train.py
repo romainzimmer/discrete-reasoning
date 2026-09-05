@@ -195,6 +195,7 @@ def train_epoch(
     loss_fn: nn.Module,
     device: torch.device,
     *,
+    epoch: int,
     max_rollout_iter: int,
     rollout_config: RolloutConfig,
 ) -> EpochStats:
@@ -205,6 +206,9 @@ def train_epoch(
     total_cycle_length = 0.0
     cycle_count = 0
     n = 0
+    n_total = len(loader)
+    log_interval = max(1, n_total // 10)
+    next_log_at = log_interval
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
         result = rollout_train_batch(
@@ -226,6 +230,16 @@ def train_epoch(
             total_cycle_length += result.cycle_length
             cycle_count += 1
         n += 1
+        if n >= next_log_at:
+            pct = min(100, round(100 * n / n_total))
+            print(
+                f"epoch {epoch} [{pct}%]: "
+                f"loss={total_loss / n:.4f} "
+                f"steps={total_steps / n:.1f} "
+                f"cycle_len={total_cycle_length / cycle_count if cycle_count else 0.0:.1f}",
+                flush=True,
+            )
+            next_log_at += log_interval
     return EpochStats(
         loss=total_loss / n,
         avg_rollout_steps=total_steps / n,
@@ -397,6 +411,7 @@ def main() -> None:
             optimizer,
             loss_fn,
             device,
+            epoch=epoch,
             max_rollout_iter=args.max_rollout_iter,
             rollout_config=rollout_config,
         )
