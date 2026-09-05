@@ -292,6 +292,15 @@
       </div>
     </div>
     <div class="chart">
+      <div class="chart-title">Avg cycle length</div>
+      <canvas id="cycleLengthChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend">
+        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
+        <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
+      </div>
+    </div>
+    <div class="chart">
       <div class="chart-title">Epoch time</div>
       <canvas id="epochTimeChart"></canvas>
       <div class="axis-x-label">epoch</div>
@@ -431,6 +440,7 @@
         { label: "Learning rate", value: args.lr },
         { label: "Weight decay", value: args.weight_decay ?? 0 },
         { label: "Hidden layers", value: formatHiddenSizes(args) },
+        { label: "Rollout mode", value: args.rollout_mode ?? "categorical" },
         { label: "Max rollout iter", value: args.max_rollout_iter ?? 100 },
         { label: "Epochs", value: args.epochs },
       ];
@@ -612,6 +622,7 @@
         { label: "Cell accuracy", value: test.cell_acc, format: pct },
         { label: "Puzzle accuracy", value: test.puzzle_acc, format: pct },
         { label: "Avg rollout steps", value: test.avg_rollout_steps, format: v => Number(v).toFixed(1) },
+        { label: "Avg cycle length", value: test.avg_cycle_length, format: v => Number(v).toFixed(1) },
         { label: "Max-iter rollout", value: test.max_iter_pct, format: pct },
       ]
         .filter(stat => stat.value != null)
@@ -630,6 +641,7 @@
         cell_acc: last.test_cell_acc ?? last.eval_cell_acc,
         puzzle_acc: last.test_puzzle_acc ?? last.eval_puzzle_acc,
         avg_rollout_steps: last.test_avg_rollout_steps ?? last.eval_avg_rollout_steps,
+        avg_cycle_length: last.test_avg_cycle_length ?? last.eval_avg_cycle_length,
         max_iter_pct: last.test_max_iter_pct ?? last.eval_max_iter_pct,
       };
     }
@@ -665,6 +677,10 @@
         yMax: 1,
         xLabels,
         formatY: pct,
+      });
+      drawSeries(document.getElementById("cycleLengthChart"), metricSeries(epochs, "train_avg_cycle_length", "val_avg_cycle_length"), {
+        xLabels,
+        formatY: v => Number(v).toFixed(1),
       });
       drawSeries(document.getElementById("epochTimeChart"), [
         { color: "#2563eb", values: epochs.map(e => e.epoch_seconds ?? null) },

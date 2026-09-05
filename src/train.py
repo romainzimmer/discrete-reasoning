@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import NextStateModel
-from rollout import DEFAULT_MAX_ROLLOUT_ITER, rollout_solve, rollout_train_batch
+from rollout import DEFAULT_MAX_ROLLOUT_ITER, RolloutConfig, rollout_solve, rollout_train_batch
 from viz_data import (
     load_manifest,
     save_epoch_trajectories,
@@ -30,6 +30,7 @@ class EpochStats:
     loss: float
     avg_rollout_steps: float
     max_iter_pct: float
+    avg_cycle_length: float = 0.0
     cell_acc: float = 0.0
     puzzle_acc: float = 0.0
 
@@ -130,11 +131,13 @@ def save_checkpoint(
         "train_loss": train.loss,
         "train_avg_rollout_steps": train.avg_rollout_steps,
         "train_max_iter_pct": train.max_iter_pct,
+        "train_avg_cycle_length": train.avg_cycle_length,
         "train_cell_acc": train.cell_acc,
         "train_puzzle_acc": train.puzzle_acc,
         "val_loss": val.loss,
         "val_avg_rollout_steps": val.avg_rollout_steps,
         "val_max_iter_pct": val.max_iter_pct,
+        "val_avg_cycle_length": val.avg_cycle_length,
         "val_cell_acc": val.cell_acc,
         "val_puzzle_acc": val.puzzle_acc,
         "args": vars(args),
@@ -145,6 +148,7 @@ def save_checkpoint(
                 "test_loss": test.loss,
                 "test_avg_rollout_steps": test.avg_rollout_steps,
                 "test_max_iter_pct": test.max_iter_pct,
+                "test_avg_cycle_length": test.avg_cycle_length,
                 "test_cell_acc": test.cell_acc,
                 "test_puzzle_acc": test.puzzle_acc,
             }
@@ -190,11 +194,14 @@ def train_epoch(
     device: torch.device,
     *,
     max_rollout_iter: int,
+    rollout_config: RolloutConfig,
 ) -> EpochStats:
     model.train()
     total_loss = 0.0
     total_steps = 0
     max_iter_count = 0
+    total_cycle_length = 0.0
+    cycle_count = 0
     n = 0
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
@@ -205,6 +212,7 @@ def train_epoch(
             batch["answer"],
             loss_fn,
             max_rollout_iter=max_rollout_iter,
+            config=rollout_config,
         )
         optimizer.zero_grad()
         result.loss.backward()
@@ -212,11 +220,15 @@ def train_epoch(
         total_loss += result.loss.item()
         total_steps += result.steps
         max_iter_count += int(result.hit_max_iter)
+        if result.cycle_length is not None:
+            total_cycle_length += result.cycle_length
+            cycle_count += 1
         n += 1
     return EpochStats(
         loss=total_loss / n,
         avg_rollout_steps=total_steps / n,
         max_iter_pct=max_iter_count / n,
+        avg_cycle_length=total_cycle_length / cycle_count if cycle_count else 0.0,
     )
 
 
@@ -228,11 +240,14 @@ def measure_split(
     device: torch.device,
     *,
     max_rollout_iter: int,
+    rollout_config: RolloutConfig,
 ) -> EpochStats:
     model.eval()
     total_loss = 0.0
     total_steps = 0
     max_iter_count = 0
+    total_cycle_length = 0.0
+    cycle_count = 0
     correct_cells = 0
     total_cells = 0
     correct_puzzles = 0
@@ -246,10 +261,14 @@ def measure_split(
             batch["answer"],
             loss_fn,
             max_rollout_iter=max_rollout_iter,
+            config=rollout_config,
         )
         total_loss += result.loss.item()
         total_steps += result.steps
         max_iter_count += int(result.hit_max_iter)
+        if result.cycle_length is not None:
+            total_cycle_length += result.cycle_length
+            cycle_count += 1
         n += 1
 
         pred = rollout_solve(
@@ -268,6 +287,7 @@ def measure_split(
         loss=total_loss / n,
         avg_rollout_steps=total_steps / n,
         max_iter_pct=max_iter_count / n,
+        avg_cycle_length=total_cycle_length / cycle_count if cycle_count else 0.0,
         cell_acc=correct_cells / total_cells,
         puzzle_acc=correct_puzzles / n,
     )
@@ -277,7 +297,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train rollout sudoku model")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=0.0, help="L2 regularization (Adam weight decay)")
+    parser.add_argument("--weight-decay", type=float, default=0.0, help="L2 regularization on weights only (not bias)")
     parser.add_argument(
         "--hidden-sizes",
         type=int,
@@ -298,7 +318,13 @@ def main() -> None:
     parser.add_argument("--val-fraction", type=float, default=0.1, help="Validation fraction from train.csv pool")
     parser.add_argument("--val-samples", type=int, default=None, help="Validation puzzles (overrides val-fraction)")
     parser.add_argument("--test-samples", type=int, default=None, help="Test puzzles cap (defaults to max-samples)")
-    parser.add_argument("--viz-samples", type=int, default=5, help="Puzzles per split to save for viz")
+    parser.add_argument("--viz-samples", type=int, default=10, help="Puzzles per split to save for viz")
+    parser.add_argument(
+        "--rollout-mode",
+        choices=["threshold", "categorical"],
+        default="categorical",
+        help="threshold: BCE + threshold train rollout, argmax eval; categorical: CE + argmax everywhere",
+    )
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
@@ -332,8 +358,27 @@ def main() -> None:
     test_loader = DataLoader(test_ds, batch_size=1, collate_fn=collate_puzzles)
 
     model = NextStateModel(hidden_sizes=args.hidden_sizes).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    loss_fn = nn.BCEWithLogitsLoss()
+    decay_params, no_decay_params = [], []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if name.endswith(".bias"):
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+    optimizer = torch.optim.Adam(
+        [
+            {"params": decay_params, "weight_decay": args.weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ],
+        lr=args.lr,
+    )
+    loss_fn = (
+        nn.BCEWithLogitsLoss()
+        if args.rollout_mode == "threshold"
+        else nn.CrossEntropyLoss()
+    )
+    rollout_config = RolloutConfig(mode=args.rollout_mode)
     best_val_loss = float("inf")
     manifest = load_manifest(run_dir)
     viz_rows = {
@@ -344,13 +389,28 @@ def main() -> None:
     for epoch in range(1, args.epochs + 1):
         epoch_start = time.perf_counter()
         train = train_epoch(
-            model, train_loader, optimizer, loss_fn, device, max_rollout_iter=args.max_rollout_iter
+            model,
+            train_loader,
+            optimizer,
+            loss_fn,
+            device,
+            max_rollout_iter=args.max_rollout_iter,
+            rollout_config=rollout_config,
         )
+        epoch_seconds = time.perf_counter() - epoch_start
         train.cell_acc, train.puzzle_acc = measure_accuracy(
-            model, train_loader, device, max_rollout_iter=args.max_rollout_iter
+            model,
+            train_loader,
+            device,
+            max_rollout_iter=args.max_rollout_iter,
         )
         val = measure_split(
-            model, val_loader, loss_fn, device, max_rollout_iter=args.max_rollout_iter
+            model,
+            val_loader,
+            loss_fn,
+            device,
+            max_rollout_iter=args.max_rollout_iter,
+            rollout_config=rollout_config,
         )
         save_epoch_checkpoint(run_dir, epoch, model)
         model.eval()
@@ -381,10 +441,14 @@ def main() -> None:
         if val.loss < best_val_loss:
             best_val_loss = val.loss
             test = measure_split(
-                model, test_loader, loss_fn, device, max_rollout_iter=args.max_rollout_iter
+                model,
+                test_loader,
+                loss_fn,
+                device,
+                max_rollout_iter=args.max_rollout_iter,
+                rollout_config=rollout_config,
             )
             save_checkpoint(run_dir / "best.pt", **ckpt_kwargs, test=test)
-        epoch_seconds = time.perf_counter() - epoch_start
         save_epoch_metrics(
             run_dir,
             epoch=epoch,
@@ -400,6 +464,7 @@ def main() -> None:
             f"loss={train.loss:.4f}/{val.loss:.4f} "
             f"cell_acc={train.cell_acc:.4f}/{val.cell_acc:.4f} "
             f"puzzle_acc={train.puzzle_acc:.4f}/{val.puzzle_acc:.4f} "
+            f"cycle_len={train.avg_cycle_length:.1f}/{val.avg_cycle_length:.1f} "
             f"time={epoch_seconds:.1f}s",
             flush=True,
         )
