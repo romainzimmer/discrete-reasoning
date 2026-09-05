@@ -325,7 +325,7 @@ def main() -> None:
     parser.add_argument(
         "--rollout-mode",
         choices=["threshold", "categorical"],
-        default="categorical",
+        default="threshold",
         help="threshold: BCE + threshold rollout; categorical: CE + argmax rollout; acc/viz use argmax final",
     )
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)

@@ -14,7 +14,7 @@ RolloutMode = Literal["threshold", "categorical"]
 
 @dataclass(frozen=True)
 class RolloutConfig:
-    mode: RolloutMode = "categorical"
+    mode: RolloutMode = "threshold"
 
 
 @dataclass
