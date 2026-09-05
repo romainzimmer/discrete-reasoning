@@ -37,9 +37,27 @@ def logits_to_state(logits: torch.Tensor, clues: torch.Tensor, *, threshold: boo
 
 
 def predict_grid(logits: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
-    """Hard argmax decode for inference rollout."""
+    """Hard argmax decode."""
     pred = decode_logits(logits)
     return torch.where(clues > 0, clues, pred)
+
+
+def decode_grid(logits: torch.Tensor, clues: torch.Tensor, *, threshold: bool = False) -> torch.Tensor:
+    """Decode logits to a digit grid using the active rollout mode."""
+    if threshold:
+        return onehot_to_grid(logits_to_state(logits, clues))
+    return predict_grid(logits, clues)
+
+
+def _threshold_state(config: RolloutConfig) -> bool:
+    return config.mode == "threshold"
+
+
+def final_eval_grid(logits: torch.Tensor, clues: torch.Tensor, config: RolloutConfig) -> torch.Tensor:
+    """Final eval readout: argmax (softmax winner) for categorical, mode decode for threshold."""
+    if config.mode == "categorical":
+        return predict_grid(logits, clues)
+    return decode_grid(logits, clues, threshold=True)
 
 
 def target_mask(target: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
@@ -173,7 +191,7 @@ def rollout_train_batch(
 ) -> RolloutResult:
     """Rollout with t+2 targets outside the cycle and answer targets inside."""
     config = config or RolloutConfig()
-    threshold_state = config.mode == "threshold"
+    threshold_state = _threshold_state(config)
     states, logits_list, cycle_length, hit_max_iter = _run_rollout(
         model, clues_onehot, clues, max_rollout_iter, threshold_state=threshold_state
     )
@@ -202,12 +220,16 @@ def rollout_solve(
     clues_onehot: torch.Tensor,
     clues: torch.Tensor,
     max_rollout_iter: int = DEFAULT_MAX_ROLLOUT_ITER,
+    *,
+    config: RolloutConfig | None = None,
 ) -> torch.Tensor:
-    """Run f until revisit or max_rollout_iter; always argmax decode."""
+    """Run f until revisit or max_rollout_iter."""
+    config = config or RolloutConfig()
+    threshold_state = _threshold_state(config)
     _, logits_list, _, _ = _run_rollout(
-        model, clues_onehot, clues, max_rollout_iter, threshold_state=False
+        model, clues_onehot, clues, max_rollout_iter, threshold_state=threshold_state
     )
-    return predict_grid(logits_list[-1], clues)
+    return final_eval_grid(logits_list[-1], clues, config)
 
 
 @torch.no_grad()
@@ -216,14 +238,23 @@ def rollout_trace(
     clues_onehot: torch.Tensor,
     clues: torch.Tensor,
     max_rollout_iter: int = DEFAULT_MAX_ROLLOUT_ITER,
+    *,
+    config: RolloutConfig | None = None,
 ) -> list[str]:
-    """Return grid strings at each rollout step; always argmax decode."""
+    """Return grid strings at each rollout step, plus argmax final readout when it differs."""
+    config = config or RolloutConfig()
+    threshold_state = _threshold_state(config)
     _, logits_list, cycle_length, _ = _run_rollout(
-        model, clues_onehot, clues, max_rollout_iter, threshold_state=False
+        model, clues_onehot, clues, max_rollout_iter, threshold_state=threshold_state
     )
     grids = [tensor_to_string(clues[0] if clues.dim() == 3 else clues)]
     n_steps = len(logits_list) if cycle_length is None else len(logits_list) - 1
     for i in range(n_steps):
-        grid = predict_grid(logits_list[i], clues)
+        grid = decode_grid(logits_list[i], clues, threshold=threshold_state)
         grids.append(tensor_to_string(grid[0] if grid.dim() == 3 else grid))
+    if logits_list and config.mode == "categorical":
+        final = final_eval_grid(logits_list[-1], clues, config)
+        final_str = tensor_to_string(final[0] if final.dim() == 3 else final)
+        if grids[-1] != final_str:
+            grids.append(final_str)
     return grids

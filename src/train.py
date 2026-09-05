@@ -163,6 +163,7 @@ def measure_accuracy(
     device: torch.device,
     *,
     max_rollout_iter: int,
+    rollout_config: RolloutConfig,
 ) -> tuple[float, float]:
     model.eval()
     correct_cells = 0
@@ -176,6 +177,7 @@ def measure_accuracy(
             batch["clues_onehot"],
             batch["clues"],
             max_rollout_iter=max_rollout_iter,
+            config=rollout_config,
         )[0]
         answer = batch["answer"][0]
         correct_cells += (pred == answer).sum().item()
@@ -276,6 +278,7 @@ def measure_split(
             batch["clues_onehot"],
             batch["clues"],
             max_rollout_iter=max_rollout_iter,
+            config=rollout_config,
         )[0]
         answer = batch["answer"][0]
         correct_cells += (pred == answer).sum().item()
@@ -323,7 +326,7 @@ def main() -> None:
         "--rollout-mode",
         choices=["threshold", "categorical"],
         default="categorical",
-        help="threshold: BCE + threshold train rollout, argmax eval; categorical: CE + argmax everywhere",
+        help="threshold: BCE + threshold decode; categorical: CE + argmax rollout, argmax final eval readout",
     )
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -403,6 +406,7 @@ def main() -> None:
             train_loader,
             device,
             max_rollout_iter=args.max_rollout_iter,
+            rollout_config=rollout_config,
         )
         val = measure_split(
             model,
@@ -425,6 +429,7 @@ def main() -> None:
                 run_dir=run_dir,
                 device=device,
                 max_rollout_iter=args.max_rollout_iter,
+                rollout_config=rollout_config,
             )
             update_manifest_split(manifest, split, epoch, puzzle_indices)
         save_manifest(run_dir, manifest)

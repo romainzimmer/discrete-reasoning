@@ -8,7 +8,7 @@ import torch
 from data import puzzle_to_tensor
 from encoding import grid_to_onehot
 from model import NextStateModel
-from rollout import rollout_trace
+from rollout import RolloutConfig, rollout_trace
 
 
 def json_safe(value):
@@ -54,6 +54,7 @@ def build_trajectory(
     puzzle_index: int,
     device: torch.device,
     max_rollout_iter: int,
+    rollout_config: RolloutConfig,
 ) -> dict:
     clues = puzzle_to_tensor(row["question"]).unsqueeze(0).to(device)
     states = rollout_trace(
@@ -61,6 +62,7 @@ def build_trajectory(
         grid_to_onehot(clues),
         clues,
         max_rollout_iter=max_rollout_iter,
+        config=rollout_config,
     )
     return {
         "question": row["question"],
@@ -85,6 +87,7 @@ def save_epoch_trajectories(
     run_dir: Path,
     device: torch.device,
     max_rollout_iter: int,
+    rollout_config: RolloutConfig,
 ) -> list[int]:
     puzzle_indices: list[int] = []
     for puzzle_index, row in enumerate(rows):
@@ -96,6 +99,7 @@ def save_epoch_trajectories(
             puzzle_index=puzzle_index,
             device=device,
             max_rollout_iter=max_rollout_iter,
+            rollout_config=rollout_config,
         )
         save_trajectory(run_dir, split, epoch, puzzle_index, payload)
         puzzle_indices.append(puzzle_index)
