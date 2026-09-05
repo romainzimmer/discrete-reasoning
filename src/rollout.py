@@ -23,6 +23,7 @@ class RolloutResult:
     steps: int
     hit_max_iter: bool
     cycle_length: int | None = None
+    pred: torch.Tensor | None = None
 
 
 def logits_to_state(logits: torch.Tensor, clues: torch.Tensor, *, threshold: bool = False) -> torch.Tensor:
@@ -191,11 +192,13 @@ def rollout_train_batch(
     )
 
     steps = len(logits_list)
+    pred = final_eval_grid(logits_list[-1].detach(), clues)
     return RolloutResult(
         loss=total_loss / max(steps, 1),
         steps=steps,
         hit_max_iter=hit_max_iter,
         cycle_length=cycle_length,
+        pred=pred,
     )
 
 

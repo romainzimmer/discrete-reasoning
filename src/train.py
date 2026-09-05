@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import NextStateModel
-from rollout import DEFAULT_MAX_ROLLOUT_ITER, RolloutConfig, rollout_solve, rollout_train_batch
+from rollout import DEFAULT_MAX_ROLLOUT_ITER, RolloutConfig, RolloutResult, rollout_train_batch
 from viz_data import (
     load_manifest,
     save_epoch_trajectories,
@@ -161,45 +161,85 @@ def save_checkpoint(
     torch.save(payload, path)
 
 
-@torch.no_grad()
-def measure_accuracy(
-    model: NextStateModel,
-    loader: DataLoader,
-    device: torch.device,
+def _update_accuracy(
+    pred: torch.Tensor,
+    answer: torch.Tensor,
     *,
-    epoch: int,
-    epochs: int,
-    max_rollout_iter: int,
-    rollout_config: RolloutConfig,
-) -> tuple[float, float]:
-    model.eval()
-    correct_cells = 0
-    total_cells = 0
-    correct_puzzles = 0
-    n = 0
-    for batch in tqdm(
-        loader,
-        desc=_epoch_desc(epoch, epochs, "train acc"),
-        leave=False,
-        unit="puzzle",
-    ):
-        batch = {k: v.to(device) for k, v in batch.items()}
-        pred = rollout_solve(
-            model,
-            batch["clues_onehot"],
-            batch["clues"],
-            max_rollout_iter=max_rollout_iter,
-            config=rollout_config,
-        )[0]
-        answer = batch["answer"][0]
-        correct_cells += (pred == answer).sum().item()
-        total_cells += answer.numel()
-        if torch.equal(pred, answer):
-            correct_puzzles += 1
-        n += 1
+    correct_cells: int,
+    total_cells: int,
+    correct_puzzles: int,
+) -> tuple[int, int, int]:
+    correct_cells += (pred == answer).sum().item()
+    total_cells += answer.numel()
+    if torch.equal(pred, answer):
+        correct_puzzles += 1
+    return correct_cells, total_cells, correct_puzzles
+
+
+def _accumulate_rollout_stats(
+    result: RolloutResult,
+    answer: torch.Tensor,
+    *,
+    total_loss: float,
+    total_steps: int,
+    max_iter_count: int,
+    total_cycle_length: float,
+    cycle_count: int,
+    correct_cells: int,
+    total_cells: int,
+    correct_puzzles: int,
+    n: int,
+) -> tuple[float, int, int, float, int, int, int, int, int]:
+    total_loss += result.loss.item()
+    total_steps += result.steps
+    max_iter_count += int(result.hit_max_iter)
+    if result.cycle_length is not None:
+        total_cycle_length += result.cycle_length
+        cycle_count += 1
+    n += 1
+    if result.pred is not None:
+        correct_cells, total_cells, correct_puzzles = _update_accuracy(
+            result.pred[0],
+            answer[0],
+            correct_cells=correct_cells,
+            total_cells=total_cells,
+            correct_puzzles=correct_puzzles,
+        )
+    return (
+        total_loss,
+        total_steps,
+        max_iter_count,
+        total_cycle_length,
+        cycle_count,
+        correct_cells,
+        total_cells,
+        correct_puzzles,
+        n,
+    )
+
+
+def _stats_from_accumulators(
+    *,
+    total_loss: float,
+    total_steps: int,
+    max_iter_count: int,
+    total_cycle_length: float,
+    cycle_count: int,
+    correct_cells: int,
+    total_cells: int,
+    correct_puzzles: int,
+    n: int,
+) -> EpochStats:
     if n == 0:
-        return 0.0, 0.0
-    return correct_cells / total_cells, correct_puzzles / n
+        return EpochStats(loss=0.0, avg_rollout_steps=0.0, max_iter_pct=0.0)
+    return EpochStats(
+        loss=total_loss / n,
+        avg_rollout_steps=total_steps / n,
+        max_iter_pct=max_iter_count / n,
+        avg_cycle_length=total_cycle_length / cycle_count if cycle_count else 0.0,
+        cell_acc=correct_cells / total_cells if total_cells else 0.0,
+        puzzle_acc=correct_puzzles / n,
+    )
 
 
 def train_epoch(
@@ -220,6 +260,9 @@ def train_epoch(
     max_iter_count = 0
     total_cycle_length = 0.0
     cycle_count = 0
+    correct_cells = 0
+    total_cells = 0
+    correct_puzzles = 0
     n = 0
     progress = tqdm(
         loader,
@@ -241,27 +284,47 @@ def train_epoch(
         optimizer.zero_grad()
         result.loss.backward()
         optimizer.step()
-        total_loss += result.loss.item()
-        total_steps += result.steps
-        max_iter_count += int(result.hit_max_iter)
-        if result.cycle_length is not None:
-            total_cycle_length += result.cycle_length
-            cycle_count += 1
-        n += 1
+        (
+            total_loss,
+            total_steps,
+            max_iter_count,
+            total_cycle_length,
+            cycle_count,
+            correct_cells,
+            total_cells,
+            correct_puzzles,
+            n,
+        ) = _accumulate_rollout_stats(
+            result,
+            batch["answer"],
+            total_loss=total_loss,
+            total_steps=total_steps,
+            max_iter_count=max_iter_count,
+            total_cycle_length=total_cycle_length,
+            cycle_count=cycle_count,
+            correct_cells=correct_cells,
+            total_cells=total_cells,
+            correct_puzzles=correct_puzzles,
+            n=n,
+        )
         progress.set_postfix(
             loss=f"{total_loss / n:.4f}",
             steps=f"{total_steps / n:.1f}",
+            cell_acc=f"{correct_cells / total_cells:.4f}",
             cycle=f"{total_cycle_length / cycle_count if cycle_count else 0.0:.1f}",
             refresh=False,
         )
     progress.close()
-    if n == 0:
-        return EpochStats(loss=0.0, avg_rollout_steps=0.0, max_iter_pct=0.0)
-    return EpochStats(
-        loss=total_loss / n,
-        avg_rollout_steps=total_steps / n,
-        max_iter_pct=max_iter_count / n,
-        avg_cycle_length=total_cycle_length / cycle_count if cycle_count else 0.0,
+    return _stats_from_accumulators(
+        total_loss=total_loss,
+        total_steps=total_steps,
+        max_iter_count=max_iter_count,
+        total_cycle_length=total_cycle_length,
+        cycle_count=cycle_count,
+        correct_cells=correct_cells,
+        total_cells=total_cells,
+        correct_puzzles=correct_puzzles,
+        n=n,
     )
 
 
@@ -305,42 +368,45 @@ def measure_split(
             max_rollout_iter=max_rollout_iter,
             config=rollout_config,
         )
-        total_loss += result.loss.item()
-        total_steps += result.steps
-        max_iter_count += int(result.hit_max_iter)
-        if result.cycle_length is not None:
-            total_cycle_length += result.cycle_length
-            cycle_count += 1
-        n += 1
-
-        pred = rollout_solve(
-            model,
-            batch["clues_onehot"],
-            batch["clues"],
-            max_rollout_iter=max_rollout_iter,
-            config=rollout_config,
-        )[0]
-        answer = batch["answer"][0]
-        correct_cells += (pred == answer).sum().item()
-        total_cells += answer.numel()
-        if torch.equal(pred, answer):
-            correct_puzzles += 1
+        (
+            total_loss,
+            total_steps,
+            max_iter_count,
+            total_cycle_length,
+            cycle_count,
+            correct_cells,
+            total_cells,
+            correct_puzzles,
+            n,
+        ) = _accumulate_rollout_stats(
+            result,
+            batch["answer"],
+            total_loss=total_loss,
+            total_steps=total_steps,
+            max_iter_count=max_iter_count,
+            total_cycle_length=total_cycle_length,
+            cycle_count=cycle_count,
+            correct_cells=correct_cells,
+            total_cells=total_cells,
+            correct_puzzles=correct_puzzles,
+            n=n,
+        )
         progress.set_postfix(
             loss=f"{total_loss / n:.4f}",
             cell_acc=f"{correct_cells / total_cells:.4f}",
             refresh=False,
         )
     progress.close()
-    if n == 0:
-        return EpochStats(loss=0.0, avg_rollout_steps=0.0, max_iter_pct=0.0)
-
-    return EpochStats(
-        loss=total_loss / n,
-        avg_rollout_steps=total_steps / n,
-        max_iter_pct=max_iter_count / n,
-        avg_cycle_length=total_cycle_length / cycle_count if cycle_count else 0.0,
-        cell_acc=correct_cells / total_cells,
-        puzzle_acc=correct_puzzles / n,
+    return _stats_from_accumulators(
+        total_loss=total_loss,
+        total_steps=total_steps,
+        max_iter_count=max_iter_count,
+        total_cycle_length=total_cycle_length,
+        cycle_count=cycle_count,
+        correct_cells=correct_cells,
+        total_cells=total_cells,
+        correct_puzzles=correct_puzzles,
+        n=n,
     )
 
 
@@ -451,15 +517,6 @@ def main() -> None:
             rollout_config=rollout_config,
         )
         epoch_seconds = time.perf_counter() - epoch_start
-        train.cell_acc, train.puzzle_acc = measure_accuracy(
-            model,
-            train_loader,
-            device,
-            epoch=epoch,
-            epochs=args.epochs,
-            max_rollout_iter=args.max_rollout_iter,
-            rollout_config=rollout_config,
-        )
         val = measure_split(
             model,
             val_loader,
