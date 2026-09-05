@@ -434,7 +434,7 @@ def main() -> None:
     parser.add_argument("--max-samples", type=int, default=None, help="Max puzzles from train.csv before train/val split")
     parser.add_argument("--val-fraction", type=float, default=0.1, help="Validation fraction from train.csv pool")
     parser.add_argument("--val-samples", type=int, default=None, help="Validation puzzles (overrides val-fraction)")
-    parser.add_argument("--test-samples", type=int, default=None, help="Test puzzles cap (defaults to max-samples)")
+    parser.add_argument("--test-samples", type=int, default=1000, help="Test puzzles cap from test.csv")
     parser.add_argument("--viz-samples", type=int, default=10, help="Puzzles per split to save for viz")
     parser.add_argument(
         "--rollout-mode",
@@ -460,8 +460,7 @@ def main() -> None:
         val_fraction=args.val_fraction,
         max_samples=args.max_samples,
     )
-    test_cap = args.test_samples if args.test_samples is not None else args.max_samples
-    test_rows = filter_rows("test", **ds_kwargs, max_samples=test_cap)
+    test_rows = filter_rows("test", **ds_kwargs, max_samples=args.test_samples)
 
     train_ds = PuzzleDataset(rows=train_rows)
     val_ds = PuzzleDataset(rows=val_rows)
