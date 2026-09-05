@@ -64,6 +64,7 @@ dependencies = [
     { name = "huggingface-hub" },
     { name = "numpy", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "torch" },
+    { name = "tqdm" },
 ]
 
 [package.metadata]
@@ -72,6 +73,7 @@ requires-dist = [
     { name = "numpy", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'", specifier = "<2" },
     { name = "torch", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'", specifier = ">=2.0.0" },
     { name = "torch", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'", specifier = ">=2.0.0,<2.3.0" },
+    { name = "tqdm", specifier = ">=4.66.0" },
 ]
 
 [[package]]

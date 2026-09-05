@@ -6,7 +6,7 @@ from typing import Literal
 import torch
 
 from data import tensor_to_string
-from encoding import decode_logits, grid_to_onehot, onehot_to_grid
+from encoding import attach_clue_mask, decode_logits, grid_to_onehot, onehot_to_grid
 from model import NextStateModel
 
 RolloutMode = Literal["threshold", "categorical"]
@@ -103,7 +103,7 @@ def _run_rollout(
     threshold_state: bool,
 ) -> tuple[list[torch.Tensor], list[torch.Tensor], int | None, bool]:
     """Collect states and logits; stop on revisit or max_rollout_iter."""
-    state = clues_onehot
+    state = attach_clue_mask(clues_onehot, clues)
     states = [state]
     visited: dict[bytes, int] = {_state_key(state): 0}
     logits_list: list[torch.Tensor] = []
@@ -113,7 +113,8 @@ def _run_rollout(
     for _ in range(max_rollout_iter):
         logits = model(state)
         logits_list.append(logits)
-        new_state = logits_to_state(logits, clues, threshold=threshold_state)
+        new_onehot = logits_to_state(logits, clues, threshold=threshold_state)
+        new_state = attach_clue_mask(new_onehot, clues)
         key = _state_key(new_state)
         if key in visited:
             cycle_length = len(states) - visited[key]

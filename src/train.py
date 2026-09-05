@@ -11,6 +11,7 @@ from pathlib import Path
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import NextStateModel
@@ -23,6 +24,10 @@ from viz_data import (
 )
 
 DEFAULT_RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
+
+
+def _epoch_desc(epoch: int, epochs: int, phase: str) -> str:
+    return f"epoch {epoch}/{epochs} {phase}"
 
 
 @dataclass
@@ -162,6 +167,8 @@ def measure_accuracy(
     loader: DataLoader,
     device: torch.device,
     *,
+    epoch: int,
+    epochs: int,
     max_rollout_iter: int,
     rollout_config: RolloutConfig,
 ) -> tuple[float, float]:
@@ -170,7 +177,12 @@ def measure_accuracy(
     total_cells = 0
     correct_puzzles = 0
     n = 0
-    for batch in loader:
+    for batch in tqdm(
+        loader,
+        desc=_epoch_desc(epoch, epochs, "train acc"),
+        leave=False,
+        unit="puzzle",
+    ):
         batch = {k: v.to(device) for k, v in batch.items()}
         pred = rollout_solve(
             model,
@@ -185,6 +197,8 @@ def measure_accuracy(
         if torch.equal(pred, answer):
             correct_puzzles += 1
         n += 1
+    if n == 0:
+        return 0.0, 0.0
     return correct_cells / total_cells, correct_puzzles / n
 
 
@@ -196,6 +210,7 @@ def train_epoch(
     device: torch.device,
     *,
     epoch: int,
+    epochs: int,
     max_rollout_iter: int,
     rollout_config: RolloutConfig,
 ) -> EpochStats:
@@ -206,10 +221,13 @@ def train_epoch(
     total_cycle_length = 0.0
     cycle_count = 0
     n = 0
-    n_total = len(loader)
-    log_interval = max(1, n_total // 10)
-    next_log_at = log_interval
-    for batch in loader:
+    progress = tqdm(
+        loader,
+        desc=_epoch_desc(epoch, epochs, "train"),
+        leave=False,
+        unit="puzzle",
+    )
+    for batch in progress:
         batch = {k: v.to(device) for k, v in batch.items()}
         result = rollout_train_batch(
             model,
@@ -230,16 +248,15 @@ def train_epoch(
             total_cycle_length += result.cycle_length
             cycle_count += 1
         n += 1
-        if n >= next_log_at:
-            pct = min(100, round(100 * n / n_total))
-            print(
-                f"epoch {epoch} [{pct}%]: "
-                f"loss={total_loss / n:.4f} "
-                f"steps={total_steps / n:.1f} "
-                f"cycle_len={total_cycle_length / cycle_count if cycle_count else 0.0:.1f}",
-                flush=True,
-            )
-            next_log_at += log_interval
+        progress.set_postfix(
+            loss=f"{total_loss / n:.4f}",
+            steps=f"{total_steps / n:.1f}",
+            cycle=f"{total_cycle_length / cycle_count if cycle_count else 0.0:.1f}",
+            refresh=False,
+        )
+    progress.close()
+    if n == 0:
+        return EpochStats(loss=0.0, avg_rollout_steps=0.0, max_iter_pct=0.0)
     return EpochStats(
         loss=total_loss / n,
         avg_rollout_steps=total_steps / n,
@@ -255,6 +272,9 @@ def measure_split(
     loss_fn: nn.Module,
     device: torch.device,
     *,
+    epoch: int,
+    epochs: int,
+    phase: str,
     max_rollout_iter: int,
     rollout_config: RolloutConfig,
 ) -> EpochStats:
@@ -268,7 +288,13 @@ def measure_split(
     total_cells = 0
     correct_puzzles = 0
     n = 0
-    for batch in loader:
+    progress = tqdm(
+        loader,
+        desc=_epoch_desc(epoch, epochs, phase),
+        leave=False,
+        unit="puzzle",
+    )
+    for batch in progress:
         batch = {k: v.to(device) for k, v in batch.items()}
         result = rollout_train_batch(
             model,
@@ -299,6 +325,14 @@ def measure_split(
         total_cells += answer.numel()
         if torch.equal(pred, answer):
             correct_puzzles += 1
+        progress.set_postfix(
+            loss=f"{total_loss / n:.4f}",
+            cell_acc=f"{correct_cells / total_cells:.4f}",
+            refresh=False,
+        )
+    progress.close()
+    if n == 0:
+        return EpochStats(loss=0.0, avg_rollout_steps=0.0, max_iter_pct=0.0)
 
     return EpochStats(
         loss=total_loss / n,
@@ -412,6 +446,7 @@ def main() -> None:
             loss_fn,
             device,
             epoch=epoch,
+            epochs=args.epochs,
             max_rollout_iter=args.max_rollout_iter,
             rollout_config=rollout_config,
         )
@@ -420,6 +455,8 @@ def main() -> None:
             model,
             train_loader,
             device,
+            epoch=epoch,
+            epochs=args.epochs,
             max_rollout_iter=args.max_rollout_iter,
             rollout_config=rollout_config,
         )
@@ -428,6 +465,9 @@ def main() -> None:
             val_loader,
             loss_fn,
             device,
+            epoch=epoch,
+            epochs=args.epochs,
+            phase="val",
             max_rollout_iter=args.max_rollout_iter,
             rollout_config=rollout_config,
         )
@@ -465,6 +505,9 @@ def main() -> None:
                 test_loader,
                 loss_fn,
                 device,
+                epoch=epoch,
+                epochs=args.epochs,
+                phase="test",
                 max_rollout_iter=args.max_rollout_iter,
                 rollout_config=rollout_config,
             )
@@ -480,7 +523,7 @@ def main() -> None:
         if test is not None:
             save_best_test_metrics(run_dir, epoch=epoch, test=test)
         print(
-            f"epoch {epoch}: "
+            f"epoch {epoch}/{args.epochs}: "
             f"loss={train.loss:.4f}/{val.loss:.4f} "
             f"cell_acc={train.cell_acc:.4f}/{val.cell_acc:.4f} "
             f"puzzle_acc={train.puzzle_acc:.4f}/{val.puzzle_acc:.4f} "

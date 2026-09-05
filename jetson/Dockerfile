@@ -24,12 +24,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml README.md ./
 RUN mkdir -p src
 
-# Install dependencies from pyproject.toml (cached until pyproject.toml changes).
+# Install torch from the CUDA index, then the rest from PyPI.
+# Using the torch index as --index-url for `pip install .` makes pip
+# apply pytorch.org hashes to extra-index wheels and fail with
+# "unknown package" hash mismatches.
 ARG TORCH_INDEX=https://download.pytorch.org/whl/cu132
 RUN pip3 install --no-cache-dir --default-timeout=86400 \
-    . \
-    --index-url ${TORCH_INDEX} \
-    --extra-index-url https://pypi.org/simple
+    torch \
+    --index-url ${TORCH_INDEX}
+RUN pip3 install --no-cache-dir --default-timeout=86400 .
 
 COPY src ./src
 RUN pip3 install --no-cache-dir --no-deps .

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import torch
 
+NUM_DIGIT_CHANNELS = 9
+NUM_STATE_CHANNELS = NUM_DIGIT_CHANNELS + 1
+
 
 def grid_to_onehot(grid: torch.Tensor) -> torch.Tensor:
     """Encode a grid as one-hot per cell.
@@ -20,6 +23,16 @@ def grid_to_onehot(grid: torch.Tensor) -> torch.Tensor:
         idx = torch.arange(mask.sum(), device=grid.device)
         onehot.view(-1, 9)[idx, digits] = 1.0
     return onehot
+
+
+def clue_mask(clues: torch.Tensor) -> torch.Tensor:
+    """(..., 9, 9) -> (..., 9, 9, 1). 1 = given clue, 0 = model-filled or empty."""
+    return (clues > 0).unsqueeze(-1).to(dtype=torch.float32)
+
+
+def attach_clue_mask(onehot: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
+    """Stack digit one-hot with a per-cell clue indicator."""
+    return torch.cat([onehot, clue_mask(clues)], dim=-1)
 
 
 def decode_logits(logits: torch.Tensor) -> torch.Tensor:
