@@ -482,7 +482,7 @@ def main() -> None:
             no_decay_params.append(param)
         else:
             decay_params.append(param)
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         [
             {"params": decay_params, "weight_decay": args.weight_decay},
             {"params": no_decay_params, "weight_decay": 0.0},
