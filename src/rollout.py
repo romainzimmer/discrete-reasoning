@@ -133,18 +133,8 @@ def _cycle_start_index(states: list[torch.Tensor], cycle_length: int | None) -> 
     return len(states) - cycle_length
 
 
-def _target_for_step(
-    t: int,
-    *,
-    rollout_grids: list[torch.Tensor],
-    answer: torch.Tensor,
-    cycle_start: int | None,
-) -> torch.Tensor:
-    """Cycle steps -> ground truth; outside cycle -> rollout at t+2 if present, else ground truth."""
-    if cycle_start is not None and t >= cycle_start:
-        return answer
-    if t + 2 < len(rollout_grids):
-        return rollout_grids[t + 2].detach()
+def _target_for_step(*, answer: torch.Tensor) -> torch.Tensor:
+    """Every rollout step is supervised against ground truth."""
     return answer
 
 
@@ -158,13 +148,9 @@ def _compute_rollout_loss(
     config: RolloutConfig,
     loss_fn: torch.nn.Module,
 ) -> torch.Tensor:
-    rollout_grids = [onehot_to_grid(s) for s in states]
-    cycle_start = _cycle_start_index(states, cycle_length)
     total_loss = torch.zeros((), device=clues.device)
-    for t, logits in enumerate(logits_list):
-        target = _target_for_step(
-            t, rollout_grids=rollout_grids, answer=answer, cycle_start=cycle_start
-        )
+    for logits in logits_list:
+        target = _target_for_step(answer=answer)
         mask = target_mask(target, clues)
         if config.mode == "threshold":
             total_loss = total_loss + masked_bce_with_logits(
@@ -187,7 +173,7 @@ def rollout_train_batch(
     *,
     config: RolloutConfig | None = None,
 ) -> RolloutResult:
-    """Rollout with t+2 targets outside the cycle and answer targets inside."""
+    """Rollout with ground-truth targets at every step."""
     config = config or RolloutConfig()
     threshold_state = _threshold_state(config)
     states, logits_list, cycle_length, hit_max_iter = _run_rollout(
