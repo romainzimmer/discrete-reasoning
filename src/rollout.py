@@ -37,6 +37,19 @@ def logits_to_state(logits: torch.Tensor, clues: torch.Tensor, *, threshold: boo
     return torch.where(clue_mask, clue_state, decoded)
 
 
+def _noisy_ground_truth_initial(answer: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
+    """Start from ground truth; replace each non-clue bit with prob p~U[0,1] by random 50/50 bit."""
+    onehot = grid_to_onehot(answer)
+    p = torch.rand((), device=answer.device).item()
+    non_clue = (clues == 0).unsqueeze(-1)
+    replace = (torch.rand_like(onehot) < p) & non_clue
+    random_bits = (torch.rand_like(onehot) < 0.5).float()
+    clue_state = grid_to_onehot(clues)
+    clue_mask = (clues > 0).unsqueeze(-1)
+    corrupted = torch.where(replace, random_bits, onehot)
+    return torch.where(clue_mask, clue_state, corrupted)
+
+
 def predict_grid(logits: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
     """Hard argmax decode."""
     pred = decode_logits(logits)
@@ -102,9 +115,12 @@ def _run_rollout(
     max_rollout_iter: int,
     *,
     threshold_state: bool,
+    initial_onehot: torch.Tensor | None = None,
 ) -> tuple[list[torch.Tensor], list[torch.Tensor], int | None, bool]:
     """Collect states and logits; stop on revisit or max_rollout_iter."""
-    state = attach_clue_mask(clues_onehot, clues)
+    if initial_onehot is None:
+        initial_onehot = clues_onehot
+    state = attach_clue_mask(initial_onehot, clues)
     states = [state]
     visited: dict[bytes, int] = {_state_key(state): 0}
     logits_list: list[torch.Tensor] = []
@@ -178,8 +194,14 @@ def rollout_train_batch(
     """Rollout with ground-truth targets at every step."""
     config = config or RolloutConfig()
     threshold_state = _threshold_state(config)
+    initial_onehot = _noisy_ground_truth_initial(answer, clues) if model.training else None
     states, logits_list, cycle_length, hit_max_iter = _run_rollout(
-        model, clues_onehot, clues, max_rollout_iter, threshold_state=threshold_state
+        model,
+        clues_onehot,
+        clues,
+        max_rollout_iter,
+        threshold_state=threshold_state,
+        initial_onehot=initial_onehot,
     )
     total_loss = _compute_rollout_loss(
         logits_list,
