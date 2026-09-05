@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 TRAIN_CSV = DATA_DIR / "train.csv"
 TEST_CSV = DATA_DIR / "test.csv"
 
@@ -35,6 +35,16 @@ def puzzle_to_tensor(question: str) -> torch.Tensor:
 
 def answer_to_tensor(answer: str) -> torch.Tensor:
     return grid_to_tensor(parse_grid(answer))
+
+
+def tensor_to_string(grid: torch.Tensor) -> str:
+    """Encode a (9, 9) grid as an 81-char string."""
+    chars: list[str] = []
+    for r in range(9):
+        for c in range(9):
+            value = int(grid[r, c].item())
+            chars.append("." if value == 0 else str(value))
+    return "".join(chars)
 
 
 def load_split(split: str = "train") -> list[dict[str, str | int]]:

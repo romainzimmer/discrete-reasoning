@@ -4,7 +4,7 @@ import shutil
 
 from huggingface_hub import hf_hub_download
 
-from discrete_reasoning.data import DATA_DIR, TEST_CSV, TRAIN_CSV
+from data import DATA_DIR, TEST_CSV, TRAIN_CSV
 
 REPO = "sapientinc/sudoku-extreme"
 

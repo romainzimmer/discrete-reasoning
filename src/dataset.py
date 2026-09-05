@@ -3,9 +3,9 @@ from __future__ import annotations
 import torch
 from torch.utils.data import Dataset
 
-from discrete_reasoning.data import answer_to_tensor, load_split, puzzle_to_tensor
-from discrete_reasoning.encoding import grid_to_onehot
-from discrete_reasoning.trajectory import Trajectory, demo_trajectory
+from data import answer_to_tensor, load_split, puzzle_to_tensor
+from encoding import grid_to_onehot
+from trajectory import Trajectory, demo_trajectory
 
 
 class PuzzleDataset(Dataset):

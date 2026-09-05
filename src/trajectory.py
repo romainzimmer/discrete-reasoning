@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from discrete_reasoning.data import parse_grid
+from data import parse_grid
 
 
 @dataclass

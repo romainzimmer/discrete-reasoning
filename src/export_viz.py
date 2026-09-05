@@ -4,9 +4,9 @@ import argparse
 import json
 from pathlib import Path
 
-from discrete_reasoning.data import load_split
+from data import load_split
 
-VIZ_DIR = Path(__file__).resolve().parents[2] / "viz"
+VIZ_DIR = Path(__file__).resolve().parents[1] / "viz"
 PUZZLES_JSON = VIZ_DIR / "puzzles.json"
 
 

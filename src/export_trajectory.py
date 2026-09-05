@@ -3,10 +3,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from discrete_reasoning.data import load_split
-from discrete_reasoning.trajectory import Trajectory, demo_trajectory
+from data import load_split
+from trajectory import Trajectory, demo_trajectory
 
-VIZ_DIR = Path(__file__).resolve().parents[2] / "viz"
+VIZ_DIR = Path(__file__).resolve().parents[1] / "viz"
 TRAJECTORY_JSON = VIZ_DIR / "trajectory.json"
 
 
