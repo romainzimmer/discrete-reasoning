@@ -8,24 +8,19 @@
     * { box-sizing: border-box; }
     body {
       font-family: system-ui, sans-serif;
-      margin: 0;
-      padding: 1rem;
+      margin: 0 auto;
+      padding: 1.25rem 1.5rem;
+      max-width: 1400px;
       background: #fafafa;
       color: #111;
     }
     h1 { font-size: 1.25rem; margin: 0 0 1rem; }
-    a { color: #2563eb; }
-    .layout {
-      display: grid;
-      grid-template-columns: minmax(280px, 360px) 1fr;
-      gap: 1rem;
-      align-items: start;
-    }
-    .panel, .charts, .viewer {
+    .panel {
       background: #fff;
       border: 1px solid #ddd;
       border-radius: 8px;
       padding: 1rem;
+      margin-bottom: 1rem;
     }
     label {
       display: block;
@@ -33,12 +28,10 @@
       margin-bottom: 0.75rem;
     }
     select, button {
-      display: block;
-      width: 100%;
       font: inherit;
-      margin-top: 0.25rem;
       padding: 0.4rem 0.5rem;
     }
+    select { width: 100%; margin-top: 0.25rem; }
     button {
       cursor: pointer;
       border: 1px solid #ccc;
@@ -46,14 +39,68 @@
       background: #fff;
     }
     button:hover { background: #f3f4f6; }
-    .charts { margin-bottom: 1rem; }
-    .chart { margin-bottom: 1rem; }
+    button:disabled { opacity: 0.4; cursor: default; }
+    label.run-label {
+      margin-bottom: 0;
+    }
+    .run-details {
+      margin-top: 0.85rem;
+      padding-top: 0.85rem;
+      border-top: 1px solid #eee;
+    }
+    .run-heading {
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin-bottom: 0.75rem;
+    }
+    .run-stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: 0.5rem;
+    }
+    .run-stat {
+      background: #f9fafb;
+      border: 1px solid #eee;
+      border-radius: 6px;
+      padding: 0.55rem 0.7rem;
+    }
+    .run-stat-label {
+      display: block;
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #888;
+      margin-bottom: 0.2rem;
+    }
+    .run-stat-value {
+      font-size: 0.92rem;
+      font-weight: 500;
+      color: #111;
+    }
+    .section-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin: 0 0 0.75rem;
+    }
+    .charts-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+    }
+    .chart { min-width: 0; }
     .chart-title { font-size: 0.85rem; color: #555; margin-bottom: 0.35rem; }
     canvas {
+      display: block;
       width: 100%;
       height: 180px;
       border: 1px solid #eee;
       background: #fff;
+    }
+    .axis-x-label {
+      text-align: center;
+      font-size: 0.8rem;
+      color: #888;
+      margin-top: 0.25rem;
     }
     .legend {
       display: flex;
@@ -61,13 +108,68 @@
       font-size: 0.8rem;
       margin-top: 0.35rem;
     }
-    .legend-item { display: flex; align-items: center; gap: 0.35rem; }
-    .dot { width: 0.65rem; height: 0.65rem; border-radius: 50%; }
-    .meta { font-size: 0.85rem; color: #555; margin-bottom: 0.75rem; }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+    .dot {
+      display: inline-block;
+      flex-shrink: 0;
+      width: 0.65rem;
+      height: 0.65rem;
+      border-radius: 50%;
+    }
+    .test-note {
+      font-size: 0.85rem;
+      color: #555;
+      margin-bottom: 0.75rem;
+    }
+    .test-stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: 0.5rem;
+    }
+    .trajectory-controls {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+    .trajectory-controls label { margin-bottom: 0; }
+    .trajectory-meta {
+      font-size: 0.85rem;
+      color: #555;
+      margin-bottom: 0.75rem;
+    }
+    .trajectory-layout {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+      align-items: stretch;
+    }
+    .trajectory-panel {
+      background: #f9fafb;
+      border: 1px solid #eee;
+      border-radius: 8px;
+      padding: 1rem;
+      min-height: 100%;
+    }
+    .trajectory-panel-grid {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .trajectory-panel-controls {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
     .grid {
       display: grid;
       grid-template-columns: repeat(9, 1fr);
-      width: min(360px, 100%);
+      width: 100%;
+      max-width: 100%;
       aspect-ratio: 1;
       border: 2px solid #111;
       background: #fff;
@@ -85,28 +187,130 @@
     .cell.incorrect { background: #fee2e2; color: #b91c1c; }
     .cell.box-right { border-right: 2px solid #111; }
     .cell.box-bottom { border-bottom: 2px solid #111; }
-    .controls {
+    .step-controls {
       display: flex;
-      gap: 0.5rem;
-      margin-top: 0.75rem;
-      flex-wrap: wrap;
-      align-items: center;
+      flex-direction: column;
+      gap: 2.25rem;
+      width: 100%;
+      max-width: 320px;
+      margin: 0 auto;
     }
-    .controls button { width: auto; }
-    input[type="range"] { flex: 1; min-width: 120px; }
-    .error { color: #b91c1c; font-size: 0.9rem; }
+    .step-index {
+      font-size: 0.9rem;
+      font-weight: 500;
+    }
+    .step-buttons {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1rem;
+    }
+    .step-buttons button {
+      width: 100%;
+      padding: 0.75rem;
+    }
+    #stepPlay {
+      grid-column: span 4;
+      font-weight: 600;
+      margin-top: 0.75rem;
+    }
+    .speed-control {
+      padding-top: 1rem;
+    }
+    .speed-control label {
+      margin-bottom: 0;
+      font-size: 0.85rem;
+    }
+    .speed-control input[type="range"] {
+      width: 100%;
+      margin-top: 1rem;
+    }
+    input[type="range"] { width: 100%; }
+    .error { color: #b91c1c; font-size: 0.9rem; margin-top: 0.75rem; }
     @media (max-width: 900px) {
-      .layout { grid-template-columns: 1fr; }
+      .charts-grid { grid-template-columns: 1fr; }
+      .trajectory-layout { grid-template-columns: 1fr; }
+      .trajectory-controls { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
   <h1>Training Runs</h1>
-  <div class="layout">
-    <div class="panel">
-      <label>Run
-        <select id="runSelect"></select>
-      </label>
+
+  <div class="panel">
+    <label class="run-label">Run
+      <select id="runSelect"></select>
+    </label>
+    <div class="run-details" id="runMeta"></div>
+  </div>
+
+  <div class="panel">
+    <div class="section-title">Metrics</div>
+    <div class="charts-grid">
+    <div class="chart">
+      <div class="chart-title">Loss</div>
+      <canvas id="lossChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend">
+        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
+        <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
+      </div>
+    </div>
+    <div class="chart">
+      <div class="chart-title">Cell accuracy</div>
+      <canvas id="cellAccChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend">
+        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
+        <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
+      </div>
+    </div>
+    <div class="chart">
+      <div class="chart-title">Puzzle accuracy</div>
+      <canvas id="puzzleAccChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend">
+        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
+        <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
+      </div>
+    </div>
+    <div class="chart">
+      <div class="chart-title">Avg rollout steps</div>
+      <canvas id="rolloutChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend">
+        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
+        <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
+      </div>
+    </div>
+    <div class="chart">
+      <div class="chart-title">Max-iter rollout %</div>
+      <canvas id="maxIterChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend">
+        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
+        <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
+      </div>
+    </div>
+    <div class="chart">
+      <div class="chart-title">Epoch time</div>
+      <canvas id="epochTimeChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend">
+        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> duration</div>
+      </div>
+    </div>
+    </div>
+  </div>
+
+  <div class="panel" id="testPanel">
+    <div class="section-title">Test results</div>
+    <div class="test-note" id="testSectionNote"></div>
+    <div class="test-stat-grid" id="testSummary"></div>
+  </div>
+
+  <div class="panel">
+    <div class="section-title">Trajectory</div>
+    <div class="trajectory-controls">
       <label>Split
         <select id="splitSelect"></select>
       </label>
@@ -117,56 +321,134 @@
         <select id="puzzleSelect"></select>
       </label>
     </div>
-    <div>
-      <div class="charts panel">
-        <div class="chart">
-          <div class="chart-title">Loss</div>
-          <canvas id="lossChart" width="800" height="180"></canvas>
-          <div class="legend">
-            <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
-            <div class="legend-item"><span class="dot" style="background:#dc2626"></span> eval</div>
-          </div>
-        </div>
-        <div class="chart">
-          <div class="chart-title">Accuracy</div>
-          <canvas id="accChart" width="800" height="180"></canvas>
-          <div class="legend">
-            <div class="legend-item"><span class="dot" style="background:#16a34a"></span> cell</div>
-            <div class="legend-item"><span class="dot" style="background:#9333ea"></span> puzzle</div>
-          </div>
-        </div>
-        <div class="chart">
-          <div class="chart-title">Avg rollout steps</div>
-          <canvas id="rolloutChart" width="800" height="180"></canvas>
-        </div>
-        <div class="chart">
-          <div class="chart-title">Max-iter rollout %</div>
-          <canvas id="maxIterChart" width="800" height="180"></canvas>
-        </div>
-      </div>
-      <div class="viewer panel">
-        <div class="meta" id="trajectoryMeta">Select a run</div>
+    <div class="trajectory-meta" id="trajectoryMeta">Select a puzzle</div>
+    <div class="trajectory-layout">
+      <div class="trajectory-panel trajectory-panel-grid">
         <div class="grid" id="grid"></div>
-        <div class="controls">
-          <button id="stepFirst">⏮</button>
-          <button id="stepPrev">←</button>
-          <button id="stepNext">→</button>
-          <button id="stepLast">⏭</button>
+      </div>
+      <div class="trajectory-panel trajectory-panel-controls">
+        <div class="step-controls">
+          <div class="step-index" id="stepIndex"></div>
           <input type="range" id="stepSlider" min="0" max="0" value="0">
-          <span id="stepIndex"></span>
+          <div class="step-buttons">
+            <button id="stepFirst" title="First">⏮</button>
+            <button id="stepPrev" title="Previous">←</button>
+            <button id="stepNext" title="Next">→</button>
+            <button id="stepLast" title="Last">⏭</button>
+            <button id="stepPlay">▶ Play</button>
+          </div>
+          <div class="speed-control">
+            <label for="speedSlider">Speed</label>
+            <input type="range" id="speedSlider" min="0" max="100" value="50">
+          </div>
         </div>
-        <p class="error" id="error"></p>
       </div>
     </div>
+    <p class="error" id="error"></p>
   </div>
 
   <script>
     const RUNS = "../runs";
+    const TRAJECTORY_SPLITS = ["train", "validation"];
     let runs = [];
     let metrics = null;
     let manifest = null;
     let trajectory = null;
     let stepIdx = 0;
+    let playTimer = null;
+    let isPlaying = false;
+
+    function parseRunId(runId) {
+      const m = runId.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-([0-9a-f]+)$/i);
+      if (!m) return { runId, label: runId, date: null, time: null, suffix: null };
+      const [, y, mo, d, h, mi, s, suffix] = m;
+      const date = `${y}-${mo}-${d}`;
+      const time = `${h}:${mi}:${s}`;
+      return {
+        runId,
+        label: `${date} ${time}`,
+        date,
+        time,
+        suffix,
+      };
+    }
+
+    function formatRunLabel(runId, args = null) {
+      const parsed = parseRunId(runId);
+      const parts = [parsed.label];
+      if (args) {
+        if (args.max_samples != null) parts.push(`${args.max_samples} samples`);
+        if (args.min_rating != null || args.max_rating != null) {
+          const lo = args.min_rating ?? "…";
+          const hi = args.max_rating ?? "…";
+          parts.push(`rating ${lo}–${hi}`);
+        }
+        parts.push(`${args.epochs} epochs`);
+      }
+      return parts.join(" · ");
+    }
+
+    function formatRating(args) {
+      if (args.min_rating == null && args.max_rating == null) return null;
+      const lo = args.min_rating ?? "…";
+      const hi = args.max_rating ?? "…";
+      return `${lo} – ${hi}`;
+    }
+
+    function formatDuration(seconds) {
+      const s = Number(seconds);
+      if (!Number.isFinite(s)) return "—";
+      if (s < 60) return `${s.toFixed(1)}s`;
+      const m = Math.floor(s / 60);
+      const rem = Math.round(s % 60);
+      if (m < 60) return rem ? `${m}m ${rem}s` : `${m}m`;
+      const h = Math.floor(m / 60);
+      return `${h}h ${m % 60}m`;
+    }
+
+    function formatDurationAxis(seconds) {
+      const s = Number(seconds);
+      if (s >= 60) return `${(s / 60).toFixed(1)}m`;
+      return `${s.toFixed(0)}s`;
+    }
+
+    function totalRunSeconds(history) {
+      if (history?.total_seconds != null) return history.total_seconds;
+      return (history?.epochs || []).reduce((sum, e) => sum + (e.epoch_seconds ?? 0), 0);
+    }
+
+    function buildRunStats(args, history) {
+      const trainN = args.train_samples ?? args.max_samples;
+      const valN = args.val_samples_count ?? args.val_samples;
+      const testN = args.test_samples_count ?? args.test_samples ?? args.max_samples;
+      const stats = [
+        { label: "Learning rate", value: args.lr },
+        { label: "Hidden size", value: args.hidden },
+        { label: "Epochs", value: args.epochs },
+      ];
+      const totalSeconds = totalRunSeconds(history);
+      if (totalSeconds > 0) stats.push({ label: "Total time", value: formatDuration(totalSeconds) });
+      const rating = formatRating(args);
+      if (rating) stats.push({ label: "Rating", value: rating });
+      if (trainN != null) stats.push({ label: "Train", value: trainN });
+      if (valN != null) stats.push({ label: "Validation", value: valN });
+      if (testN != null) stats.push({ label: "Test", value: testN });
+      if (args.device) stats.push({ label: "Device", value: args.device });
+      return stats;
+    }
+
+    function renderStatGrid(stats) {
+      return stats.map(stat => `
+        <div class="run-stat">
+          <span class="run-stat-label">${stat.label}</span>
+          <span class="run-stat-value">${stat.value}</span>
+        </div>
+      `).join("");
+    }
+
+    function epochValMetric(epoch, trainKey, valKey) {
+      return epoch[valKey] ?? epoch[valKey.replace(/^val_/, "eval_")] ?? null;
+    }
 
     function parseGrid(s) {
       const grid = [];
@@ -181,25 +463,96 @@
       return grid;
     }
 
-    function drawSeries(canvas, series, yMin = null, yMax = null) {
+    function yTicks(min, max, count = 5) {
+      if (count <= 1) return [min];
+      const range = max - min || 1;
+      return Array.from({ length: count }, (_, i) => min + (range * i) / (count - 1));
+    }
+
+    const CHART_HEIGHT = 180;
+    const MIN_CANVAS_SCALE = 2;
+
+    function setupCanvas(canvas) {
+      const rect = canvas.getBoundingClientRect();
+      const width = Math.max(1, Math.floor(rect.width));
+      const height = CHART_HEIGHT;
+      const scale = Math.max(window.devicePixelRatio || 1, MIN_CANVAS_SCALE);
+
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+      canvas.width = Math.round(width * scale);
+      canvas.height = Math.round(height * scale);
+
       const ctx = canvas.getContext("2d");
-      const width = canvas.width;
-      const height = canvas.height;
+      ctx.setTransform(scale, 0, 0, scale, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      return { ctx, width, height };
+    }
+
+    function drawSeries(canvas, series, options = {}) {
+      const {
+        yMin = null,
+        yMax = null,
+        xLabels = [],
+        formatY = v => Number(v).toFixed(2),
+      } = options;
+      const { ctx, width, height } = setupCanvas(canvas);
       ctx.clearRect(0, 0, width, height);
       if (!series.length || !series[0].values.length) return;
 
-      const pad = 24;
+      const padLeft = 52;
+      const padRight = 16;
+      const padTop = 12;
+      const padBottom = 28;
+      const plotW = width - padLeft - padRight;
+      const plotH = height - padTop - padBottom;
+
       const allValues = series.flatMap(s => s.values).filter(v => v !== null && v !== undefined);
       const min = yMin ?? Math.min(...allValues, 0);
       const max = yMax ?? Math.max(...allValues, 1);
       const range = max - min || 1;
       const n = series[0].values.length;
+      const labels = xLabels.length === n ? xLabels : Array.from({ length: n }, (_, i) => i + 1);
+      const ticks = yTicks(min, max);
 
-      ctx.strokeStyle = "#eee";
+      const xAt = i => padLeft + (n === 1 ? plotW / 2 : i * plotW / (n - 1));
+      const yAt = v => padTop + plotH - ((v - min) / range) * plotH;
+
+      ctx.font = "11px system-ui, sans-serif";
+      ctx.fillStyle = "#666";
+      ctx.strokeStyle = "#ddd";
+      ctx.lineWidth = 1;
+
+      for (const tick of ticks) {
+        const y = yAt(tick);
+        ctx.beginPath();
+        ctx.moveTo(padLeft, y);
+        ctx.lineTo(width - padRight, y);
+        ctx.stroke();
+        ctx.textAlign = "right";
+        ctx.textBaseline = "middle";
+        ctx.fillText(formatY(tick), padLeft - 6, y);
+      }
+
+      ctx.strokeStyle = "#999";
       ctx.beginPath();
-      ctx.moveTo(pad, height - pad);
-      ctx.lineTo(width - pad, height - pad);
+      ctx.moveTo(padLeft, padTop);
+      ctx.lineTo(padLeft, padTop + plotH);
+      ctx.lineTo(width - padRight, padTop + plotH);
       ctx.stroke();
+
+      for (let i = 0; i < n; i++) {
+        const x = xAt(i);
+        ctx.beginPath();
+        ctx.moveTo(x, padTop + plotH);
+        ctx.lineTo(x, padTop + plotH + 4);
+        ctx.stroke();
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillStyle = "#666";
+        ctx.fillText(String(labels[i]), x, padTop + plotH + 8);
+      }
 
       for (const s of series) {
         ctx.strokeStyle = s.color;
@@ -207,34 +560,117 @@
         ctx.beginPath();
         s.values.forEach((value, i) => {
           if (value === null || value === undefined) return;
-          const x = pad + (n === 1 ? 0 : i * (width - 2 * pad) / (n - 1));
-          const y = height - pad - ((value - min) / range) * (height - 2 * pad);
+          const x = xAt(i);
+          const y = yAt(value);
           if (i === 0 || s.values[i - 1] === null) ctx.moveTo(x, y);
           else ctx.lineTo(x, y);
         });
         ctx.stroke();
+
+        s.values.forEach((value, i) => {
+          if (value === null || value === undefined) return;
+          ctx.fillStyle = s.color;
+          ctx.beginPath();
+          ctx.arc(xAt(i), yAt(value), 3, 0, Math.PI * 2);
+          ctx.fill();
+        });
       }
+    }
+
+    function metricSeries(epochs, trainKey, valKey) {
+      return [
+        { color: "#2563eb", values: epochs.map(e => e[trainKey] ?? null) },
+        { color: "#dc2626", values: epochs.map(e => epochValMetric(e, trainKey, valKey)) },
+      ];
+    }
+
+    function testMetric(epoch, key) {
+      const val = epoch[key];
+      if (val != null) return val;
+      if (key.startsWith("test_")) return epoch[key.replace(/^test_/, "eval_")];
+      return null;
+    }
+
+    function renderTestSummary() {
+      const gridEl = document.getElementById("testSummary");
+      const noteEl = document.getElementById("testSectionNote");
+      const panelEl = document.getElementById("testPanel");
+      if (!metrics?.epochs?.length) {
+        gridEl.innerHTML = "";
+        noteEl.textContent = "";
+        panelEl.hidden = true;
+        return;
+      }
+      panelEl.hidden = false;
+      const last = metrics.epochs[metrics.epochs.length - 1];
+      noteEl.textContent = `Held-out test split · epoch ${last.epoch}`;
+      const pct = v => `${(Number(v) * 100).toFixed(1)}%`;
+      const stats = [
+        { label: "Loss", value: testMetric(last, "test_loss"), format: v => Number(v).toFixed(4) },
+        { label: "Cell accuracy", value: testMetric(last, "test_cell_acc"), format: pct },
+        { label: "Puzzle accuracy", value: testMetric(last, "test_puzzle_acc"), format: pct },
+        { label: "Avg rollout steps", value: testMetric(last, "test_avg_rollout_steps"), format: v => Number(v).toFixed(1) },
+        { label: "Max-iter rollout", value: testMetric(last, "test_max_iter_pct"), format: pct },
+      ]
+        .filter(stat => stat.value != null)
+        .map(stat => ({ label: stat.label, value: stat.format(stat.value) }));
+      gridEl.innerHTML = renderStatGrid(stats);
     }
 
     function renderCharts() {
       if (!metrics?.epochs?.length) return;
       const epochs = metrics.epochs;
-      drawSeries(document.getElementById("lossChart"), [
-        { color: "#2563eb", values: epochs.map(e => e.train_loss) },
-        { color: "#dc2626", values: epochs.map(e => e.eval_loss) },
-      ]);
-      drawSeries(document.getElementById("accChart"), [
-        { color: "#16a34a", values: epochs.map(e => e.eval_cell_acc) },
-        { color: "#9333ea", values: epochs.map(e => e.eval_puzzle_acc) },
-      ], 0, 1);
-      drawSeries(document.getElementById("rolloutChart"), [
-        { color: "#2563eb", values: epochs.map(e => e.train_avg_rollout_steps) },
-        { color: "#dc2626", values: epochs.map(e => e.eval_avg_rollout_steps) },
-      ]);
-      drawSeries(document.getElementById("maxIterChart"), [
-        { color: "#2563eb", values: epochs.map(e => e.train_max_iter_pct) },
-        { color: "#dc2626", values: epochs.map(e => e.eval_max_iter_pct) },
-      ], 0, 1);
+      const xLabels = epochs.map(e => e.epoch);
+      const pct = v => `${(Number(v) * 100).toFixed(0)}%`;
+
+      drawSeries(document.getElementById("lossChart"), metricSeries(epochs, "train_loss", "val_loss"), {
+        xLabels,
+        formatY: v => Number(v).toFixed(3),
+      });
+      drawSeries(document.getElementById("cellAccChart"), metricSeries(epochs, "train_cell_acc", "val_cell_acc"), {
+        yMin: 0,
+        yMax: 1,
+        xLabels,
+        formatY: pct,
+      });
+      drawSeries(document.getElementById("puzzleAccChart"), metricSeries(epochs, "train_puzzle_acc", "val_puzzle_acc"), {
+        yMin: 0,
+        yMax: 1,
+        xLabels,
+        formatY: pct,
+      });
+      drawSeries(document.getElementById("rolloutChart"), metricSeries(epochs, "train_avg_rollout_steps", "val_avg_rollout_steps"), {
+        xLabels,
+        formatY: v => Number(v).toFixed(1),
+      });
+      drawSeries(document.getElementById("maxIterChart"), metricSeries(epochs, "train_max_iter_pct", "val_max_iter_pct"), {
+        yMin: 0,
+        yMax: 1,
+        xLabels,
+        formatY: pct,
+      });
+      drawSeries(document.getElementById("epochTimeChart"), [
+        { color: "#2563eb", values: epochs.map(e => e.epoch_seconds ?? null) },
+      ], {
+        xLabels,
+        formatY: formatDurationAxis,
+      });
+      renderTestSummary();
+    }
+
+    function renderRunMeta() {
+      const container = document.getElementById("runMeta");
+      const args = metrics?.args;
+      if (!args) {
+        container.innerHTML = "";
+        return;
+      }
+      const runId = document.getElementById("runSelect").value;
+      const parsed = parseRunId(runId);
+      container.innerHTML = `
+        <div class="run-heading">${parsed.label}</div>
+        <div class="run-stat-grid">${renderStatGrid(buildRunStats(args, metrics))}</div>
+      `;
     }
 
     function renderTrajectory() {
@@ -242,11 +678,12 @@
       const metaEl = document.getElementById("trajectoryMeta");
       const stepIndexEl = document.getElementById("stepIndex");
       const slider = document.getElementById("stepSlider");
-      const errorEl = document.getElementById("error");
 
       if (!trajectory) {
         gridEl.innerHTML = "";
-        metaEl.textContent = "No trajectory loaded";
+        metaEl.textContent = "Select a puzzle";
+        stepIndexEl.textContent = "";
+        document.getElementById("stepPlay").disabled = true;
         return;
       }
 
@@ -256,22 +693,20 @@
       const meta = trajectory.meta || {};
 
       metaEl.textContent = [
-        `split: ${meta.split}`,
-        `epoch: ${meta.epoch}`,
-        `puzzle: ${meta.puzzle_index}`,
-        meta.rating !== undefined ? `rating: ${meta.rating}` : null,
-        `rollout steps: ${trajectory.states.length - 1}`,
+        meta.rating !== undefined ? `rating ${meta.rating}` : null,
+        meta.source ? `source ${meta.source}` : null,
+        `rollout steps ${trajectory.states.length - 1}`,
       ].filter(Boolean).join(" · ");
 
       slider.max = trajectory.states.length - 1;
       slider.value = stepIdx;
       stepIndexEl.textContent = `step ${stepIdx} / ${trajectory.states.length - 1}`;
-      errorEl.textContent = "";
 
       document.getElementById("stepFirst").disabled = stepIdx === 0;
       document.getElementById("stepPrev").disabled = stepIdx === 0;
       document.getElementById("stepNext").disabled = stepIdx === trajectory.states.length - 1;
       document.getElementById("stepLast").disabled = stepIdx === trajectory.states.length - 1;
+      document.getElementById("stepPlay").disabled = trajectory.states.length <= 1;
 
       gridEl.innerHTML = "";
       for (let r = 0; r < 9; r++) {
@@ -305,7 +740,53 @@
       }
     }
 
+    const MIN_STEP_INTERVAL_MS = 1000 / 3;
+    const MAX_STEP_INTERVAL_MS = 3000;
+
+    function getPlayIntervalMs() {
+      const slider = parseInt(document.getElementById("speedSlider").value, 10);
+      const t = slider / 100;
+      return Math.round(MAX_STEP_INTERVAL_MS - t * (MAX_STEP_INTERVAL_MS - MIN_STEP_INTERVAL_MS));
+    }
+
+    function stopPlayback() {
+      if (playTimer) clearInterval(playTimer);
+      playTimer = null;
+      isPlaying = false;
+      document.getElementById("stepPlay").textContent = "▶ Play";
+    }
+
+    function schedulePlaybackTick() {
+      if (playTimer) clearInterval(playTimer);
+      playTimer = setInterval(() => {
+        if (!trajectory) {
+          stopPlayback();
+          return;
+        }
+        if (stepIdx >= trajectory.states.length - 1) {
+          stopPlayback();
+          return;
+        }
+        setStep(stepIdx + 1, { fromPlayback: true });
+      }, getPlayIntervalMs());
+    }
+
+    function togglePlayback() {
+      if (isPlaying) {
+        stopPlayback();
+        return;
+      }
+      if (!trajectory || trajectory.states.length <= 1) return;
+      if (stepIdx >= trajectory.states.length - 1) {
+        setStep(0);
+      }
+      isPlaying = true;
+      document.getElementById("stepPlay").textContent = "⏸ Pause";
+      schedulePlaybackTick();
+    }
+
     async function loadTrajectory() {
+      stopPlayback();
       const runId = document.getElementById("runSelect").value;
       const split = document.getElementById("splitSelect").value;
       const epoch = document.getElementById("epochSelect").value;
@@ -317,6 +798,7 @@
         if (!res.ok) throw new Error(`Missing trajectory: ${path}`);
         trajectory = await res.json();
         stepIdx = 0;
+        errorEl.textContent = "";
         renderTrajectory();
       } catch (e) {
         trajectory = null;
@@ -336,16 +818,25 @@
         if (!manifestRes.ok) throw new Error("Missing manifest.json");
         metrics = await metricsRes.json();
         manifest = await manifestRes.json();
+        renderRunMeta();
         renderCharts();
+        renderTestSummary();
 
-        fillSelect(document.getElementById("splitSelect"), manifest.splits ? Object.keys(manifest.splits) : []);
+        const splits = manifest.splits
+          ? Object.keys(manifest.splits).filter(s => TRAJECTORY_SPLITS.includes(s))
+          : [];
+        fillSelect(document.getElementById("splitSelect"), splits.length ? splits : TRAJECTORY_SPLITS);
         await updateEpochOptions();
         errorEl.textContent = "";
       } catch (e) {
         metrics = null;
         manifest = null;
-        errorEl.textContent = `${e.message}. Train a run first: uv run train`;
+        trajectory = null;
+        renderRunMeta();
         renderCharts();
+        renderTestSummary();
+        renderTrajectory();
+        errorEl.textContent = `${e.message}. Train a run first: uv run train`;
       }
     }
 
@@ -360,12 +851,13 @@
       const split = document.getElementById("splitSelect").value;
       const epoch = document.getElementById("epochSelect").value;
       const puzzles = manifest?.splits?.[split]?.[epoch] || [];
-      fillSelect(document.getElementById("puzzleSelect"), puzzles);
+      fillSelect(document.getElementById("puzzleSelect"), puzzles, p => `puzzle ${p}`);
       await loadTrajectory();
     }
 
-    function setStep(idx) {
+    function setStep(idx, { fromPlayback = false } = {}) {
       if (!trajectory) return;
+      if (!fromPlayback) stopPlayback();
       stepIdx = Math.max(0, Math.min(idx, trajectory.states.length - 1));
       renderTrajectory();
     }
@@ -383,13 +875,35 @@
         .reverse();
     }
 
+    async function initRunSelect(runIds) {
+      const select = document.getElementById("runSelect");
+      select.innerHTML = "";
+      for (const runId of runIds) {
+        let label = parseRunId(runId).label;
+        try {
+          const res = await fetch(`${RUNS}/${runId}/history.json`);
+          if (res.ok) {
+            const history = await res.json();
+            label = formatRunLabel(runId, history.args);
+          }
+        } catch (_) {}
+        const opt = document.createElement("option");
+        opt.value = runId;
+        opt.textContent = label;
+        select.appendChild(opt);
+      }
+    }
+
     async function init() {
       const errorEl = document.getElementById("error");
       try {
         runs = await listRuns();
-        fillSelect(document.getElementById("runSelect"), runs);
         if (!runs.length) throw new Error("No training runs");
+        await initRunSelect(runs);
         await loadRun(runs[0]);
+        requestAnimationFrame(() => {
+          if (metrics?.epochs?.length) renderCharts();
+        });
       } catch (e) {
         errorEl.textContent = `${e.message}. Serve the project root: uv run python -m http.server`;
       }
@@ -403,6 +917,18 @@
       document.getElementById("stepPrev").onclick = () => setStep(stepIdx - 1);
       document.getElementById("stepNext").onclick = () => setStep(stepIdx + 1);
       document.getElementById("stepLast").onclick = () => setStep(trajectory ? trajectory.states.length - 1 : 0);
+      document.getElementById("stepPlay").onclick = togglePlayback;
+      document.getElementById("speedSlider").oninput = () => {
+        if (isPlaying) schedulePlaybackTick();
+      };
+
+      let resizeTimer;
+      window.addEventListener("resize", () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+          if (metrics?.epochs?.length) renderCharts();
+        }, 150);
+      });
     }
 
     init();

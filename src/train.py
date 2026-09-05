@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import secrets
+import time
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
@@ -11,7 +12,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from dataset import PuzzleDataset, collate_puzzles
+from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import NextStateModel
 from rollout import rollout_solve, rollout_train_batch
 from viz_data import (
@@ -29,12 +30,8 @@ class EpochStats:
     loss: float
     avg_rollout_steps: float
     max_iter_pct: float
-
-
-@dataclass
-class EvalStats(EpochStats):
-    cell_acc: float
-    puzzle_acc: float
+    cell_acc: float = 0.0
+    puzzle_acc: float = 0.0
 
 
 def make_run_dir(runs_dir: Path) -> Path:
@@ -55,12 +52,31 @@ def json_safe(value):
     return value
 
 
+def split_train_val(
+    rows: list[dict],
+    *,
+    val_samples: int | None,
+    val_fraction: float,
+    max_samples: int | None,
+) -> tuple[list[dict], list[dict]]:
+    pool = rows[:max_samples] if max_samples is not None else rows
+    if not pool:
+        return [], []
+    n_val = val_samples if val_samples is not None else max(1, int(len(pool) * val_fraction))
+    n_val = min(n_val, len(pool) - 1) if len(pool) > 1 else 1
+    val_rows = pool[:n_val]
+    train_rows = pool[n_val:]
+    return train_rows, val_rows
+
+
 def save_epoch_metrics(
     run_dir: Path,
     *,
     epoch: int,
     train: EpochStats,
-    eval_: EvalStats,
+    val: EpochStats,
+    test: EpochStats,
+    epoch_seconds: float,
     args: argparse.Namespace,
 ) -> None:
     history_path = run_dir / "history.json"
@@ -74,11 +90,14 @@ def save_epoch_metrics(
     history["epochs"].append(
         {
             "epoch": epoch,
+            "epoch_seconds": epoch_seconds,
             **{f"train_{k}": v for k, v in asdict(train).items()},
-            **{f"eval_{k}": v for k, v in asdict(eval_).items()},
+            **{f"val_{k}": v for k, v in asdict(val).items()},
+            **{f"test_{k}": v for k, v in asdict(test).items()},
         }
     )
     history["epochs"].sort(key=lambda row: row["epoch"])
+    history["total_seconds"] = sum(e.get("epoch_seconds", 0) for e in history["epochs"])
     history_path.write_text(json.dumps(history, indent=2))
 
 
@@ -95,7 +114,8 @@ def save_checkpoint(
     optimizer: torch.optim.Optimizer,
     epoch: int,
     train: EpochStats,
-    eval_: EvalStats,
+    val: EpochStats,
+    test: EpochStats,
     args: argparse.Namespace,
 ) -> None:
     torch.save(
@@ -106,15 +126,45 @@ def save_checkpoint(
             "train_loss": train.loss,
             "train_avg_rollout_steps": train.avg_rollout_steps,
             "train_max_iter_pct": train.max_iter_pct,
-            "test_loss": eval_.loss,
-            "eval_avg_rollout_steps": eval_.avg_rollout_steps,
-            "eval_max_iter_pct": eval_.max_iter_pct,
-            "cell_acc": eval_.cell_acc,
-            "puzzle_acc": eval_.puzzle_acc,
+            "train_cell_acc": train.cell_acc,
+            "train_puzzle_acc": train.puzzle_acc,
+            "val_loss": val.loss,
+            "val_avg_rollout_steps": val.avg_rollout_steps,
+            "val_max_iter_pct": val.max_iter_pct,
+            "val_cell_acc": val.cell_acc,
+            "val_puzzle_acc": val.puzzle_acc,
+            "test_loss": test.loss,
+            "test_avg_rollout_steps": test.avg_rollout_steps,
+            "test_max_iter_pct": test.max_iter_pct,
+            "test_cell_acc": test.cell_acc,
+            "test_puzzle_acc": test.puzzle_acc,
             "args": vars(args),
         },
         path,
     )
+
+
+@torch.no_grad()
+def measure_accuracy(
+    model: NextStateModel,
+    loader: DataLoader,
+    device: torch.device,
+) -> tuple[float, float]:
+    model.eval()
+    correct_cells = 0
+    total_cells = 0
+    correct_puzzles = 0
+    n = 0
+    for batch in loader:
+        batch = {k: v.to(device) for k, v in batch.items()}
+        pred = rollout_solve(model, batch["clues_onehot"], batch["clues"])[0]
+        answer = batch["answer"][0]
+        correct_cells += (pred == answer).sum().item()
+        total_cells += answer.numel()
+        if torch.equal(pred, answer):
+            correct_puzzles += 1
+        n += 1
+    return correct_cells / total_cells, correct_puzzles / n
 
 
 def train_epoch(
@@ -153,12 +203,12 @@ def train_epoch(
 
 
 @torch.no_grad()
-def eval_epoch(
+def measure_split(
     model: NextStateModel,
     loader: DataLoader,
     loss_fn: nn.Module,
     device: torch.device,
-) -> EvalStats:
+) -> EpochStats:
     model.eval()
     total_loss = 0.0
     total_steps = 0
@@ -192,7 +242,7 @@ def eval_epoch(
         if torch.equal(pred, answer):
             correct_puzzles += 1
 
-    return EvalStats(
+    return EpochStats(
         loss=total_loss / n,
         avg_rollout_steps=total_steps / n,
         max_iter_pct=max_iter_count / n,
@@ -208,8 +258,10 @@ def main() -> None:
     parser.add_argument("--hidden", type=int, default=512)
     parser.add_argument("--min-rating", type=int, default=None)
     parser.add_argument("--max-rating", type=int, default=None)
-    parser.add_argument("--max-samples", type=int, default=None, help="Max puzzles per split")
-    parser.add_argument("--eval-split", default="test", choices=["train", "test"])
+    parser.add_argument("--max-samples", type=int, default=None, help="Max puzzles from train.csv before train/val split")
+    parser.add_argument("--val-fraction", type=float, default=0.1, help="Validation fraction from train.csv pool")
+    parser.add_argument("--val-samples", type=int, default=None, help="Validation puzzles (overrides val-fraction)")
+    parser.add_argument("--test-samples", type=int, default=None, help="Test puzzles cap (defaults to max-samples)")
     parser.add_argument("--viz-samples", type=int, default=5, help="Puzzles per split to save for viz")
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -221,48 +273,49 @@ def main() -> None:
     ds_kwargs = {
         "min_rating": args.min_rating,
         "max_rating": args.max_rating,
-        "max_samples": args.max_samples,
     }
-    train_ds = PuzzleDataset("train", **ds_kwargs)
-    eval_ds = PuzzleDataset(args.eval_split, **ds_kwargs)
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=1,
-        shuffle=True,
-        collate_fn=collate_puzzles,
+    train_pool = filter_rows("train", **ds_kwargs)
+    train_rows, val_rows = split_train_val(
+        train_pool,
+        val_samples=args.val_samples,
+        val_fraction=args.val_fraction,
+        max_samples=args.max_samples,
     )
-    eval_loader = DataLoader(
-        eval_ds,
-        batch_size=1,
-        collate_fn=collate_puzzles,
-    )
+    test_cap = args.test_samples if args.test_samples is not None else args.max_samples
+    test_rows = filter_rows("test", **ds_kwargs, max_samples=test_cap)
+
+    train_ds = PuzzleDataset(rows=train_rows)
+    val_ds = PuzzleDataset(rows=val_rows)
+    test_ds = PuzzleDataset(rows=test_rows)
+    args.train_samples = len(train_rows)
+    args.val_samples_count = len(val_rows)
+    args.test_samples_count = len(test_rows)
+
+    train_loader = DataLoader(train_ds, batch_size=1, shuffle=True, collate_fn=collate_puzzles)
+    val_loader = DataLoader(val_ds, batch_size=1, collate_fn=collate_puzzles)
+    test_loader = DataLoader(test_ds, batch_size=1, collate_fn=collate_puzzles)
 
     model = NextStateModel(hidden=args.hidden).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     loss_fn = nn.BCEWithLogitsLoss()
-    best_test_loss = float("inf")
+    best_val_loss = float("inf")
     manifest = load_manifest(run_dir)
     viz_rows = {
         "train": train_ds.rows[: args.viz_samples],
-        args.eval_split: eval_ds.rows[: args.viz_samples],
+        "validation": val_ds.rows[: args.viz_samples],
     }
 
     for epoch in range(1, args.epochs + 1):
+        epoch_start = time.perf_counter()
         train = train_epoch(model, train_loader, optimizer, loss_fn, device)
-        eval_ = eval_epoch(model, eval_loader, loss_fn, device)
-        print(
-            f"epoch {epoch}: train_loss={train.loss:.4f} "
-            f"eval_loss={eval_.loss:.4f} cell_acc={eval_.cell_acc:.4f} "
-            f"puzzle_acc={eval_.puzzle_acc:.4f} "
-            f"rollout={train.avg_rollout_steps:.1f}/{eval_.avg_rollout_steps:.1f} "
-            f"max_iter={train.max_iter_pct:.2%}/{eval_.max_iter_pct:.2%} ({args.eval_split})",
-            flush=True,
-        )
-
-        save_epoch_metrics(run_dir, epoch=epoch, train=train, eval_=eval_, args=args)
+        train.cell_acc, train.puzzle_acc = measure_accuracy(model, train_loader, device)
+        val = measure_split(model, val_loader, loss_fn, device)
+        test = measure_split(model, test_loader, loss_fn, device)
         save_epoch_checkpoint(run_dir, epoch, model)
         model.eval()
         for split, rows in viz_rows.items():
+            if not rows:
+                continue
             puzzle_indices = save_epoch_trajectories(
                 model,
                 rows,
@@ -278,13 +331,32 @@ def main() -> None:
             "optimizer": optimizer,
             "epoch": epoch,
             "train": train,
-            "eval_": eval_,
+            "val": val,
+            "test": test,
             "args": args,
         }
         save_checkpoint(run_dir / "last.pt", **ckpt_kwargs)
-        if eval_.loss < best_test_loss:
-            best_test_loss = eval_.loss
+        if val.loss < best_val_loss:
+            best_val_loss = val.loss
             save_checkpoint(run_dir / "best.pt", **ckpt_kwargs)
+        epoch_seconds = time.perf_counter() - epoch_start
+        save_epoch_metrics(
+            run_dir,
+            epoch=epoch,
+            train=train,
+            val=val,
+            test=test,
+            epoch_seconds=epoch_seconds,
+            args=args,
+        )
+        print(
+            f"epoch {epoch}: "
+            f"train_loss={train.loss:.4f} val_loss={val.loss:.4f} test_loss={test.loss:.4f} "
+            f"cell_acc={train.cell_acc:.4f}/{val.cell_acc:.4f}/{test.cell_acc:.4f} "
+            f"puzzle_acc={train.puzzle_acc:.4f}/{val.puzzle_acc:.4f}/{test.puzzle_acc:.4f} "
+            f"time={epoch_seconds:.1f}s",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

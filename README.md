@@ -25,7 +25,7 @@ uv run python -m http.server
 
 Open http://localhost:8000/viz/
 
-Training writes each run under `runs/<run_id>/` (checkpoints, metrics, trajectories).
+Training uses **train** / **validation** / **test** splits: validation is held out from `train.csv`, test comes from `test.csv`. Charts show train vs validation; test metrics are reported separately.
 
 ## Python usage
 
