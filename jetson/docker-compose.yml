@@ -1,0 +1,42 @@
+name: discrete-reasoning
+
+x-app-base: &app-base
+  build:
+    context: ..
+    dockerfile: jetson/Dockerfile
+    args:
+      BASE_IMAGE: ${BASE_IMAGE:-whitesscott/l4t-jetpack:r39.2.1}
+      TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cu132}
+  image: discrete-reasoning:jetson
+  working_dir: /workspace
+  volumes:
+    - ../data:/workspace/data
+    - ../runs:/workspace/runs
+
+services:
+  download:
+    <<: *app-base
+    entrypoint: ["download-dataset"]
+
+  train:
+    <<: *app-base
+    runtime: nvidia
+    entrypoint: ["train"]
+
+  viz:
+    <<: *app-base
+    volumes:
+      - ../data:/workspace/data
+      - ../runs:/workspace/runs
+      - ../viz:/workspace/viz
+    ports:
+      - "8000:8000"
+    command:
+      - python3
+      - -m
+      - http.server
+      - "8000"
+      - --bind
+      - 0.0.0.0
+      - --directory
+      - /workspace
