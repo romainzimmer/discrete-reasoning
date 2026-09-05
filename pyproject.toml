@@ -14,6 +14,7 @@ dependencies = [
 download-dataset = "discrete_reasoning.download:main"
 export-viz = "discrete_reasoning.export_viz:main"
 export-trajectory = "discrete_reasoning.export_trajectory:main"
+train = "discrete_reasoning.train:main"
 
 [build-system]
 requires = ["hatchling"]
