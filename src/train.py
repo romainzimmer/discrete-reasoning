@@ -16,13 +16,12 @@ from model import NextStateModel
 from rollout import rollout_solve, rollout_train_batch
 from viz_data import (
     load_manifest,
-    register_run,
     save_epoch_trajectories,
     save_manifest,
     update_manifest_split,
 )
 
-DEFAULT_CHECKPOINT_DIR = Path(__file__).resolve().parents[1] / "checkpoints"
+DEFAULT_RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
 
 
 @dataclass
@@ -38,10 +37,10 @@ class EvalStats(EpochStats):
     puzzle_acc: float
 
 
-def make_run_dir(checkpoint_dir: Path) -> Path:
+def make_run_dir(runs_dir: Path) -> Path:
     run_id = secrets.token_hex(4)
     name = datetime.now().strftime(f"%Y%m%d-%H%M%S-{run_id}")
-    run_dir = checkpoint_dir / name
+    run_dir = runs_dir / name
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
 
@@ -212,13 +211,12 @@ def main() -> None:
     parser.add_argument("--max-samples", type=int, default=None, help="Max puzzles per split")
     parser.add_argument("--eval-split", default="test", choices=["train", "test"])
     parser.add_argument("--viz-samples", type=int, default=5, help="Puzzles per split to save for viz")
-    parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
+    parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
     device = torch.device(args.device)
-    run_dir = make_run_dir(args.checkpoint_dir)
-    register_run(args.checkpoint_dir, run_dir.name, json_safe(vars(args)))
+    run_dir = make_run_dir(args.runs_dir)
     print(f"Run dir: {run_dir}")
     ds_kwargs = {
         "min_rating": args.min_rating,

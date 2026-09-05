@@ -5,7 +5,6 @@ from torch.utils.data import Dataset
 
 from data import answer_to_tensor, load_split, puzzle_to_tensor
 from encoding import grid_to_onehot
-from trajectory import Trajectory, demo_trajectory
 
 
 class PuzzleDataset(Dataset):
@@ -48,16 +47,3 @@ def collate_puzzles(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Ten
         "answer": torch.stack([item["answer"] for item in batch]),
     }
 
-
-def build_transitions(traj: Trajectory) -> list[tuple[torch.Tensor, torch.Tensor]]:
-    """Step-wise (current, next) pairs for debugging."""
-    pairs = []
-    for t in range(len(traj.steps)):
-        current = grid_to_onehot(traj.grid_tensor_at(t))
-        nxt = grid_to_onehot(traj.grid_tensor_at(t + 1))
-        pairs.append((current, nxt))
-    return pairs
-
-
-def demo_transitions(question: str, answer: str) -> list[tuple[torch.Tensor, torch.Tensor]]:
-    return build_transitions(demo_trajectory(question, answer))

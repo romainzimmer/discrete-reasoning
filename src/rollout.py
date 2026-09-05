@@ -5,9 +5,8 @@ from dataclasses import dataclass
 import torch
 
 from data import tensor_to_string
-from encoding import decode_logits, grid_to_onehot
+from encoding import decode_logits, grid_to_onehot, onehot_to_grid
 from model import NextStateModel
-from trajectory import demo_states
 
 
 @dataclass
@@ -29,24 +28,6 @@ def predict_grid(logits: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
     """Hard decode for inference rollout."""
     pred = decode_logits(logits)
     return torch.where(clues > 0, clues, pred)
-
-
-def rollout_target(
-    states: torch.Tensor,
-    answer: torch.Tensor,
-    t: int,
-    T: torch.Tensor,
-) -> torch.Tensor:
-    """Target grid for f(o_t). states: (B, T_max+1, 9, 9), T: (B,) step count."""
-    b = states.size(0)
-    target = torch.zeros(b, 9, 9, dtype=answer.dtype, device=answer.device)
-    for i in range(b):
-        ti = int(T[i].item())
-        if t + 2 <= ti:
-            target[i] = states[i, t + 2]
-        elif t >= ti - 1:
-            target[i] = answer[i]
-    return target
 
 
 def target_mask(target: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
@@ -79,25 +60,32 @@ def rollout_train_batch(
     max_steps: int = MAX_ROLLOUT_STEPS,
 ) -> RolloutResult:
     """Full rollout with contracted targets; stop at fixed point or max_steps."""
-    states, T = demo_states(clues, answer)
     state = clues_onehot
-    total_loss = torch.zeros((), device=clues.device)
-    steps = 0
+    rollout_states = [state]
+    logits_list: list[torch.Tensor] = []
     converged = False
 
-    for t in range(max_steps):
+    for _ in range(max_steps):
         logits = model(state)
-        target = rollout_target(states, answer, t, T)
-        mask = target_mask(target, clues)
-        total_loss = total_loss + masked_bce_with_logits(logits, target, mask, loss_fn)
-        steps += 1
-
+        logits_list.append(logits)
         new_state = logits_to_state(logits, clues)
         if torch.equal(new_state, state):
             converged = True
             break
         state = new_state
+        rollout_states.append(state)
 
+    rollout_grids = [onehot_to_grid(s) for s in rollout_states]
+    total_loss = torch.zeros((), device=clues.device)
+    for t, logits in enumerate(logits_list):
+        if t + 2 < len(rollout_grids):
+            target = rollout_grids[t + 2].detach()
+        else:
+            target = answer
+        mask = target_mask(target, clues)
+        total_loss = total_loss + masked_bce_with_logits(logits, target, mask, loss_fn)
+
+    steps = len(logits_list)
     return RolloutResult(
         loss=total_loss / max(steps, 1),
         steps=steps,
@@ -133,18 +121,18 @@ def rollout_trace(
     clues: torch.Tensor,
     max_steps: int = MAX_ROLLOUT_STEPS,
 ) -> list[str]:
-    """Return argmax-decoded grid strings at each rollout step."""
+    """Return grid strings at each rollout step: step 0 = clues, then argmax preds."""
     grids = [tensor_to_string(clues[0] if clues.dim() == 3 else clues)]
     state = clues_onehot
     logits = model(state)
 
     for _ in range(max_steps):
+        grid = predict_grid(logits, clues)
+        grids.append(tensor_to_string(grid[0] if grid.dim() == 3 else grid))
         new_state = logits_to_state(logits, clues)
         if torch.equal(new_state, state):
             break
         state = new_state
         logits = model(state)
-        grid = predict_grid(logits, clues)
-        grids.append(tensor_to_string(grid[0] if grid.dim() == 3 else grid))
 
     return grids

@@ -21,16 +21,6 @@ def json_safe(value):
     return value
 
 
-def register_run(checkpoint_dir: Path, run_id: str, args: dict) -> None:
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    index_path = checkpoint_dir / "index.json"
-    runs = json.loads(index_path.read_text()) if index_path.exists() else []
-    runs = [run for run in runs if run["run_id"] != run_id]
-    runs.append({"run_id": run_id, "args": json_safe(args)})
-    runs.sort(key=lambda row: row["run_id"], reverse=True)
-    index_path.write_text(json.dumps(runs, indent=2))
-
-
 def load_manifest(run_dir: Path) -> dict:
     manifest_path = run_dir / "manifest.json"
     if manifest_path.exists():

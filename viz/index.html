@@ -3,23 +3,71 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sudoku Extreme Viewer</title>
+  <title>Training Runs</title>
   <style>
     * { box-sizing: border-box; }
     body {
       font-family: system-ui, sans-serif;
-      max-width: 520px;
-      margin: 2rem auto;
-      padding: 0 1rem;
+      margin: 0;
+      padding: 1rem;
       background: #fafafa;
       color: #111;
     }
-    h1 { font-size: 1.25rem; margin-bottom: 0.5rem; }
-    .meta { font-size: 0.85rem; color: #555; margin-bottom: 1rem; }
+    h1 { font-size: 1.25rem; margin: 0 0 1rem; }
+    a { color: #2563eb; }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(280px, 360px) 1fr;
+      gap: 1rem;
+      align-items: start;
+    }
+    .panel, .charts, .viewer {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 1rem;
+    }
+    label {
+      display: block;
+      font-size: 0.85rem;
+      margin-bottom: 0.75rem;
+    }
+    select, button {
+      display: block;
+      width: 100%;
+      font: inherit;
+      margin-top: 0.25rem;
+      padding: 0.4rem 0.5rem;
+    }
+    button {
+      cursor: pointer;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: #fff;
+    }
+    button:hover { background: #f3f4f6; }
+    .charts { margin-bottom: 1rem; }
+    .chart { margin-bottom: 1rem; }
+    .chart-title { font-size: 0.85rem; color: #555; margin-bottom: 0.35rem; }
+    canvas {
+      width: 100%;
+      height: 180px;
+      border: 1px solid #eee;
+      background: #fff;
+    }
+    .legend {
+      display: flex;
+      gap: 1rem;
+      font-size: 0.8rem;
+      margin-top: 0.35rem;
+    }
+    .legend-item { display: flex; align-items: center; gap: 0.35rem; }
+    .dot { width: 0.65rem; height: 0.65rem; border-radius: 50%; }
+    .meta { font-size: 0.85rem; color: #555; margin-bottom: 0.75rem; }
     .grid {
       display: grid;
       grid-template-columns: repeat(9, 1fr);
-      width: min(360px, 90vw);
+      width: min(360px, 100%);
       aspect-ratio: 1;
       border: 2px solid #111;
       background: #fff;
@@ -28,54 +76,97 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: clamp(1rem, 4vw, 1.4rem);
+      font-size: clamp(0.9rem, 3vw, 1.3rem);
       font-weight: 500;
       border: 1px solid #ccc;
     }
     .cell.given { background: #fff; color: #111; font-weight: 700; }
-    .cell.solution { color: #15803d; }
+    .cell.correct { background: #dcfce7; color: #15803d; }
+    .cell.incorrect { background: #fee2e2; color: #b91c1c; }
     .cell.box-right { border-right: 2px solid #111; }
     .cell.box-bottom { border-bottom: 2px solid #111; }
     .controls {
       display: flex;
       gap: 0.5rem;
-      margin-top: 1rem;
+      margin-top: 0.75rem;
       flex-wrap: wrap;
       align-items: center;
     }
-    button, label {
-      font: inherit;
-      padding: 0.4rem 0.75rem;
-      cursor: pointer;
+    .controls button { width: auto; }
+    input[type="range"] { flex: 1; min-width: 120px; }
+    .error { color: #b91c1c; font-size: 0.9rem; }
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
     }
-    button {
-      border: 1px solid #ccc;
-      border-radius: 6px;
-      background: #fff;
-    }
-    button:hover { background: #f3f4f6; }
-    input[type="checkbox"] { margin-right: 0.25rem; }
-    .index { margin-left: auto; font-size: 0.85rem; color: #555; }
-    .error { color: #b91c1c; }
   </style>
 </head>
 <body>
-  <h1>Sudoku Extreme <a href="training.html">training</a></h1>
-  <div class="meta" id="meta">Loading...</div>
-  <div class="grid" id="grid"></div>
-
-  <div class="controls">
-    <button id="prev">← Prev puzzle</button>
-    <button id="next">Next puzzle →</button>
-    <label><input type="checkbox" id="showAnswer"> Show answer</label>
-    <span class="index" id="index"></span>
+  <h1>Training Runs</h1>
+  <div class="layout">
+    <div class="panel">
+      <label>Run
+        <select id="runSelect"></select>
+      </label>
+      <label>Split
+        <select id="splitSelect"></select>
+      </label>
+      <label>Epoch
+        <select id="epochSelect"></select>
+      </label>
+      <label>Puzzle
+        <select id="puzzleSelect"></select>
+      </label>
+    </div>
+    <div>
+      <div class="charts panel">
+        <div class="chart">
+          <div class="chart-title">Loss</div>
+          <canvas id="lossChart" width="800" height="180"></canvas>
+          <div class="legend">
+            <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
+            <div class="legend-item"><span class="dot" style="background:#dc2626"></span> eval</div>
+          </div>
+        </div>
+        <div class="chart">
+          <div class="chart-title">Accuracy</div>
+          <canvas id="accChart" width="800" height="180"></canvas>
+          <div class="legend">
+            <div class="legend-item"><span class="dot" style="background:#16a34a"></span> cell</div>
+            <div class="legend-item"><span class="dot" style="background:#9333ea"></span> puzzle</div>
+          </div>
+        </div>
+        <div class="chart">
+          <div class="chart-title">Avg rollout steps</div>
+          <canvas id="rolloutChart" width="800" height="180"></canvas>
+        </div>
+        <div class="chart">
+          <div class="chart-title">Max-iter rollout %</div>
+          <canvas id="maxIterChart" width="800" height="180"></canvas>
+        </div>
+      </div>
+      <div class="viewer panel">
+        <div class="meta" id="trajectoryMeta">Select a run</div>
+        <div class="grid" id="grid"></div>
+        <div class="controls">
+          <button id="stepFirst">⏮</button>
+          <button id="stepPrev">←</button>
+          <button id="stepNext">→</button>
+          <button id="stepLast">⏭</button>
+          <input type="range" id="stepSlider" min="0" max="0" value="0">
+          <span id="stepIndex"></span>
+        </div>
+        <p class="error" id="error"></p>
+      </div>
+    </div>
   </div>
 
-  <p class="error" id="error"></p>
-
   <script>
-    let puzzles = [];
-    let puzzleIdx = 0;
+    const RUNS = "../runs";
+    let runs = [];
+    let metrics = null;
+    let manifest = null;
+    let trajectory = null;
+    let stepIdx = 0;
 
     function parseGrid(s) {
       const grid = [];
@@ -90,20 +181,97 @@
       return grid;
     }
 
-    function renderPuzzle() {
+    function drawSeries(canvas, series, yMin = null, yMax = null) {
+      const ctx = canvas.getContext("2d");
+      const width = canvas.width;
+      const height = canvas.height;
+      ctx.clearRect(0, 0, width, height);
+      if (!series.length || !series[0].values.length) return;
+
+      const pad = 24;
+      const allValues = series.flatMap(s => s.values).filter(v => v !== null && v !== undefined);
+      const min = yMin ?? Math.min(...allValues, 0);
+      const max = yMax ?? Math.max(...allValues, 1);
+      const range = max - min || 1;
+      const n = series[0].values.length;
+
+      ctx.strokeStyle = "#eee";
+      ctx.beginPath();
+      ctx.moveTo(pad, height - pad);
+      ctx.lineTo(width - pad, height - pad);
+      ctx.stroke();
+
+      for (const s of series) {
+        ctx.strokeStyle = s.color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        s.values.forEach((value, i) => {
+          if (value === null || value === undefined) return;
+          const x = pad + (n === 1 ? 0 : i * (width - 2 * pad) / (n - 1));
+          const y = height - pad - ((value - min) / range) * (height - 2 * pad);
+          if (i === 0 || s.values[i - 1] === null) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      }
+    }
+
+    function renderCharts() {
+      if (!metrics?.epochs?.length) return;
+      const epochs = metrics.epochs;
+      drawSeries(document.getElementById("lossChart"), [
+        { color: "#2563eb", values: epochs.map(e => e.train_loss) },
+        { color: "#dc2626", values: epochs.map(e => e.eval_loss) },
+      ]);
+      drawSeries(document.getElementById("accChart"), [
+        { color: "#16a34a", values: epochs.map(e => e.eval_cell_acc) },
+        { color: "#9333ea", values: epochs.map(e => e.eval_puzzle_acc) },
+      ], 0, 1);
+      drawSeries(document.getElementById("rolloutChart"), [
+        { color: "#2563eb", values: epochs.map(e => e.train_avg_rollout_steps) },
+        { color: "#dc2626", values: epochs.map(e => e.eval_avg_rollout_steps) },
+      ]);
+      drawSeries(document.getElementById("maxIterChart"), [
+        { color: "#2563eb", values: epochs.map(e => e.train_max_iter_pct) },
+        { color: "#dc2626", values: epochs.map(e => e.eval_max_iter_pct) },
+      ], 0, 1);
+    }
+
+    function renderTrajectory() {
       const gridEl = document.getElementById("grid");
-      const metaEl = document.getElementById("meta");
-      const indexEl = document.getElementById("index");
-      const showAnswer = document.getElementById("showAnswer").checked;
+      const metaEl = document.getElementById("trajectoryMeta");
+      const stepIndexEl = document.getElementById("stepIndex");
+      const slider = document.getElementById("stepSlider");
+      const errorEl = document.getElementById("error");
 
-      if (!puzzles.length) return;
+      if (!trajectory) {
+        gridEl.innerHTML = "";
+        metaEl.textContent = "No trajectory loaded";
+        return;
+      }
 
-      const p = puzzles[puzzleIdx];
-      const question = parseGrid(p.question);
-      const answer = parseGrid(p.answer);
+      const clues = parseGrid(trajectory.question);
+      const answer = parseGrid(trajectory.answer);
+      const grid = parseGrid(trajectory.states[stepIdx]);
+      const meta = trajectory.meta || {};
 
-      metaEl.textContent = `source: ${p.source} · rating: ${p.rating}`;
-      indexEl.textContent = `${puzzleIdx + 1} / ${puzzles.length}`;
+      metaEl.textContent = [
+        `split: ${meta.split}`,
+        `epoch: ${meta.epoch}`,
+        `puzzle: ${meta.puzzle_index}`,
+        meta.rating !== undefined ? `rating: ${meta.rating}` : null,
+        `rollout steps: ${trajectory.states.length - 1}`,
+      ].filter(Boolean).join(" · ");
+
+      slider.max = trajectory.states.length - 1;
+      slider.value = stepIdx;
+      stepIndexEl.textContent = `step ${stepIdx} / ${trajectory.states.length - 1}`;
+      errorEl.textContent = "";
+
+      document.getElementById("stepFirst").disabled = stepIdx === 0;
+      document.getElementById("stepPrev").disabled = stepIdx === 0;
+      document.getElementById("stepNext").disabled = stepIdx === trajectory.states.length - 1;
+      document.getElementById("stepLast").disabled = stepIdx === trajectory.states.length - 1;
 
       gridEl.innerHTML = "";
       for (let r = 0; r < 9; r++) {
@@ -113,45 +281,131 @@
           if (c === 2 || c === 5) cell.classList.add("box-right");
           if (r === 2 || r === 5) cell.classList.add("box-bottom");
 
-          const q = question[r][c];
-          const a = answer[r][c];
-          if (q !== 0) {
-            cell.textContent = q;
+          const clue = clues[r][c];
+          const value = grid[r][c];
+          if (clue !== 0) {
+            cell.textContent = clue;
             cell.classList.add("given");
-          } else if (showAnswer) {
-            cell.textContent = a;
-            cell.classList.add("solution");
+          } else if (value !== 0) {
+            cell.textContent = value;
+            cell.classList.add(value === answer[r][c] ? "correct" : "incorrect");
           }
           gridEl.appendChild(cell);
         }
       }
     }
 
-    async function load() {
-      const errorEl = document.getElementById("error");
-      try {
-        const res = await fetch("puzzles.json");
-        if (!res.ok) throw new Error("No data files found");
-        puzzles = await res.json();
-        errorEl.textContent = "";
-        renderPuzzle();
-      } catch (e) {
-        errorEl.textContent = "Could not load data. Run: uv run export-viz, then serve the project root.";
-        document.getElementById("meta").textContent = "";
+    function fillSelect(select, values, formatter = v => v) {
+      select.innerHTML = "";
+      for (const value of values) {
+        const opt = document.createElement("option");
+        opt.value = value;
+        opt.textContent = formatter(value);
+        select.appendChild(opt);
       }
     }
 
-    document.getElementById("prev").onclick = () => {
-      puzzleIdx = (puzzleIdx - 1 + puzzles.length) % puzzles.length;
-      renderPuzzle();
-    };
-    document.getElementById("next").onclick = () => {
-      puzzleIdx = (puzzleIdx + 1) % puzzles.length;
-      renderPuzzle();
-    };
-    document.getElementById("showAnswer").onchange = renderPuzzle;
+    async function loadTrajectory() {
+      const runId = document.getElementById("runSelect").value;
+      const split = document.getElementById("splitSelect").value;
+      const epoch = document.getElementById("epochSelect").value;
+      const puzzle = document.getElementById("puzzleSelect").value;
+      const errorEl = document.getElementById("error");
+      const path = `${RUNS}/${runId}/trajectories/${split}/epoch_${String(epoch).padStart(4, "0")}/puzzle_${String(puzzle).padStart(4, "0")}.json`;
+      try {
+        const res = await fetch(path);
+        if (!res.ok) throw new Error(`Missing trajectory: ${path}`);
+        trajectory = await res.json();
+        stepIdx = 0;
+        renderTrajectory();
+      } catch (e) {
+        trajectory = null;
+        errorEl.textContent = String(e.message);
+        renderTrajectory();
+      }
+    }
 
-    load();
+    async function loadRun(runId) {
+      const errorEl = document.getElementById("error");
+      try {
+        const [metricsRes, manifestRes] = await Promise.all([
+          fetch(`${RUNS}/${runId}/history.json`),
+          fetch(`${RUNS}/${runId}/manifest.json`),
+        ]);
+        if (!metricsRes.ok) throw new Error("Missing history.json");
+        if (!manifestRes.ok) throw new Error("Missing manifest.json");
+        metrics = await metricsRes.json();
+        manifest = await manifestRes.json();
+        renderCharts();
+
+        fillSelect(document.getElementById("splitSelect"), manifest.splits ? Object.keys(manifest.splits) : []);
+        await updateEpochOptions();
+        errorEl.textContent = "";
+      } catch (e) {
+        metrics = null;
+        manifest = null;
+        errorEl.textContent = `${e.message}. Train a run first: uv run train`;
+        renderCharts();
+      }
+    }
+
+    async function updateEpochOptions() {
+      const split = document.getElementById("splitSelect").value;
+      const epochs = manifest?.splits?.[split] ? Object.keys(manifest.splits[split]).map(Number).sort((a, b) => a - b) : [];
+      fillSelect(document.getElementById("epochSelect"), epochs);
+      await updatePuzzleOptions();
+    }
+
+    async function updatePuzzleOptions() {
+      const split = document.getElementById("splitSelect").value;
+      const epoch = document.getElementById("epochSelect").value;
+      const puzzles = manifest?.splits?.[split]?.[epoch] || [];
+      fillSelect(document.getElementById("puzzleSelect"), puzzles);
+      await loadTrajectory();
+    }
+
+    function setStep(idx) {
+      if (!trajectory) return;
+      stepIdx = Math.max(0, Math.min(idx, trajectory.states.length - 1));
+      renderTrajectory();
+    }
+
+    async function listRuns() {
+      const res = await fetch(`${RUNS}/`);
+      if (!res.ok) throw new Error("Could not list runs/");
+      const html = await res.text();
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      return [...doc.querySelectorAll("a")]
+        .map(a => a.getAttribute("href"))
+        .filter(href => href && href.endsWith("/") && href !== "../")
+        .map(href => href.replace(/\/$/, ""))
+        .sort()
+        .reverse();
+    }
+
+    async function init() {
+      const errorEl = document.getElementById("error");
+      try {
+        runs = await listRuns();
+        fillSelect(document.getElementById("runSelect"), runs);
+        if (!runs.length) throw new Error("No training runs");
+        await loadRun(runs[0]);
+      } catch (e) {
+        errorEl.textContent = `${e.message}. Serve the project root: uv run python -m http.server`;
+      }
+
+      document.getElementById("runSelect").onchange = e => loadRun(e.target.value);
+      document.getElementById("splitSelect").onchange = updateEpochOptions;
+      document.getElementById("epochSelect").onchange = updatePuzzleOptions;
+      document.getElementById("puzzleSelect").onchange = loadTrajectory;
+      document.getElementById("stepSlider").oninput = e => setStep(parseInt(e.target.value, 10));
+      document.getElementById("stepFirst").onclick = () => setStep(0);
+      document.getElementById("stepPrev").onclick = () => setStep(stepIdx - 1);
+      document.getElementById("stepNext").onclick = () => setStep(stepIdx + 1);
+      document.getElementById("stepLast").onclick = () => setStep(trajectory ? trajectory.states.length - 1 : 0);
+    }
+
+    init();
   </script>
 </body>
 </html>

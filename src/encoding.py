@@ -25,3 +25,12 @@ def grid_to_onehot(grid: torch.Tensor) -> torch.Tensor:
 def decode_logits(logits: torch.Tensor) -> torch.Tensor:
     """Decode per-cell logits into a grid of digits 1-9."""
     return logits.argmax(dim=-1) + 1
+
+
+def onehot_to_grid(onehot: torch.Tensor) -> torch.Tensor:
+    """Decode one-hot state to digit grid. Empty cells -> 0."""
+    filled = onehot.sum(dim=-1) > 0
+    grid = torch.zeros(onehot.shape[:-1], dtype=torch.long, device=onehot.device)
+    if filled.any():
+        grid[filled] = onehot[filled].argmax(dim=-1) + 1
+    return grid
