@@ -12,15 +12,21 @@ OUTPUT_DIM = GRID_SIZE * GRID_SIZE * NUM_CLASSES
 class NextStateModel(nn.Module):
     """Predict solved grid logits from current one-hot state."""
 
-    def __init__(self, hidden: int = 512):
+    def __init__(self, hidden_sizes: list[int] | None = None):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(INPUT_DIM, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, OUTPUT_DIM),
-        )
+        if hidden_sizes is None:
+            hidden_sizes = [512, 512]
+        if not hidden_sizes:
+            raise ValueError("hidden_sizes must contain at least one layer width")
+
+        layers: list[nn.Module] = []
+        in_dim = INPUT_DIM
+        for hidden in hidden_sizes:
+            layers.extend([nn.Linear(in_dim, hidden), nn.ReLU()])
+            in_dim = hidden
+        layers.append(nn.Linear(in_dim, OUTPUT_DIM))
+        self.net = nn.Sequential(*layers)
+        self.hidden_sizes = list(hidden_sizes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: (B, 9, 9, 9) -> logits (B, 9, 9, 9)."""

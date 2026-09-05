@@ -277,7 +277,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train rollout sudoku model")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--hidden", type=int, default=512)
+    parser.add_argument("--weight-decay", type=float, default=0.0, help="L2 regularization (Adam weight decay)")
+    parser.add_argument(
+        "--hidden-sizes",
+        type=int,
+        nargs="+",
+        default=[512, 512],
+        metavar="N",
+        help="Hidden layer widths (e.g. 256 for one layer, 512 512 for two)",
+    )
     parser.add_argument(
         "--max-rollout-iter",
         type=int,
@@ -323,8 +331,8 @@ def main() -> None:
     val_loader = DataLoader(val_ds, batch_size=1, collate_fn=collate_puzzles)
     test_loader = DataLoader(test_ds, batch_size=1, collate_fn=collate_puzzles)
 
-    model = NextStateModel(hidden=args.hidden).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    model = NextStateModel(hidden_sizes=args.hidden_sizes).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_fn = nn.BCEWithLogitsLoss()
     best_val_loss = float("inf")
     manifest = load_manifest(run_dir)
@@ -369,13 +377,13 @@ def main() -> None:
             "args": args,
         }
         save_checkpoint(run_dir / "last.pt", **ckpt_kwargs)
+        test = None
         if val.loss < best_val_loss:
             best_val_loss = val.loss
             test = measure_split(
                 model, test_loader, loss_fn, device, max_rollout_iter=args.max_rollout_iter
             )
             save_checkpoint(run_dir / "best.pt", **ckpt_kwargs, test=test)
-            save_best_test_metrics(run_dir, epoch=epoch, test=test)
         epoch_seconds = time.perf_counter() - epoch_start
         save_epoch_metrics(
             run_dir,
@@ -385,6 +393,8 @@ def main() -> None:
             epoch_seconds=epoch_seconds,
             args=args,
         )
+        if test is not None:
+            save_best_test_metrics(run_dir, epoch=epoch, test=test)
         print(
             f"epoch {epoch}: "
             f"loss={train.loss:.4f}/{val.loss:.4f} "

@@ -417,13 +417,20 @@
       return (history?.epochs || []).reduce((sum, e) => sum + (e.epoch_seconds ?? 0), 0);
     }
 
+    function formatHiddenSizes(args) {
+      if (args.hidden_sizes?.length) return args.hidden_sizes.join(" → ");
+      if (args.hidden != null) return String(args.hidden);
+      return "—";
+    }
+
     function buildRunStats(args, history) {
       const trainN = args.train_samples ?? args.max_samples;
       const valN = args.val_samples_count ?? args.val_samples;
       const testN = args.test_samples_count ?? args.test_samples ?? args.max_samples;
       const stats = [
         { label: "Learning rate", value: args.lr },
-        { label: "Hidden size", value: args.hidden },
+        { label: "Weight decay", value: args.weight_decay ?? 0 },
+        { label: "Hidden layers", value: formatHiddenSizes(args) },
         { label: "Max rollout iter", value: args.max_rollout_iter ?? 100 },
         { label: "Epochs", value: args.epochs },
       ];
