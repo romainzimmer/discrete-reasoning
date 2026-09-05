@@ -1,0 +1,20 @@
+[project]
+name = "discrete-reasoning"
+version = "0.1.0"
+description = "Sudoku extreme experiments"
+requires-python = ">=3.11"
+dependencies = [
+    "huggingface-hub>=0.27.0",
+    "numpy<2; platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "torch>=2.0.0,<2.3.0; platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "torch>=2.0.0; platform_machine != 'x86_64' or sys_platform != 'darwin'",
+]
+
+[project.scripts]
+download-dataset = "discrete_reasoning.download:main"
+export-viz = "discrete_reasoning.export_viz:main"
+export-trajectory = "discrete_reasoning.export_trajectory:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

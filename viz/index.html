@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sudoku Extreme Viewer</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 520px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      background: #fafafa;
+      color: #111;
+    }
+    h1 { font-size: 1.25rem; margin-bottom: 0.5rem; }
+    .meta { font-size: 0.85rem; color: #555; margin-bottom: 1rem; }
+    .legend {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      font-size: 0.8rem;
+      margin-bottom: 1rem;
+    }
+    .legend-item { display: flex; align-items: center; gap: 0.35rem; }
+    .swatch {
+      width: 1rem;
+      height: 1rem;
+      border: 1px solid #ccc;
+    }
+    .swatch.given { background: #fff; }
+    .swatch.correct { background: #dcfce7; }
+    .swatch.incorrect { background: #fee2e2; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(9, 1fr);
+      width: min(360px, 90vw);
+      aspect-ratio: 1;
+      border: 2px solid #111;
+      background: #fff;
+    }
+    .cell {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: clamp(1rem, 4vw, 1.4rem);
+      font-weight: 500;
+      border: 1px solid #ccc;
+    }
+    .cell.given { background: #fff; color: #111; font-weight: 700; }
+    .cell.correct { background: #dcfce7; color: #15803d; }
+    .cell.incorrect { background: #fee2e2; color: #b91c1c; }
+    .cell.solution { color: #15803d; }
+    .cell.box-right { border-right: 2px solid #111; }
+    .cell.box-bottom { border-bottom: 2px solid #111; }
+    .controls {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 1rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .controls.hidden { display: none; }
+    button, label {
+      font: inherit;
+      padding: 0.4rem 0.75rem;
+      cursor: pointer;
+    }
+    button {
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: #fff;
+    }
+    button:hover { background: #f3f4f6; }
+    button:disabled { opacity: 0.4; cursor: default; }
+    input[type="checkbox"] { margin-right: 0.25rem; }
+    input[type="range"] { flex: 1; min-width: 120px; }
+    .index { margin-left: auto; font-size: 0.85rem; color: #555; }
+    .error { color: #b91c1c; }
+  </style>
+</head>
+<body>
+  <h1>Sudoku Extreme</h1>
+  <div class="meta" id="meta">Loading...</div>
+  <div class="legend hidden" id="legend">
+    <div class="legend-item"><span class="swatch given"></span> clue</div>
+    <div class="legend-item"><span class="swatch correct"></span> correct fill</div>
+    <div class="legend-item"><span class="swatch incorrect"></span> wrong fill</div>
+  </div>
+  <div class="grid" id="grid"></div>
+
+  <div class="controls hidden" id="trajectoryControls">
+    <button id="stepFirst">⏮</button>
+    <button id="stepPrev">←</button>
+    <button id="stepNext">→</button>
+    <button id="stepLast">⏭</button>
+    <input type="range" id="stepSlider" min="0" max="0" value="0">
+    <span class="index" id="stepIndex"></span>
+  </div>
+
+  <div class="controls" id="puzzleControls">
+    <button id="prev">← Prev puzzle</button>
+    <button id="next">Next puzzle →</button>
+    <label><input type="checkbox" id="showAnswer"> Show answer</label>
+    <span class="index" id="index"></span>
+  </div>
+
+  <p class="error" id="error"></p>
+
+  <script>
+    let puzzles = [];
+    let puzzleIdx = 0;
+    let trajectory = null;
+    let stepIdx = 0;
+
+    function parseGrid(s) {
+      const grid = [];
+      for (let i = 0; i < 9; i++) {
+        const row = [];
+        for (let j = 0; j < 9; j++) {
+          const c = s[i * 9 + j];
+          row.push(c === "." ? 0 : parseInt(c, 10));
+        }
+        grid.push(row);
+      }
+      return grid;
+    }
+
+    function applySteps(clues, steps, t) {
+      const grid = clues.map(row => row.slice());
+      for (let i = 0; i < t; i++) {
+        const [r, c, v] = steps[i];
+        grid[r][c] = v;
+      }
+      return grid;
+    }
+
+    function renderTrajectory() {
+      const gridEl = document.getElementById("grid");
+      const metaEl = document.getElementById("meta");
+      const stepIndexEl = document.getElementById("stepIndex");
+      const slider = document.getElementById("stepSlider");
+
+      const clues = parseGrid(trajectory.question);
+      const answer = parseGrid(trajectory.answer);
+      const grid = applySteps(clues, trajectory.steps, stepIdx);
+
+      const meta = trajectory.meta || {};
+      const metaParts = [];
+      if (meta.source) metaParts.push(`source: ${meta.source}`);
+      if (meta.rating !== undefined) metaParts.push(`rating: ${meta.rating}`);
+      metaEl.textContent = metaParts.length ? metaParts.join(" · ") : "Solver trajectory";
+
+      stepIndexEl.textContent = `step ${stepIdx} / ${trajectory.steps.length}`;
+      slider.value = stepIdx;
+
+      document.getElementById("stepFirst").disabled = stepIdx === 0;
+      document.getElementById("stepPrev").disabled = stepIdx === 0;
+      document.getElementById("stepNext").disabled = stepIdx === trajectory.steps.length;
+      document.getElementById("stepLast").disabled = stepIdx === trajectory.steps.length;
+
+      gridEl.innerHTML = "";
+      for (let r = 0; r < 9; r++) {
+        for (let c = 0; c < 9; c++) {
+          const cell = document.createElement("div");
+          cell.className = "cell";
+          if (c === 2 || c === 5) cell.classList.add("box-right");
+          if (r === 2 || r === 5) cell.classList.add("box-bottom");
+
+          const clue = clues[r][c];
+          const value = grid[r][c];
+          if (clue !== 0) {
+            cell.textContent = clue;
+            cell.classList.add("given");
+          } else if (value !== 0) {
+            cell.textContent = value;
+            cell.classList.add(value === answer[r][c] ? "correct" : "incorrect");
+          }
+          gridEl.appendChild(cell);
+        }
+      }
+    }
+
+    function renderPuzzle() {
+      const gridEl = document.getElementById("grid");
+      const metaEl = document.getElementById("meta");
+      const indexEl = document.getElementById("index");
+      const showAnswer = document.getElementById("showAnswer").checked;
+
+      if (!puzzles.length) return;
+
+      const p = puzzles[puzzleIdx];
+      const question = parseGrid(p.question);
+      const answer = parseGrid(p.answer);
+
+      metaEl.textContent = `source: ${p.source} · rating: ${p.rating}`;
+      indexEl.textContent = `${puzzleIdx + 1} / ${puzzles.length}`;
+
+      gridEl.innerHTML = "";
+      for (let r = 0; r < 9; r++) {
+        for (let c = 0; c < 9; c++) {
+          const cell = document.createElement("div");
+          cell.className = "cell";
+          if (c === 2 || c === 5) cell.classList.add("box-right");
+          if (r === 2 || r === 5) cell.classList.add("box-bottom");
+
+          const q = question[r][c];
+          const a = answer[r][c];
+          if (q !== 0) {
+            cell.textContent = q;
+            cell.classList.add("given");
+          } else if (showAnswer) {
+            cell.textContent = a;
+            cell.classList.add("solution");
+          }
+          gridEl.appendChild(cell);
+        }
+      }
+    }
+
+    function setMode(mode) {
+      const isTrajectory = mode === "trajectory";
+      document.getElementById("trajectoryControls").classList.toggle("hidden", !isTrajectory);
+      document.getElementById("puzzleControls").classList.toggle("hidden", isTrajectory);
+      document.getElementById("legend").classList.toggle("hidden", !isTrajectory);
+    }
+
+    function setStep(idx) {
+      stepIdx = Math.max(0, Math.min(idx, trajectory.steps.length));
+      renderTrajectory();
+    }
+
+    async function load() {
+      const errorEl = document.getElementById("error");
+      try {
+        const trajRes = await fetch("trajectory.json");
+        if (trajRes.ok) {
+          trajectory = await trajRes.json();
+          stepIdx = 0;
+          const slider = document.getElementById("stepSlider");
+          slider.max = trajectory.steps.length;
+          slider.oninput = () => setStep(parseInt(slider.value, 10));
+          document.getElementById("stepFirst").onclick = () => setStep(0);
+          document.getElementById("stepPrev").onclick = () => setStep(stepIdx - 1);
+          document.getElementById("stepNext").onclick = () => setStep(stepIdx + 1);
+          document.getElementById("stepLast").onclick = () => setStep(trajectory.steps.length);
+          setMode("trajectory");
+          errorEl.textContent = "";
+          renderTrajectory();
+          return;
+        }
+
+        const res = await fetch("puzzles.json");
+        if (!res.ok) throw new Error("No data files found");
+        puzzles = await res.json();
+        setMode("puzzle");
+        errorEl.textContent = "";
+        renderPuzzle();
+      } catch (e) {
+        errorEl.textContent =
+          "Could not load data. Run: uv run export-viz or uv run export-trajectory, then serve viz/.";
+        document.getElementById("meta").textContent = "";
+      }
+    }
+
+    document.getElementById("prev").onclick = () => {
+      puzzleIdx = (puzzleIdx - 1 + puzzles.length) % puzzles.length;
+      renderPuzzle();
+    };
+    document.getElementById("next").onclick = () => {
+      puzzleIdx = (puzzleIdx + 1) % puzzles.length;
+      renderPuzzle();
+    };
+    document.getElementById("showAnswer").onchange = renderPuzzle;
+
+    load();
+  </script>
+</body>
+</html>
