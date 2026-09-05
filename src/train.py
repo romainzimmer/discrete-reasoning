@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import NextStateModel
-from rollout import rollout_solve, rollout_train_batch
+from rollout import DEFAULT_MAX_ROLLOUT_ITER, rollout_solve, rollout_train_batch
 from viz_data import (
     load_manifest,
     save_epoch_trajectories,
@@ -75,7 +75,6 @@ def save_epoch_metrics(
     epoch: int,
     train: EpochStats,
     val: EpochStats,
-    test: EpochStats,
     epoch_seconds: float,
     args: argparse.Namespace,
 ) -> None:
@@ -93,11 +92,17 @@ def save_epoch_metrics(
             "epoch_seconds": epoch_seconds,
             **{f"train_{k}": v for k, v in asdict(train).items()},
             **{f"val_{k}": v for k, v in asdict(val).items()},
-            **{f"test_{k}": v for k, v in asdict(test).items()},
         }
     )
     history["epochs"].sort(key=lambda row: row["epoch"])
     history["total_seconds"] = sum(e.get("epoch_seconds", 0) for e in history["epochs"])
+    history_path.write_text(json.dumps(history, indent=2))
+
+
+def save_best_test_metrics(run_dir: Path, *, epoch: int, test: EpochStats) -> None:
+    history_path = run_dir / "history.json"
+    history = json.loads(history_path.read_text())
+    history["test"] = {"best_epoch": epoch, **asdict(test)}
     history_path.write_text(json.dumps(history, indent=2))
 
 
@@ -115,33 +120,36 @@ def save_checkpoint(
     epoch: int,
     train: EpochStats,
     val: EpochStats,
-    test: EpochStats,
+    test: EpochStats | None = None,
     args: argparse.Namespace,
 ) -> None:
-    torch.save(
-        {
-            "epoch": epoch,
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "train_loss": train.loss,
-            "train_avg_rollout_steps": train.avg_rollout_steps,
-            "train_max_iter_pct": train.max_iter_pct,
-            "train_cell_acc": train.cell_acc,
-            "train_puzzle_acc": train.puzzle_acc,
-            "val_loss": val.loss,
-            "val_avg_rollout_steps": val.avg_rollout_steps,
-            "val_max_iter_pct": val.max_iter_pct,
-            "val_cell_acc": val.cell_acc,
-            "val_puzzle_acc": val.puzzle_acc,
-            "test_loss": test.loss,
-            "test_avg_rollout_steps": test.avg_rollout_steps,
-            "test_max_iter_pct": test.max_iter_pct,
-            "test_cell_acc": test.cell_acc,
-            "test_puzzle_acc": test.puzzle_acc,
-            "args": vars(args),
-        },
-        path,
-    )
+    payload = {
+        "epoch": epoch,
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "train_loss": train.loss,
+        "train_avg_rollout_steps": train.avg_rollout_steps,
+        "train_max_iter_pct": train.max_iter_pct,
+        "train_cell_acc": train.cell_acc,
+        "train_puzzle_acc": train.puzzle_acc,
+        "val_loss": val.loss,
+        "val_avg_rollout_steps": val.avg_rollout_steps,
+        "val_max_iter_pct": val.max_iter_pct,
+        "val_cell_acc": val.cell_acc,
+        "val_puzzle_acc": val.puzzle_acc,
+        "args": vars(args),
+    }
+    if test is not None:
+        payload.update(
+            {
+                "test_loss": test.loss,
+                "test_avg_rollout_steps": test.avg_rollout_steps,
+                "test_max_iter_pct": test.max_iter_pct,
+                "test_cell_acc": test.cell_acc,
+                "test_puzzle_acc": test.puzzle_acc,
+            }
+        )
+    torch.save(payload, path)
 
 
 @torch.no_grad()
@@ -149,6 +157,8 @@ def measure_accuracy(
     model: NextStateModel,
     loader: DataLoader,
     device: torch.device,
+    *,
+    max_rollout_iter: int,
 ) -> tuple[float, float]:
     model.eval()
     correct_cells = 0
@@ -157,7 +167,12 @@ def measure_accuracy(
     n = 0
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
-        pred = rollout_solve(model, batch["clues_onehot"], batch["clues"])[0]
+        pred = rollout_solve(
+            model,
+            batch["clues_onehot"],
+            batch["clues"],
+            max_rollout_iter=max_rollout_iter,
+        )[0]
         answer = batch["answer"][0]
         correct_cells += (pred == answer).sum().item()
         total_cells += answer.numel()
@@ -173,6 +188,8 @@ def train_epoch(
     optimizer: torch.optim.Optimizer,
     loss_fn: nn.Module,
     device: torch.device,
+    *,
+    max_rollout_iter: int,
 ) -> EpochStats:
     model.train()
     total_loss = 0.0
@@ -187,6 +204,7 @@ def train_epoch(
             batch["clues_onehot"],
             batch["answer"],
             loss_fn,
+            max_rollout_iter=max_rollout_iter,
         )
         optimizer.zero_grad()
         result.loss.backward()
@@ -208,6 +226,8 @@ def measure_split(
     loader: DataLoader,
     loss_fn: nn.Module,
     device: torch.device,
+    *,
+    max_rollout_iter: int,
 ) -> EpochStats:
     model.eval()
     total_loss = 0.0
@@ -225,6 +245,7 @@ def measure_split(
             batch["clues_onehot"],
             batch["answer"],
             loss_fn,
+            max_rollout_iter=max_rollout_iter,
         )
         total_loss += result.loss.item()
         total_steps += result.steps
@@ -235,6 +256,7 @@ def measure_split(
             model,
             batch["clues_onehot"],
             batch["clues"],
+            max_rollout_iter=max_rollout_iter,
         )[0]
         answer = batch["answer"][0]
         correct_cells += (pred == answer).sum().item()
@@ -256,6 +278,12 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--hidden", type=int, default=512)
+    parser.add_argument(
+        "--max-rollout-iter",
+        type=int,
+        default=DEFAULT_MAX_ROLLOUT_ITER,
+        help="Max rollout iterations per puzzle",
+    )
     parser.add_argument("--min-rating", type=int, default=None)
     parser.add_argument("--max-rating", type=int, default=None)
     parser.add_argument("--max-samples", type=int, default=None, help="Max puzzles from train.csv before train/val split")
@@ -307,10 +335,15 @@ def main() -> None:
 
     for epoch in range(1, args.epochs + 1):
         epoch_start = time.perf_counter()
-        train = train_epoch(model, train_loader, optimizer, loss_fn, device)
-        train.cell_acc, train.puzzle_acc = measure_accuracy(model, train_loader, device)
-        val = measure_split(model, val_loader, loss_fn, device)
-        test = measure_split(model, test_loader, loss_fn, device)
+        train = train_epoch(
+            model, train_loader, optimizer, loss_fn, device, max_rollout_iter=args.max_rollout_iter
+        )
+        train.cell_acc, train.puzzle_acc = measure_accuracy(
+            model, train_loader, device, max_rollout_iter=args.max_rollout_iter
+        )
+        val = measure_split(
+            model, val_loader, loss_fn, device, max_rollout_iter=args.max_rollout_iter
+        )
         save_epoch_checkpoint(run_dir, epoch, model)
         model.eval()
         for split, rows in viz_rows.items():
@@ -323,6 +356,7 @@ def main() -> None:
                 epoch=epoch,
                 run_dir=run_dir,
                 device=device,
+                max_rollout_iter=args.max_rollout_iter,
             )
             update_manifest_split(manifest, split, epoch, puzzle_indices)
         save_manifest(run_dir, manifest)
@@ -332,28 +366,30 @@ def main() -> None:
             "epoch": epoch,
             "train": train,
             "val": val,
-            "test": test,
             "args": args,
         }
         save_checkpoint(run_dir / "last.pt", **ckpt_kwargs)
         if val.loss < best_val_loss:
             best_val_loss = val.loss
-            save_checkpoint(run_dir / "best.pt", **ckpt_kwargs)
+            test = measure_split(
+                model, test_loader, loss_fn, device, max_rollout_iter=args.max_rollout_iter
+            )
+            save_checkpoint(run_dir / "best.pt", **ckpt_kwargs, test=test)
+            save_best_test_metrics(run_dir, epoch=epoch, test=test)
         epoch_seconds = time.perf_counter() - epoch_start
         save_epoch_metrics(
             run_dir,
             epoch=epoch,
             train=train,
             val=val,
-            test=test,
             epoch_seconds=epoch_seconds,
             args=args,
         )
         print(
             f"epoch {epoch}: "
-            f"train_loss={train.loss:.4f} val_loss={val.loss:.4f} test_loss={test.loss:.4f} "
-            f"cell_acc={train.cell_acc:.4f}/{val.cell_acc:.4f}/{test.cell_acc:.4f} "
-            f"puzzle_acc={train.puzzle_acc:.4f}/{val.puzzle_acc:.4f}/{test.puzzle_acc:.4f} "
+            f"loss={train.loss:.4f}/{val.loss:.4f} "
+            f"cell_acc={train.cell_acc:.4f}/{val.cell_acc:.4f} "
+            f"puzzle_acc={train.puzzle_acc:.4f}/{val.puzzle_acc:.4f} "
             f"time={epoch_seconds:.1f}s",
             flush=True,
         )

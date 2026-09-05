@@ -424,6 +424,7 @@
       const stats = [
         { label: "Learning rate", value: args.lr },
         { label: "Hidden size", value: args.hidden },
+        { label: "Max rollout iter", value: args.max_rollout_iter ?? 100 },
         { label: "Epochs", value: args.epochs },
       ];
       const totalSeconds = totalRunSeconds(history);
@@ -584,37 +585,46 @@
       ];
     }
 
-    function testMetric(epoch, key) {
-      const val = epoch[key];
-      if (val != null) return val;
-      if (key.startsWith("test_")) return epoch[key.replace(/^test_/, "eval_")];
-      return null;
-    }
-
     function renderTestSummary() {
       const gridEl = document.getElementById("testSummary");
       const noteEl = document.getElementById("testSectionNote");
       const panelEl = document.getElementById("testPanel");
-      if (!metrics?.epochs?.length) {
+      const test = metrics?.test ?? legacyTestMetrics(metrics);
+      if (!test) {
         gridEl.innerHTML = "";
         noteEl.textContent = "";
         panelEl.hidden = true;
         return;
       }
       panelEl.hidden = false;
-      const last = metrics.epochs[metrics.epochs.length - 1];
-      noteEl.textContent = `Held-out test split · epoch ${last.epoch}`;
+      const epoch = test.best_epoch ?? metrics?.epochs?.at(-1)?.epoch;
+      noteEl.textContent = `Held-out test split · best validation epoch ${epoch}`;
       const pct = v => `${(Number(v) * 100).toFixed(1)}%`;
       const stats = [
-        { label: "Loss", value: testMetric(last, "test_loss"), format: v => Number(v).toFixed(4) },
-        { label: "Cell accuracy", value: testMetric(last, "test_cell_acc"), format: pct },
-        { label: "Puzzle accuracy", value: testMetric(last, "test_puzzle_acc"), format: pct },
-        { label: "Avg rollout steps", value: testMetric(last, "test_avg_rollout_steps"), format: v => Number(v).toFixed(1) },
-        { label: "Max-iter rollout", value: testMetric(last, "test_max_iter_pct"), format: pct },
+        { label: "Loss", value: test.loss, format: v => Number(v).toFixed(4) },
+        { label: "Cell accuracy", value: test.cell_acc, format: pct },
+        { label: "Puzzle accuracy", value: test.puzzle_acc, format: pct },
+        { label: "Avg rollout steps", value: test.avg_rollout_steps, format: v => Number(v).toFixed(1) },
+        { label: "Max-iter rollout", value: test.max_iter_pct, format: pct },
       ]
         .filter(stat => stat.value != null)
         .map(stat => ({ label: stat.label, value: stat.format(stat.value) }));
       gridEl.innerHTML = renderStatGrid(stats);
+    }
+
+    function legacyTestMetrics(metrics) {
+      const last = metrics?.epochs?.at(-1);
+      if (!last) return null;
+      const loss = last.test_loss ?? last.eval_loss;
+      if (loss == null) return null;
+      return {
+        best_epoch: last.epoch,
+        loss,
+        cell_acc: last.test_cell_acc ?? last.eval_cell_acc,
+        puzzle_acc: last.test_puzzle_acc ?? last.eval_puzzle_acc,
+        avg_rollout_steps: last.test_avg_rollout_steps ?? last.eval_avg_rollout_steps,
+        max_iter_pct: last.test_max_iter_pct ?? last.eval_max_iter_pct,
+      };
     }
 
     function renderCharts() {

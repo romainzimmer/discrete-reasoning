@@ -48,7 +48,7 @@ def masked_bce_with_logits(
     return loss_fn(logits[mask_exp], target_onehot[mask_exp])
 
 
-MAX_ROLLOUT_STEPS = 81
+DEFAULT_MAX_ROLLOUT_ITER = 100
 
 
 def rollout_train_batch(
@@ -57,15 +57,15 @@ def rollout_train_batch(
     clues_onehot: torch.Tensor,
     answer: torch.Tensor,
     loss_fn: torch.nn.BCEWithLogitsLoss,
-    max_steps: int = MAX_ROLLOUT_STEPS,
+    max_rollout_iter: int = DEFAULT_MAX_ROLLOUT_ITER,
 ) -> RolloutResult:
-    """Full rollout with contracted targets; stop at fixed point or max_steps."""
+    """Full rollout with contracted targets; stop at fixed point or max_rollout_iter."""
     state = clues_onehot
     rollout_states = [state]
     logits_list: list[torch.Tensor] = []
     converged = False
 
-    for _ in range(max_steps):
+    for _ in range(max_rollout_iter):
         logits = model(state)
         logits_list.append(logits)
         new_state = logits_to_state(logits, clues)
@@ -98,13 +98,13 @@ def rollout_solve(
     model: NextStateModel,
     clues_onehot: torch.Tensor,
     clues: torch.Tensor,
-    max_steps: int = MAX_ROLLOUT_STEPS,
+    max_rollout_iter: int = DEFAULT_MAX_ROLLOUT_ITER,
 ) -> torch.Tensor:
     """Run f until thresholded state stops changing; decode final grid with argmax."""
     state = clues_onehot
     logits = model(state)
 
-    for _ in range(max_steps):
+    for _ in range(max_rollout_iter):
         new_state = logits_to_state(logits, clues)
         if torch.equal(new_state, state):
             break
@@ -119,14 +119,14 @@ def rollout_trace(
     model: NextStateModel,
     clues_onehot: torch.Tensor,
     clues: torch.Tensor,
-    max_steps: int = MAX_ROLLOUT_STEPS,
+    max_rollout_iter: int = DEFAULT_MAX_ROLLOUT_ITER,
 ) -> list[str]:
     """Return grid strings at each rollout step: step 0 = clues, then argmax preds."""
     grids = [tensor_to_string(clues[0] if clues.dim() == 3 else clues)]
     state = clues_onehot
     logits = model(state)
 
-    for _ in range(max_steps):
+    for _ in range(max_rollout_iter):
         grid = predict_grid(logits, clues)
         grids.append(tensor_to_string(grid[0] if grid.dim() == 3 else grid))
         new_state = logits_to_state(logits, clues)

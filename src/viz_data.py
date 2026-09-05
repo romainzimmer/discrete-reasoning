@@ -53,9 +53,15 @@ def build_trajectory(
     epoch: int,
     puzzle_index: int,
     device: torch.device,
+    max_rollout_iter: int,
 ) -> dict:
     clues = puzzle_to_tensor(row["question"]).unsqueeze(0).to(device)
-    states = rollout_trace(model, grid_to_onehot(clues), clues)
+    states = rollout_trace(
+        model,
+        grid_to_onehot(clues),
+        clues,
+        max_rollout_iter=max_rollout_iter,
+    )
     return {
         "question": row["question"],
         "answer": row["answer"],
@@ -78,6 +84,7 @@ def save_epoch_trajectories(
     epoch: int,
     run_dir: Path,
     device: torch.device,
+    max_rollout_iter: int,
 ) -> list[int]:
     puzzle_indices: list[int] = []
     for puzzle_index, row in enumerate(rows):
@@ -88,6 +95,7 @@ def save_epoch_trajectories(
             epoch=epoch,
             puzzle_index=puzzle_index,
             device=device,
+            max_rollout_iter=max_rollout_iter,
         )
         save_trajectory(run_dir, split, epoch, puzzle_index, payload)
         puzzle_indices.append(puzzle_index)
