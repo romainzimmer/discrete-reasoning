@@ -66,3 +66,23 @@ def demo_trajectory(question: str, answer: str, **meta) -> Trajectory:
             if clues[r][c] == 0:
                 traj.add_fill(r, c, solution[r][c])
     return traj
+
+
+def demo_states(clues: torch.Tensor, answer: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build demo trajectory grids from tensor clues/answer. Returns (states, T)."""
+    b = clues.size(0)
+    t = (clues == 0).sum(dim=(1, 2))
+    max_t = int(t.max().item())
+    states = torch.zeros(b, max_t + 1, 9, 9, dtype=clues.dtype, device=clues.device)
+    states[:, 0] = clues
+    for i in range(b):
+        grid = clues[i].clone()
+        step = 1
+        for r in range(9):
+            for c in range(9):
+                if clues[i, r, c] == 0:
+                    grid = grid.clone()
+                    grid[r, c] = answer[i, r, c]
+                    states[i, step] = grid
+                    step += 1
+    return states, t

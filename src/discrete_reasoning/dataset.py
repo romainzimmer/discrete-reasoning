@@ -9,7 +9,7 @@ from discrete_reasoning.trajectory import Trajectory, demo_trajectory
 
 
 class PuzzleDataset(Dataset):
-    """Clues -> fully solved pairs."""
+    """Clues and answer pairs."""
 
     def __init__(
         self,
@@ -31,11 +31,22 @@ class PuzzleDataset(Dataset):
     def __len__(self) -> int:
         return len(self.rows)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         row = self.rows[idx]
-        x = grid_to_onehot(puzzle_to_tensor(row["question"]))
-        y = grid_to_onehot(answer_to_tensor(row["answer"]))
-        return x, y
+        clues = puzzle_to_tensor(row["question"])
+        return {
+            "clues": clues,
+            "clues_onehot": grid_to_onehot(clues),
+            "answer": answer_to_tensor(row["answer"]),
+        }
+
+
+def collate_puzzles(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    return {
+        "clues": torch.stack([item["clues"] for item in batch]),
+        "clues_onehot": torch.stack([item["clues_onehot"] for item in batch]),
+        "answer": torch.stack([item["answer"] for item in batch]),
+    }
 
 
 def build_transitions(traj: Trajectory) -> list[tuple[torch.Tensor, torch.Tensor]]:

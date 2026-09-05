@@ -9,9 +9,9 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from discrete_reasoning.dataset import PuzzleDataset
-from discrete_reasoning.encoding import decode_logits
+from discrete_reasoning.dataset import PuzzleDataset, collate_puzzles
 from discrete_reasoning.model import NextStateModel
+from discrete_reasoning.rollout import rollout_solve, rollout_train_batch
 
 DEFAULT_CHECKPOINT_DIR = Path(__file__).resolve().parents[2] / "checkpoints"
 
@@ -33,6 +33,7 @@ def save_checkpoint(
     train_loss: float,
     test_loss: float,
     cell_acc: float,
+    puzzle_acc: float,
     args: argparse.Namespace,
 ) -> None:
     torch.save(
@@ -43,6 +44,7 @@ def save_checkpoint(
             "train_loss": train_loss,
             "test_loss": test_loss,
             "cell_acc": cell_acc,
+            "puzzle_acc": puzzle_acc,
             "args": vars(args),
         },
         path,
@@ -59,15 +61,20 @@ def train_epoch(
     model.train()
     total_loss = 0.0
     n = 0
-    for x, y in loader:
-        x, y = x.to(device), y.to(device)
-        logits = model(x)
-        loss = loss_fn(logits, y)
+    for batch in loader:
+        batch = {k: v.to(device) for k, v in batch.items()}
+        loss = rollout_train_batch(
+            model,
+            batch["clues"],
+            batch["clues_onehot"],
+            batch["answer"],
+            loss_fn,
+        )
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        total_loss += loss.item() * x.size(0)
-        n += x.size(0)
+        total_loss += loss.item() * batch["clues"].size(0)
+        n += batch["clues"].size(0)
     return total_loss / n
 
 
@@ -77,26 +84,40 @@ def eval_epoch(
     loader: DataLoader,
     loss_fn: nn.Module,
     device: torch.device,
-) -> tuple[float, float]:
+) -> tuple[float, float, float]:
     model.eval()
     total_loss = 0.0
     correct_cells = 0
     total_cells = 0
-    for x, y in loader:
-        x, y = x.to(device), y.to(device)
-        logits = model(x)
-        total_loss += loss_fn(logits, y).item() * x.size(0)
+    correct_puzzles = 0
+    for batch in loader:
+        batch = {k: v.to(device) for k, v in batch.items()}
+        total_loss += rollout_train_batch(
+            model,
+            batch["clues"],
+            batch["clues_onehot"],
+            batch["answer"],
+            loss_fn,
+        ).item() * batch["clues"].size(0)
 
-        pred = decode_logits(logits)
-        target = decode_logits(y)
-        correct_cells += (pred == target).sum().item()
-        total_cells += pred.numel()
+        for i in range(batch["clues"].size(0)):
+            pred = rollout_solve(
+                model,
+                batch["clues_onehot"][i : i + 1],
+                batch["clues"][i : i + 1],
+            )[0]
+            answer = batch["answer"][i]
+            correct_cells += (pred == answer).sum().item()
+            total_cells += answer.numel()
+            if torch.equal(pred, answer):
+                correct_puzzles += 1
 
-    return total_loss / len(loader.dataset), correct_cells / total_cells
+    n = len(loader.dataset)
+    return total_loss / n, correct_cells / total_cells, correct_puzzles / n
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train clues -> solved sudoku model")
+    parser = argparse.ArgumentParser(description="Train rollout sudoku model")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -118,20 +139,29 @@ def main() -> None:
     }
     train_ds = PuzzleDataset("train", **ds_kwargs)
     test_ds = PuzzleDataset("test", **ds_kwargs)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        collate_fn=collate_puzzles,
+    )
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=args.batch_size,
+        collate_fn=collate_puzzles,
+    )
 
     model = NextStateModel(hidden=args.hidden).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    loss_fn = nn.BCEWithLogitsLoss()
+    loss_fn = nn.CrossEntropyLoss()
     best_test_loss = float("inf")
 
     for epoch in range(1, args.epochs + 1):
         train_loss = train_epoch(model, train_loader, optimizer, loss_fn, device)
-        test_loss, cell_acc = eval_epoch(model, test_loader, loss_fn, device)
+        test_loss, cell_acc, puzzle_acc = eval_epoch(model, test_loader, loss_fn, device)
         print(
             f"epoch {epoch}: train_loss={train_loss:.4f} "
-            f"test_loss={test_loss:.4f} cell_acc={cell_acc:.4f}"
+            f"test_loss={test_loss:.4f} cell_acc={cell_acc:.4f} puzzle_acc={puzzle_acc:.4f}"
         )
 
         ckpt_kwargs = {
@@ -141,6 +171,7 @@ def main() -> None:
             "train_loss": train_loss,
             "test_loss": test_loss,
             "cell_acc": cell_acc,
+            "puzzle_acc": puzzle_acc,
             "args": args,
         }
         save_checkpoint(run_dir / "last.pt", **ckpt_kwargs)
