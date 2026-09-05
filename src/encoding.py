@@ -20,7 +20,7 @@ def grid_to_onehot(grid: torch.Tensor) -> torch.Tensor:
     mask = grid != 0
     if mask.any():
         digits = grid[mask] - 1
-        idx = torch.arange(mask.sum(), device=grid.device)
+        idx = mask.reshape(-1).nonzero(as_tuple=True)[0]
         onehot.view(-1, 9)[idx, digits] = 1.0
     return onehot
 
