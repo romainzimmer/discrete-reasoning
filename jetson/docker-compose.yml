@@ -9,9 +9,10 @@ x-app-base: &app-base
       TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cu132}
   image: discrete-reasoning:jetson
   working_dir: /workspace
+  environment:
+    PYTHONPATH: /workspace/src
   volumes:
-    - ../data:/workspace/data
-    - ../runs:/workspace/runs
+    - ..:/workspace
 
 services:
   download:
@@ -25,10 +26,6 @@ services:
 
   viz:
     <<: *app-base
-    volumes:
-      - ../data:/workspace/data
-      - ../runs:/workspace/runs
-      - ../viz:/workspace/viz
     ports:
       - "8000:8000"
     command:

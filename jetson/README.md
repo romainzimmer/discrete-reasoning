@@ -10,6 +10,8 @@ cd jetson
 
 ## Build
 
+Only needed once (or when dependencies change). Source code is bind-mounted from `../src`, so Python changes do not require a rebuild.
+
 ```bash
 docker compose build
 ```

@@ -21,13 +21,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./
-COPY src ./src
+RUN mkdir -p src
 
-# Torch must come from the Jetson/CUDA index; other deps resolve from PyPI.
+# Install dependencies from pyproject.toml (cached until pyproject.toml changes).
 ARG TORCH_INDEX=https://download.pytorch.org/whl/cu132
 RUN pip3 install --no-cache-dir --break-system-packages --default-timeout=86400 \
     . \
     --index-url ${TORCH_INDEX} \
     --extra-index-url https://pypi.org/simple
+
+COPY src ./src
+RUN pip3 install --no-cache-dir --break-system-packages --no-deps .
 
 CMD ["train", "--help"]
