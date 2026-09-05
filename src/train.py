@@ -326,7 +326,7 @@ def main() -> None:
         "--rollout-mode",
         choices=["threshold", "categorical"],
         default="categorical",
-        help="threshold: BCE + threshold decode; categorical: CE + argmax rollout, argmax final eval readout",
+        help="threshold: BCE + threshold rollout; categorical: CE + argmax rollout; acc/viz use argmax final",
     )
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")

@@ -53,11 +53,9 @@ def _threshold_state(config: RolloutConfig) -> bool:
     return config.mode == "threshold"
 
 
-def final_eval_grid(logits: torch.Tensor, clues: torch.Tensor, config: RolloutConfig) -> torch.Tensor:
-    """Final eval readout: argmax (softmax winner) for categorical, mode decode for threshold."""
-    if config.mode == "categorical":
-        return predict_grid(logits, clues)
-    return decode_grid(logits, clues, threshold=True)
+def final_eval_grid(logits: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
+    """Final readout for accuracy/viz: always argmax (softmax winner)."""
+    return predict_grid(logits, clues)
 
 
 def target_mask(target: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
@@ -229,7 +227,7 @@ def rollout_solve(
     _, logits_list, _, _ = _run_rollout(
         model, clues_onehot, clues, max_rollout_iter, threshold_state=threshold_state
     )
-    return final_eval_grid(logits_list[-1], clues, config)
+    return final_eval_grid(logits_list[-1], clues)
 
 
 @torch.no_grad()
@@ -241,20 +239,17 @@ def rollout_trace(
     *,
     config: RolloutConfig | None = None,
 ) -> list[str]:
-    """Return grid strings at each rollout step, plus argmax final readout when it differs."""
+    """Rollout with mode decode; last frame is argmax readout on the final step."""
     config = config or RolloutConfig()
     threshold_state = _threshold_state(config)
-    _, logits_list, cycle_length, _ = _run_rollout(
+    _, logits_list, _, _ = _run_rollout(
         model, clues_onehot, clues, max_rollout_iter, threshold_state=threshold_state
     )
     grids = [tensor_to_string(clues[0] if clues.dim() == 3 else clues)]
-    n_steps = len(logits_list) if cycle_length is None else len(logits_list) - 1
-    for i in range(n_steps):
-        grid = decode_grid(logits_list[i], clues, threshold=threshold_state)
+    for i, logits in enumerate(logits_list):
+        if i == len(logits_list) - 1:
+            grid = final_eval_grid(logits, clues)
+        else:
+            grid = decode_grid(logits, clues, threshold=threshold_state)
         grids.append(tensor_to_string(grid[0] if grid.dim() == 3 else grid))
-    if logits_list and config.mode == "categorical":
-        final = final_eval_grid(logits_list[-1], clues, config)
-        final_str = tensor_to_string(final[0] if final.dim() == 3 else final)
-        if grids[-1] != final_str:
-            grids.append(final_str)
     return grids
