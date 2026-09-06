@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import NextStateModel
-from rollout import RolloutConfig, configure_rollout_compile
+from rollout import RolloutConfig
 from train import EpochStats, measure_split, require_run_args
 
 
@@ -85,7 +85,6 @@ def main() -> None:
 
     use_cuda = device.type == "cuda"
     batch_size = int(run_args.get("batch_size", 1))
-    use_compile = bool(run_args.get("compile", use_cuda))
     test_loader = DataLoader(
         PuzzleDataset(rows=test_rows),
         batch_size=batch_size,
@@ -105,9 +104,6 @@ def main() -> None:
         num_blocks=run_args["num_blocks"],
     ).to(device)
     model.load_state_dict(ckpt["model"])
-    if use_compile:
-        model = torch.compile(model)
-        configure_rollout_compile(True)
 
     rollout_config = RolloutConfig(train_init="clues")
 

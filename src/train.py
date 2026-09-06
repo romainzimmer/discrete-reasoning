@@ -19,7 +19,6 @@ from rollout import (
     DEFAULT_TRAIN_ROLLOUT_ITER,
     RolloutConfig,
     RolloutResult,
-    configure_rollout_compile,
     rollout_train_batch,
 )
 from viz_data import (
@@ -467,12 +466,6 @@ def main() -> None:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for augment RNG and training")
     parser.add_argument("--no-augment", action="store_true", help="Disable training data augmentations")
-    parser.add_argument(
-        "--compile",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="torch.compile model and training rollout loop (default: on for CUDA)",
-    )
     parser.add_argument("--aug-digit-proba", type=float, default=0.5)
     parser.add_argument("--aug-rot-proba", type=float, default=0.5)
     parser.add_argument("--aug-band-proba", type=float, default=0.3)
@@ -482,8 +475,6 @@ def main() -> None:
         torch.manual_seed(args.seed)
 
     device = torch.device(args.device)
-    use_compile = args.compile if args.compile is not None else device.type == "cuda"
-    args.compile = use_compile
     run_dir = make_run_dir(args.runs_dir)
     print(f"Run dir: {run_dir}")
     ds_kwargs = {
@@ -523,9 +514,6 @@ def main() -> None:
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, **loader_kwargs)
 
     model = NextStateModel(width=args.width, num_blocks=args.num_blocks).to(device)
-    if use_compile:
-        model = torch.compile(model)
-        configure_rollout_compile(True)
     decay_params, no_decay_params = [], []
     for name, param in model.named_parameters():
         if not param.requires_grad:

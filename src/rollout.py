@@ -59,21 +59,6 @@ DEFAULT_EVAL_MAX_ROLLOUT_ITER = 30
 DEFAULT_TRAIN_ROLLOUT_ITER = 10
 DEFAULT_MAX_ROLLOUT_ITER = DEFAULT_EVAL_MAX_ROLLOUT_ITER
 
-_fixed_rollout_confidence_fn = None
-
-
-def configure_rollout_compile(enabled: bool) -> None:
-    """Enable torch.compile on the fixed-step training rollout loop (CUDA recommended)."""
-    global _fixed_rollout_confidence_fn
-    if enabled:
-        _fixed_rollout_confidence_fn = torch.compile(
-            _fixed_rollout_confidence_loop,
-            mode="reduce-overhead",
-        )
-    else:
-        _fixed_rollout_confidence_fn = _fixed_rollout_confidence_loop
-
-
 def logits_to_state(
     logits: torch.Tensor,
     clues: torch.Tensor,
@@ -276,10 +261,6 @@ def _advance_rollout_state(
     return attach_clue_mask(new_onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
 
 
-def _get_fixed_rollout_confidence_loop():
-    return _fixed_rollout_confidence_fn or _fixed_rollout_confidence_loop
-
-
 def _fixed_rollout_confidence_loop(
     model: NextStateModel,
     state: torch.Tensor,
@@ -399,7 +380,7 @@ def _run_rollout_fixed_select_confident_state(
         initial_onehot, _ = _ensure_batched_onehot(initial_onehot)
     ctx = _ClueContext.from_clues(clues, clues_onehot)
     state = attach_clue_mask(initial_onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
-    return _get_fixed_rollout_confidence_loop()(
+    return _fixed_rollout_confidence_loop(
         model,
         state,
         clues,
