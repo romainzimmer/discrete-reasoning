@@ -14,6 +14,7 @@ dependencies = [
 [project.scripts]
 download-dataset = "download:main"
 train = "train:main"
+eval = "eval:main"
 
 [build-system]
 requires = ["hatchling"]

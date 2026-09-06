@@ -24,6 +24,16 @@ from viz_data import (
 
 DEFAULT_RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
 
+REQUIRED_RUN_ARGS = (
+    "width",
+    "num_blocks",
+    "rollout_mode",
+    "eval_max_rollout_iter",
+    "num_workers",
+    "min_rating",
+    "max_rating",
+)
+
 
 def _epoch_desc(epoch: int, epochs: int, phase: str) -> str:
     return f"epoch {epoch}/{epochs} {phase}"
@@ -60,6 +70,25 @@ def json_safe(value):
     if isinstance(value, list):
         return [json_safe(v) for v in value]
     return value
+
+
+def require_run_args(raw: dict, *, source: str) -> dict:
+    args = raw.get("args")
+    if args is None:
+        raise KeyError(f"{source} has no 'args'")
+    missing = [key for key in REQUIRED_RUN_ARGS if key not in args]
+    if missing:
+        raise KeyError(
+            f"{source} args missing required keys: {', '.join(missing)}. "
+            "Re-run training with the current train script so defaults are saved explicitly."
+        )
+    return args
+
+
+def save_run_config(run_dir: Path, args: argparse.Namespace) -> None:
+    history_path = run_dir / "history.json"
+    history = {"run_id": run_dir.name, "args": json_safe(vars(args)), "epochs": []}
+    history_path.write_text(json.dumps(history, indent=2))
 
 
 def split_train_val(
@@ -106,12 +135,6 @@ def save_epoch_metrics(
     history_path.write_text(json.dumps(history, indent=2))
 
 
-def save_best_test_metrics(run_dir: Path, *, epoch: int, test: EpochStats) -> None:
-    history_path = run_dir / "history.json"
-    history = json.loads(history_path.read_text())
-    history["test"] = {"best_epoch": epoch, **asdict(test)}
-    history_path.write_text(json.dumps(history, indent=2))
-
 
 def save_epoch_checkpoint(run_dir: Path, epoch: int, model: NextStateModel) -> None:
     epoch_dir = run_dir / "epochs"
@@ -127,7 +150,6 @@ def save_checkpoint(
     epoch: int,
     train: TrainEpochStats,
     val: EpochStats,
-    test: EpochStats | None = None,
     args: argparse.Namespace,
 ) -> None:
     payload = {
@@ -143,17 +165,6 @@ def save_checkpoint(
         "val_puzzle_acc": val.puzzle_acc,
         "args": vars(args),
     }
-    if test is not None:
-        payload.update(
-            {
-                "test_loss": test.loss,
-                "test_avg_rollout_steps": test.avg_rollout_steps,
-                "test_max_iter_pct": test.max_iter_pct,
-                "test_avg_cycle_length": test.avg_cycle_length,
-                "test_cell_acc": test.cell_acc,
-                "test_puzzle_acc": test.puzzle_acc,
-            }
-        )
     torch.save(payload, path)
 
 
@@ -421,7 +432,7 @@ def main() -> None:
         "--eval-max-rollout-iter",
         type=int,
         default=DEFAULT_EVAL_MAX_ROLLOUT_ITER,
-        help="Max rollout iterations per puzzle during val/test/viz",
+        help="Max rollout iterations per puzzle during val/viz",
     )
     parser.add_argument("--batch-size", type=int, default=8, help="Training batch size")
     parser.add_argument(
@@ -435,7 +446,6 @@ def main() -> None:
     parser.add_argument("--max-samples", type=int, default=None, help="Max puzzles from train.csv before train/val split")
     parser.add_argument("--val-fraction", type=float, default=0.1, help="Validation fraction from train.csv pool")
     parser.add_argument("--val-samples", type=int, default=None, help="Validation puzzles (overrides val-fraction)")
-    parser.add_argument("--test-samples", type=int, default=None, help="Test puzzles cap from test.csv (default: all after filters)")
     parser.add_argument("--viz-samples", type=int, default=10, help="Puzzles per split to save for viz")
     parser.add_argument(
         "--rollout-mode",
@@ -467,14 +477,11 @@ def main() -> None:
         val_fraction=args.val_fraction,
         max_samples=args.max_samples,
     )
-    test_rows = filter_rows("test", **ds_kwargs, max_samples=args.test_samples)
-
     train_ds = PuzzleDataset(rows=train_rows)
     val_ds = PuzzleDataset(rows=val_rows)
-    test_ds = PuzzleDataset(rows=test_rows)
     args.train_samples = len(train_rows)
     args.val_samples_count = len(val_rows)
-    args.test_samples_count = len(test_rows)
+    save_run_config(run_dir, args)
 
     use_cuda = device.type == "cuda"
     loader_kwargs = {
@@ -484,7 +491,6 @@ def main() -> None:
     }
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **loader_kwargs)
     val_loader = DataLoader(val_ds, batch_size=1, **loader_kwargs)
-    test_loader = DataLoader(test_ds, batch_size=1, **loader_kwargs)
 
     model = NextStateModel(width=args.width, num_blocks=args.num_blocks).to(device)
     decay_params, no_decay_params = [], []
@@ -513,7 +519,7 @@ def main() -> None:
         "zero-gt": "zero_gt",
     }[args.train_init]
     rollout_config = RolloutConfig(mode=args.rollout_mode, train_init=train_init)
-    best_val_loss = float("inf")
+    best_val_cell_acc = -1.0
     manifest = load_manifest(run_dir)
     viz_rows = {
         "train": train_ds.rows[: args.viz_samples],
@@ -572,22 +578,9 @@ def main() -> None:
             "args": args,
         }
         save_checkpoint(run_dir / "last.pt", **ckpt_kwargs)
-        test = None
-        if val.loss < best_val_loss:
-            best_val_loss = val.loss
-            test = measure_split(
-                model,
-                test_loader,
-                loss_fn,
-                device,
-                epoch=epoch,
-                epochs=args.epochs,
-                phase="test",
-                max_rollout_iters=args.eval_max_rollout_iter,
-                rollout_config=rollout_config,
-                use_cuda=use_cuda,
-            )
-            save_checkpoint(run_dir / "best.pt", **ckpt_kwargs, test=test)
+        if val.cell_acc > best_val_cell_acc:
+            best_val_cell_acc = val.cell_acc
+            save_checkpoint(run_dir / "best.pt", **ckpt_kwargs)
         save_epoch_metrics(
             run_dir,
             epoch=epoch,
@@ -595,8 +588,6 @@ def main() -> None:
             val=val,
             args=args,
         )
-        if test is not None:
-            save_best_test_metrics(run_dir, epoch=epoch, test=test)
         print(
             f"epoch {epoch}/{args.epochs}: "
             f"train_loss={train.loss:.4f} val_loss={val.loss:.4f} "

@@ -260,7 +260,6 @@
       <canvas id="cellAccChart"></canvas>
       <div class="axis-x-label">epoch</div>
       <div class="legend">
-        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
         <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
       </div>
     </div>
@@ -269,7 +268,6 @@
       <canvas id="puzzleAccChart"></canvas>
       <div class="axis-x-label">epoch</div>
       <div class="legend">
-        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
         <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
       </div>
     </div>
@@ -602,7 +600,7 @@
     }
 
     function valMetricSeries(epochs, valKey) {
-      return [{ color: "#dc2626", values: epochs.map(e => e[valKey] ?? null) }];
+      return [{ color: "#dc2626", values: epochs.map(e => epochValMetric(e, null, valKey)) }];
     }
 
     function renderTestSummary() {
@@ -659,13 +657,13 @@
         xLabels,
         formatY: v => Number(v).toFixed(3),
       });
-      drawSeries(document.getElementById("cellAccChart"), metricSeries(epochs, "train_cell_acc", "val_cell_acc"), {
+      drawSeries(document.getElementById("cellAccChart"), valMetricSeries(epochs, "val_cell_acc"), {
         yMin: 0,
         yMax: 1,
         xLabels,
         formatY: pct,
       });
-      drawSeries(document.getElementById("puzzleAccChart"), metricSeries(epochs, "train_puzzle_acc", "val_puzzle_acc"), {
+      drawSeries(document.getElementById("puzzleAccChart"), valMetricSeries(epochs, "val_puzzle_acc"), {
         yMin: 0,
         yMax: 1,
         xLabels,

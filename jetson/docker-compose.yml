@@ -24,6 +24,11 @@ services:
     runtime: nvidia
     entrypoint: ["train"]
 
+  eval:
+    <<: *app-base
+    runtime: nvidia
+    entrypoint: ["eval"]
+
   viz:
     <<: *app-base
     ports:

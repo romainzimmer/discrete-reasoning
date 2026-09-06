@@ -43,22 +43,38 @@ Writes `data/train.csv` and `data/test.csv` (~798 MB).
 ## Train
 
 ```bash
-docker compose run --rm train --epochs 30 --lr 0.001 --weight-decay 0.01 --width 1024 --num-blocks 3 --train-rollout-iter 10 --eval-max-rollout-iter 100 --batch-size 512 --rollout-mode categorical --train-init noisy-gt
+docker compose run --rm train --epochs 30 --lr 0.001 --weight-decay 0.01 --width 1024 --num-blocks 3 --train-rollout-iter 10 --eval-max-rollout-iter 100 --batch-size 512 --num-workers 1 --val-samples 10000 --rollout-mode categorical --train-init noisy-gt
 ```
 
 Easy sudoku only (rating 0):
 
 ```bash
-docker compose run --rm train --epochs 30 --lr 0.001 --weight-decay 0.01 --width 1024 --num-blocks 3 --train-rollout-iter 10 --eval-max-rollout-iter 100 --batch-size 512 --min-rating 0 --max-rating 0 --rollout-mode categorical --train-init noisy-gt
+docker compose run --rm train --epochs 30 --lr 0.001 --weight-decay 0.01 --width 1024 --num-blocks 3 --train-rollout-iter 10 --eval-max-rollout-iter 100 --batch-size 512 --num-workers 1 --val-samples 10000 --min-rating 0 --max-rating 0 --rollout-mode categorical --train-init noisy-gt
 ```
 
 Quick test (easy sudoku, 1k train cap):
 
 ```bash
-docker compose run --rm train --epochs 5 --lr 0.001 --weight-decay 0.01 --width 512 --num-blocks 2 --train-rollout-iter 5 --eval-max-rollout-iter 100 --batch-size 64 --max-samples 1000 --min-rating 0 --max-rating 0 --test-samples 1000 --rollout-mode categorical --train-init noisy-gt
+docker compose run --rm train --epochs 5 --lr 0.001 --weight-decay 0.01 --width 512 --num-blocks 2 --train-rollout-iter 5 --eval-max-rollout-iter 100 --batch-size 64 --num-workers 1 --max-samples 1000 --min-rating 0 --max-rating 0 --val-samples 100 --rollout-mode categorical --train-init noisy-gt
 ```
 
 Checkpoints and trajectories are written to `runs/`.
+
+## Test
+
+Evaluate `best.pt` from a run (reuses rollout, rating, and dataloader settings from the checkpoint):
+
+```bash
+docker compose run --rm eval runs/20260906-145132-bda4748d
+```
+
+Cap test puzzles:
+
+```bash
+docker compose run --rm eval runs/20260906-145132-bda4748d --max-test-samples 1000
+```
+
+Full test split (omit `--max-test-samples`).
 
 ## Visualize
 
