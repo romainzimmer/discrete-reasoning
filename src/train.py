@@ -443,7 +443,7 @@ def main() -> None:
     parser.add_argument("--max-samples", type=int, default=None, help="Max puzzles from train.csv before train/val split")
     parser.add_argument("--val-fraction", type=float, default=0.1, help="Validation fraction from train.csv pool")
     parser.add_argument("--val-samples", type=int, default=None, help="Validation puzzles (overrides val-fraction)")
-    parser.add_argument("--test-samples", type=int, default=1000, help="Test puzzles cap from test.csv")
+    parser.add_argument("--test-samples", type=int, default=None, help="Test puzzles cap from test.csv (default: all after filters)")
     parser.add_argument("--viz-samples", type=int, default=10, help="Puzzles per split to save for viz")
     parser.add_argument(
         "--rollout-mode",
