@@ -130,8 +130,10 @@ def main() -> None:
     print(
         f"test (epoch {epoch}, n={len(test_rows)}): "
         f"loss={test.loss:.4f} cell_acc={test.cell_acc:.4f} "
-        f"puzzle_acc={test.puzzle_acc:.4f} steps={test.avg_rollout_steps:.1f} "
-        f"cycle={test.avg_cycle_length:.1f} max_iter={test.max_iter_pct:.1%}",
+        f"puzzle_acc={test.puzzle_acc:.4f} "
+        f"avg_rollout_steps={test.avg_rollout_steps:.1f} "
+        f"avg_cycle_length={test.avg_cycle_length:.1f} "
+        f"max_iter_pct={test.max_iter_pct:.1%}",
         flush=True,
     )
 

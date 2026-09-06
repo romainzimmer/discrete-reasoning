@@ -100,16 +100,14 @@ def save_run_config(run_dir: Path, args: argparse.Namespace) -> None:
 def split_train_val(
     rows: list[dict],
     *,
-    val_samples: int | None,
-    val_fraction: float,
+    val_samples: int,
     max_samples: int | None,
     seed: int | None = None,
 ) -> tuple[list[dict], list[dict]]:
     pool = rows[:max_samples] if max_samples is not None else rows
     if not pool:
         return [], []
-    n_val = val_samples if val_samples is not None else max(1, int(len(pool) * val_fraction))
-    n_val = min(n_val, len(pool) - 1) if len(pool) > 1 else 1
+    n_val = min(val_samples, len(pool) - 1) if len(pool) > 1 else 1
     indices = list(range(len(pool)))
     random.Random(seed).shuffle(indices)
     val_rows = [pool[i] for i in indices[:n_val]]
@@ -457,8 +455,7 @@ def main() -> None:
     parser.add_argument("--min-rating", type=int, default=None)
     parser.add_argument("--max-rating", type=int, default=None)
     parser.add_argument("--max-samples", type=int, default=None, help="Max puzzles from train.csv before train/val split")
-    parser.add_argument("--val-fraction", type=float, default=0.1, help="Validation fraction from train.csv pool")
-    parser.add_argument("--val-samples", type=int, default=None, help="Validation puzzles (overrides val-fraction)")
+    parser.add_argument("--val-samples", type=int, default=100, help="Validation puzzles from train.csv pool")
     parser.add_argument("--viz-samples", type=int, default=10, help="Puzzles per split to save for viz")
     parser.add_argument(
         "--train-init",
@@ -489,7 +486,6 @@ def main() -> None:
     train_rows, val_rows = split_train_val(
         train_pool,
         val_samples=args.val_samples,
-        val_fraction=args.val_fraction,
         max_samples=args.max_samples,
         seed=args.seed,
     )
@@ -610,9 +606,9 @@ def main() -> None:
             f"epoch {epoch}/{args.epochs}: "
             f"train_loss={train.loss:.4f} val_loss={val.loss:.4f} "
             f"val_cell_acc={val.cell_acc:.4f} val_puzzle_acc={val.puzzle_acc:.4f} "
-            f"val_steps={val.avg_rollout_steps:.1f} "
-            f"val_cycle={val.avg_cycle_length:.1f} "
-            f"val_max_iter={val.max_iter_pct:.1%}",
+            f"val_avg_rollout_steps={val.avg_rollout_steps:.1f} "
+            f"val_avg_cycle_length={val.avg_cycle_length:.1f} "
+            f"val_max_iter_pct={val.max_iter_pct:.1%}",
             flush=True,
         )
 
