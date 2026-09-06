@@ -456,7 +456,7 @@ def main() -> None:
     parser.add_argument(
         "--train-init",
         choices=["clues", "noisy-gt", "zero-gt"],
-        default="clues",
+        default="noisy-gt",
         help="clues: clues only, empty elsewhere (same as val/test); noisy-gt: random GT bit noise on non-clue cells; zero-gt: randomly zero non-clue GT cells",
     )
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)

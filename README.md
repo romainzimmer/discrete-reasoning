@@ -19,7 +19,7 @@ Writes `data/train.csv` and `data/test.csv` (~798 MB).
 ## Train and visualize runs
 
 ```bash
-uv run train --min-rating 0 --max-rating 0 --max-samples 100 --epochs 30
+uv run train --min-rating 0 --max-rating 0 --max-samples 100 --epochs 30 --eval-max-rollout-iter 30
 uv run python -m http.server 8000
 ```
 
