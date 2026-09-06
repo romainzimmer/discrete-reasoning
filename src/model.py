@@ -11,6 +11,18 @@ INPUT_DIM = GRID_SIZE * GRID_SIZE * NUM_STATE_CHANNELS
 OUTPUT_DIM = GRID_SIZE * GRID_SIZE * NUM_CLASSES
 
 
+class ResidualBlock(nn.Module):
+    """Linear + ReLU with a skip when input and output dims match."""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.fc = nn.Linear(dim, dim)
+        self.act = nn.ReLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.act(self.fc(x))
+
+
 class NextStateModel(nn.Module):
     """Predict solved grid logits from current one-hot state + clue mask."""
 
@@ -23,8 +35,11 @@ class NextStateModel(nn.Module):
 
         layers: list[nn.Module] = []
         in_dim = INPUT_DIM
-        for hidden in hidden_sizes:
-            layers.extend([nn.Linear(in_dim, hidden), nn.ReLU()])
+        for i, hidden in enumerate(hidden_sizes):
+            if i == 0 or hidden != in_dim:
+                layers.extend([nn.Linear(in_dim, hidden), nn.ReLU()])
+            else:
+                layers.append(ResidualBlock(in_dim))
             in_dim = hidden
         layers.append(nn.Linear(in_dim, OUTPUT_DIM))
         self.net = nn.Sequential(*layers)
