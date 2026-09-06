@@ -42,8 +42,11 @@ def logits_to_state(logits: torch.Tensor, clues: torch.Tensor, *, threshold: boo
 def _noisy_ground_truth_initial(answer: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
     """Start from ground truth; replace each non-clue bit with prob p~U[0,1] by random 50/50 bit."""
     onehot = grid_to_onehot(answer)
-    p = torch.rand((), device=answer.device).item()
     non_clue = (clues == 0).unsqueeze(-1)
+    if answer.dim() == 2:
+        p = torch.rand((), device=answer.device)
+    else:
+        p = torch.rand(answer.size(0), 1, 1, 1, device=answer.device)
     replace = (torch.rand_like(onehot) < p) & non_clue
     random_bits = (torch.rand_like(onehot) < 0.5).float()
     clue_state = grid_to_onehot(clues)
@@ -55,8 +58,11 @@ def _noisy_ground_truth_initial(answer: torch.Tensor, clues: torch.Tensor) -> to
 def _zeroed_ground_truth_initial(answer: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
     """Start from ground truth; zero each non-clue cell with prob p~U[0,1] (same as val/test empty init)."""
     onehot = grid_to_onehot(answer)
-    p = torch.rand((), device=answer.device).item()
     non_clue = clues == 0
+    if answer.dim() == 2:
+        p = torch.rand((), device=answer.device)
+    else:
+        p = torch.rand(answer.size(0), 1, 1, device=answer.device)
     zero_out = (torch.rand_like(clues, dtype=torch.float32) < p) & non_clue
     clue_state = grid_to_onehot(clues)
     clue_mask = (clues > 0).unsqueeze(-1)
@@ -142,8 +148,8 @@ def _run_rollout(
     *,
     threshold_state: bool,
     initial_onehot: torch.Tensor | None = None,
-) -> tuple[list[torch.Tensor], list[torch.Tensor], int | None, bool]:
-    """Collect states and logits; stop on revisit or max_rollout_iter."""
+) -> tuple[list[torch.Tensor], int | None, bool]:
+    """Collect logits; stop on revisit or max_rollout_iter."""
     if initial_onehot is None:
         initial_onehot = clues_onehot
     state = attach_clue_mask(initial_onehot, clues)
@@ -168,41 +174,49 @@ def _run_rollout(
     else:
         hit_max_iter = True
 
-    return states, logits_list, cycle_length, hit_max_iter
+    return logits_list, cycle_length, hit_max_iter
 
 
-def _cycle_start_index(states: list[torch.Tensor], cycle_length: int | None) -> int | None:
-    if cycle_length is None:
-        return None
-    return len(states) - cycle_length
-
-
-def _target_for_step(*, answer: torch.Tensor) -> torch.Tensor:
-    """Every rollout step is supervised against ground truth."""
-    return answer
+def _run_rollout_fixed(
+    model: NextStateModel,
+    clues_onehot: torch.Tensor,
+    clues: torch.Tensor,
+    max_rollout_iter: int,
+    *,
+    threshold_state: bool,
+    initial_onehot: torch.Tensor | None = None,
+) -> list[torch.Tensor]:
+    """Batched rollout for exactly max_rollout_iter steps (no early stop)."""
+    if initial_onehot is None:
+        initial_onehot = clues_onehot
+    state = attach_clue_mask(initial_onehot, clues)
+    logits_list: list[torch.Tensor] = []
+    for _ in range(max_rollout_iter):
+        logits = model(state)
+        logits_list.append(logits)
+        new_onehot = logits_to_state(logits, clues, threshold=threshold_state)
+        state = attach_clue_mask(new_onehot, clues)
+    return logits_list
 
 
 def _compute_rollout_loss(
     logits_list: list[torch.Tensor],
-    states: list[torch.Tensor],
     *,
     clues: torch.Tensor,
     answer: torch.Tensor,
-    cycle_length: int | None,
     config: RolloutConfig,
     loss_fn: torch.nn.Module,
 ) -> torch.Tensor:
     total_loss = torch.zeros((), device=clues.device)
     for logits in logits_list:
-        target = _target_for_step(answer=answer)
-        mask = target_mask(target, clues)
+        mask = target_mask(answer, clues)
         if config.mode == "threshold":
             total_loss = total_loss + masked_bce_with_logits(
-                logits, target, mask, loss_fn  # type: ignore[arg-type]
+                logits, answer, mask, loss_fn  # type: ignore[arg-type]
             )
         else:
             total_loss = total_loss + masked_cross_entropy(
-                logits, target, mask, loss_fn  # type: ignore[arg-type]
+                logits, answer, mask, loss_fn  # type: ignore[arg-type]
             )
     return total_loss
 
@@ -216,30 +230,48 @@ def rollout_train_batch(
     max_rollout_iter: int = DEFAULT_MAX_ROLLOUT_ITER,
     *,
     config: RolloutConfig | None = None,
+    fixed_steps: bool = False,
 ) -> RolloutResult:
     """Rollout with ground-truth targets at every step."""
     config = config or RolloutConfig()
     threshold_state = _threshold_state(config)
     initial_onehot = _training_initial_onehot(config, answer, clues) if model.training else None
-    states, logits_list, cycle_length, hit_max_iter = _run_rollout(
-        model,
-        clues_onehot,
-        clues,
-        max_rollout_iter,
-        threshold_state=threshold_state,
-        initial_onehot=initial_onehot,
-    )
+
+    if fixed_steps:
+        if clues.dim() != 3 or clues.size(0) < 2:
+            raise ValueError("fixed_steps requires a batch with batch size > 1")
+        logits_list = _run_rollout_fixed(
+            model,
+            clues_onehot,
+            clues,
+            max_rollout_iter,
+            threshold_state=threshold_state,
+            initial_onehot=initial_onehot,
+        )
+        cycle_length = None
+        hit_max_iter = True
+        steps = max_rollout_iter
+    else:
+        if clues.dim() == 3 and clues.size(0) > 1:
+            raise ValueError("batch size > 1 requires fixed_steps=True")
+        logits_list, cycle_length, hit_max_iter = _run_rollout(
+            model,
+            clues_onehot,
+            clues,
+            max_rollout_iter,
+            threshold_state=threshold_state,
+            initial_onehot=initial_onehot,
+        )
+        steps = len(logits_list)
+
     total_loss = _compute_rollout_loss(
         logits_list,
-        states,
         clues=clues,
         answer=answer,
-        cycle_length=cycle_length,
         config=config,
         loss_fn=loss_fn,
     )
 
-    steps = len(logits_list)
     pred = final_eval_grid(logits_list[-1].detach(), clues)
     return RolloutResult(
         loss=total_loss / max(steps, 1),
@@ -262,7 +294,7 @@ def rollout_solve(
     """Run f until revisit or max_rollout_iter."""
     config = config or RolloutConfig()
     threshold_state = _threshold_state(config)
-    _, logits_list, _, _ = _run_rollout(
+    logits_list, _, _ = _run_rollout(
         model, clues_onehot, clues, max_rollout_iter, threshold_state=threshold_state
     )
     return final_eval_grid(logits_list[-1], clues)
@@ -280,7 +312,7 @@ def rollout_trace(
     """Rollout with mode decode; last frame is argmax readout on the final step."""
     config = config or RolloutConfig()
     threshold_state = _threshold_state(config)
-    _, logits_list, _, _ = _run_rollout(
+    logits_list, _, _ = _run_rollout(
         model, clues_onehot, clues, max_rollout_iter, threshold_state=threshold_state
     )
     grids = [tensor_to_string(clues[0] if clues.dim() == 3 else clues)]

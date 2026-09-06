@@ -190,21 +190,25 @@ def _accumulate_rollout_stats(
     correct_puzzles: int,
     n: int,
 ) -> tuple[float, int, int, float, int, int, int, int, int]:
-    total_loss += result.loss.item()
-    total_steps += result.steps
-    max_iter_count += int(result.hit_max_iter)
+    batch_size = answer.size(0) if answer.dim() == 3 else 1
+    total_loss += result.loss.item() * batch_size
+    total_steps += result.steps * batch_size
+    max_iter_count += int(result.hit_max_iter) * batch_size
     if result.cycle_length is not None:
-        total_cycle_length += result.cycle_length
-        cycle_count += 1
-    n += 1
+        total_cycle_length += result.cycle_length * batch_size
+        cycle_count += batch_size
+    n += batch_size
     if result.pred is not None:
-        correct_cells, total_cells, correct_puzzles = _update_accuracy(
-            result.pred[0],
-            answer[0],
-            correct_cells=correct_cells,
-            total_cells=total_cells,
-            correct_puzzles=correct_puzzles,
-        )
+        preds = result.pred.unsqueeze(0) if result.pred.dim() == 2 else result.pred
+        answers = answer.unsqueeze(0) if answer.dim() == 2 else answer
+        for i in range(preds.size(0)):
+            correct_cells, total_cells, correct_puzzles = _update_accuracy(
+                preds[i],
+                answers[i],
+                correct_cells=correct_cells,
+                total_cells=total_cells,
+                correct_puzzles=correct_puzzles,
+            )
     return (
         total_loss,
         total_steps,
@@ -253,6 +257,7 @@ def train_epoch(
     epochs: int,
     max_rollout_iter: int,
     rollout_config: RolloutConfig,
+    batch_size: int,
 ) -> EpochStats:
     model.train()
     total_loss = 0.0
@@ -268,7 +273,7 @@ def train_epoch(
         loader,
         desc=_epoch_desc(epoch, epochs, "train"),
         leave=False,
-        unit="puzzle",
+        unit="batch" if batch_size > 1 else "puzzle",
     )
     for batch in progress:
         batch = {k: v.to(device) for k, v in batch.items()}
@@ -280,6 +285,7 @@ def train_epoch(
             loss_fn,
             max_rollout_iter=max_rollout_iter,
             config=rollout_config,
+            fixed_steps=batch["clues"].size(0) > 1,
         )
         optimizer.zero_grad()
         result.loss.backward()
@@ -424,11 +430,18 @@ def main() -> None:
         help="Hidden layer widths (e.g. 512 for one layer, 512 512 for two)",
     )
     parser.add_argument(
-        "--max-rollout-iter",
+        "--train-max-rollout-iter",
         type=int,
         default=DEFAULT_MAX_ROLLOUT_ITER,
-        help="Max rollout iterations per puzzle",
+        help="Max rollout iterations per puzzle during training",
     )
+    parser.add_argument(
+        "--eval-max-rollout-iter",
+        type=int,
+        default=DEFAULT_MAX_ROLLOUT_ITER,
+        help="Max rollout iterations per puzzle during val/test/viz",
+    )
+    parser.add_argument("--batch-size", type=int, default=1, help="Training batch size (>1 uses fixed-length parallel rollout)")
     parser.add_argument("--min-rating", type=int, default=None)
     parser.add_argument("--max-rating", type=int, default=None)
     parser.add_argument("--max-samples", type=int, default=None, help="Max puzzles from train.csv before train/val split")
@@ -475,7 +488,9 @@ def main() -> None:
     args.val_samples_count = len(val_rows)
     args.test_samples_count = len(test_rows)
 
-    train_loader = DataLoader(train_ds, batch_size=1, shuffle=True, collate_fn=collate_puzzles)
+    train_loader = DataLoader(
+        train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_puzzles
+    )
     val_loader = DataLoader(val_ds, batch_size=1, collate_fn=collate_puzzles)
     test_loader = DataLoader(test_ds, batch_size=1, collate_fn=collate_puzzles)
 
@@ -523,8 +538,9 @@ def main() -> None:
             device,
             epoch=epoch,
             epochs=args.epochs,
-            max_rollout_iter=args.max_rollout_iter,
+            max_rollout_iter=args.train_max_rollout_iter,
             rollout_config=rollout_config,
+            batch_size=args.batch_size,
         )
         epoch_seconds = time.perf_counter() - epoch_start
         val = measure_split(
@@ -535,7 +551,7 @@ def main() -> None:
             epoch=epoch,
             epochs=args.epochs,
             phase="val",
-            max_rollout_iter=args.max_rollout_iter,
+            max_rollout_iter=args.eval_max_rollout_iter,
             rollout_config=rollout_config,
         )
         save_epoch_checkpoint(run_dir, epoch, model)
@@ -550,7 +566,7 @@ def main() -> None:
                 epoch=epoch,
                 run_dir=run_dir,
                 device=device,
-                max_rollout_iter=args.max_rollout_iter,
+                max_rollout_iter=args.eval_max_rollout_iter,
                 rollout_config=rollout_config,
             )
             update_manifest_split(manifest, split, epoch, puzzle_indices)
@@ -575,7 +591,7 @@ def main() -> None:
                 epoch=epoch,
                 epochs=args.epochs,
                 phase="test",
-                max_rollout_iter=args.max_rollout_iter,
+                max_rollout_iter=args.eval_max_rollout_iter,
                 rollout_config=rollout_config,
             )
             save_checkpoint(run_dir / "best.pt", **ckpt_kwargs, test=test)
