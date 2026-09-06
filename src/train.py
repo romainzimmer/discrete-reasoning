@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import secrets
-import time
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +14,7 @@ from tqdm import tqdm
 
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import NextStateModel
-from rollout import DEFAULT_MAX_ROLLOUT_ITER, RolloutConfig, RolloutResult, rollout_train_batch
+from rollout import DEFAULT_EVAL_MAX_ROLLOUT_ITER, DEFAULT_TRAIN_ROLLOUT_ITER, RolloutConfig, RolloutResult, rollout_train_batch
 from viz_data import (
     load_manifest,
     save_epoch_trajectories,
@@ -28,6 +27,11 @@ DEFAULT_RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
 
 def _epoch_desc(epoch: int, epochs: int, phase: str) -> str:
     return f"epoch {epoch}/{epochs} {phase}"
+
+
+@dataclass
+class TrainEpochStats:
+    loss: float
 
 
 @dataclass
@@ -79,9 +83,8 @@ def save_epoch_metrics(
     run_dir: Path,
     *,
     epoch: int,
-    train: EpochStats,
+    train: TrainEpochStats,
     val: EpochStats,
-    epoch_seconds: float,
     args: argparse.Namespace,
 ) -> None:
     history_path = run_dir / "history.json"
@@ -95,13 +98,11 @@ def save_epoch_metrics(
     history["epochs"].append(
         {
             "epoch": epoch,
-            "epoch_seconds": epoch_seconds,
             **{f"train_{k}": v for k, v in asdict(train).items()},
             **{f"val_{k}": v for k, v in asdict(val).items()},
         }
     )
     history["epochs"].sort(key=lambda row: row["epoch"])
-    history["total_seconds"] = sum(e.get("epoch_seconds", 0) for e in history["epochs"])
     history_path.write_text(json.dumps(history, indent=2))
 
 
@@ -124,7 +125,7 @@ def save_checkpoint(
     model: NextStateModel,
     optimizer: torch.optim.Optimizer,
     epoch: int,
-    train: EpochStats,
+    train: TrainEpochStats,
     val: EpochStats,
     test: EpochStats | None = None,
     args: argparse.Namespace,
@@ -134,11 +135,6 @@ def save_checkpoint(
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "train_loss": train.loss,
-        "train_avg_rollout_steps": train.avg_rollout_steps,
-        "train_max_iter_pct": train.max_iter_pct,
-        "train_avg_cycle_length": train.avg_cycle_length,
-        "train_cell_acc": train.cell_acc,
-        "train_puzzle_acc": train.puzzle_acc,
         "val_loss": val.loss,
         "val_avg_rollout_steps": val.avg_rollout_steps,
         "val_max_iter_pct": val.max_iter_pct,
@@ -174,6 +170,19 @@ def _update_accuracy(
     if torch.equal(pred, answer):
         correct_puzzles += 1
     return correct_cells, total_cells, correct_puzzles
+
+
+def _accumulate_loss(
+    result: RolloutResult,
+    answer: torch.Tensor,
+    *,
+    total_loss: float,
+    n: int,
+) -> tuple[float, int]:
+    batch_size = answer.size(0) if answer.dim() == 3 else 1
+    total_loss += result.loss.item() * batch_size
+    n += batch_size
+    return total_loss, n
 
 
 def _accumulate_rollout_stats(
@@ -222,6 +231,16 @@ def _accumulate_rollout_stats(
     )
 
 
+def _train_stats_from_accumulators(
+    *,
+    total_loss: float,
+    n: int,
+) -> TrainEpochStats:
+    if n == 0:
+        return TrainEpochStats(loss=0.0)
+    return TrainEpochStats(loss=total_loss / n)
+
+
 def _stats_from_accumulators(
     *,
     total_loss: float,
@@ -255,20 +274,13 @@ def train_epoch(
     *,
     epoch: int,
     epochs: int,
-    max_rollout_iter: int,
+    rollout_iters: int,
     rollout_config: RolloutConfig,
     batch_size: int,
     use_cuda: bool,
-) -> EpochStats:
+) -> TrainEpochStats:
     model.train()
     total_loss = 0.0
-    total_steps = 0
-    max_iter_count = 0
-    total_cycle_length = 0.0
-    cycle_count = 0
-    correct_cells = 0
-    total_cells = 0
-    correct_puzzles = 0
     n = 0
     progress = tqdm(
         loader,
@@ -284,53 +296,27 @@ def train_epoch(
             batch["clues_onehot"],
             batch["answer"],
             loss_fn,
-            max_rollout_iter=max_rollout_iter,
+            rollout_iters=rollout_iters,
             config=rollout_config,
-            fixed_steps=batch["clues"].size(0) > 1,
+            fixed_steps=True,
+            compute_pred=False,
         )
         optimizer.zero_grad(set_to_none=True)
         result.loss.backward()
         optimizer.step()
-        (
-            total_loss,
-            total_steps,
-            max_iter_count,
-            total_cycle_length,
-            cycle_count,
-            correct_cells,
-            total_cells,
-            correct_puzzles,
-            n,
-        ) = _accumulate_rollout_stats(
+        total_loss, n = _accumulate_loss(
             result,
             batch["answer"],
             total_loss=total_loss,
-            total_steps=total_steps,
-            max_iter_count=max_iter_count,
-            total_cycle_length=total_cycle_length,
-            cycle_count=cycle_count,
-            correct_cells=correct_cells,
-            total_cells=total_cells,
-            correct_puzzles=correct_puzzles,
             n=n,
         )
         progress.set_postfix(
             loss=f"{total_loss / n:.4f}",
-            steps=f"{total_steps / n:.1f}",
-            cell_acc=f"{correct_cells / total_cells:.4f}",
-            cycle=f"{total_cycle_length / cycle_count if cycle_count else 0.0:.1f}",
             refresh=False,
         )
     progress.close()
-    return _stats_from_accumulators(
+    return _train_stats_from_accumulators(
         total_loss=total_loss,
-        total_steps=total_steps,
-        max_iter_count=max_iter_count,
-        total_cycle_length=total_cycle_length,
-        cycle_count=cycle_count,
-        correct_cells=correct_cells,
-        total_cells=total_cells,
-        correct_puzzles=correct_puzzles,
         n=n,
     )
 
@@ -345,7 +331,7 @@ def measure_split(
     epoch: int,
     epochs: int,
     phase: str,
-    max_rollout_iter: int,
+    max_rollout_iters: int,
     rollout_config: RolloutConfig,
     use_cuda: bool,
 ) -> EpochStats:
@@ -373,7 +359,7 @@ def measure_split(
             batch["clues_onehot"],
             batch["answer"],
             loss_fn,
-            max_rollout_iter=max_rollout_iter,
+            rollout_iters=max_rollout_iters,
             config=rollout_config,
         )
         (
@@ -426,18 +412,24 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=512, help="FFN block width")
     parser.add_argument("--num-blocks", type=int, default=2, help="Number of FFN blocks")
     parser.add_argument(
-        "--train-max-rollout-iter",
+        "--train-rollout-iter",
         type=int,
-        default=DEFAULT_MAX_ROLLOUT_ITER,
-        help="Max rollout iterations per puzzle during training",
+        default=DEFAULT_TRAIN_ROLLOUT_ITER,
+        help="Fixed rollout iterations per puzzle during training",
     )
     parser.add_argument(
         "--eval-max-rollout-iter",
         type=int,
-        default=DEFAULT_MAX_ROLLOUT_ITER,
+        default=DEFAULT_EVAL_MAX_ROLLOUT_ITER,
         help="Max rollout iterations per puzzle during val/test/viz",
     )
-    parser.add_argument("--batch-size", type=int, default=8, help="Training batch size (>1 uses fixed-length parallel rollout)")
+    parser.add_argument("--batch-size", type=int, default=8, help="Training batch size")
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="DataLoader worker processes (0 recommended on Jetson)",
+    )
     parser.add_argument("--min-rating", type=int, default=None)
     parser.add_argument("--max-rating", type=int, default=None)
     parser.add_argument("--max-samples", type=int, default=None, help="Max puzzles from train.csv before train/val split")
@@ -488,7 +480,7 @@ def main() -> None:
     loader_kwargs = {
         "collate_fn": collate_puzzles,
         "pin_memory": use_cuda,
-        "num_workers": 2 if use_cuda else 0,
+        "num_workers": args.num_workers,
     }
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **loader_kwargs)
     val_loader = DataLoader(val_ds, batch_size=1, **loader_kwargs)
@@ -529,7 +521,6 @@ def main() -> None:
     }
 
     for epoch in range(1, args.epochs + 1):
-        epoch_start = time.perf_counter()
         train = train_epoch(
             model,
             train_loader,
@@ -538,12 +529,11 @@ def main() -> None:
             device,
             epoch=epoch,
             epochs=args.epochs,
-            max_rollout_iter=args.train_max_rollout_iter,
+            rollout_iters=args.train_rollout_iter,
             rollout_config=rollout_config,
             batch_size=args.batch_size,
             use_cuda=use_cuda,
         )
-        epoch_seconds = time.perf_counter() - epoch_start
         val = measure_split(
             model,
             val_loader,
@@ -552,7 +542,7 @@ def main() -> None:
             epoch=epoch,
             epochs=args.epochs,
             phase="val",
-            max_rollout_iter=args.eval_max_rollout_iter,
+            max_rollout_iters=args.eval_max_rollout_iter,
             rollout_config=rollout_config,
             use_cuda=use_cuda,
         )
@@ -593,7 +583,7 @@ def main() -> None:
                 epoch=epoch,
                 epochs=args.epochs,
                 phase="test",
-                max_rollout_iter=args.eval_max_rollout_iter,
+                max_rollout_iters=args.eval_max_rollout_iter,
                 rollout_config=rollout_config,
                 use_cuda=use_cuda,
             )
@@ -603,18 +593,17 @@ def main() -> None:
             epoch=epoch,
             train=train,
             val=val,
-            epoch_seconds=epoch_seconds,
             args=args,
         )
         if test is not None:
             save_best_test_metrics(run_dir, epoch=epoch, test=test)
         print(
             f"epoch {epoch}/{args.epochs}: "
-            f"loss={train.loss:.4f}/{val.loss:.4f} "
-            f"cell_acc={train.cell_acc:.4f}/{val.cell_acc:.4f} "
-            f"puzzle_acc={train.puzzle_acc:.4f}/{val.puzzle_acc:.4f} "
-            f"cycle_len={train.avg_cycle_length:.1f}/{val.avg_cycle_length:.1f} "
-            f"time={epoch_seconds:.1f}s",
+            f"train_loss={train.loss:.4f} val_loss={val.loss:.4f} "
+            f"val_cell_acc={val.cell_acc:.4f} val_puzzle_acc={val.puzzle_acc:.4f} "
+            f"val_steps={val.avg_rollout_steps:.1f} "
+            f"val_cycle={val.avg_cycle_length:.1f} "
+            f"val_max_iter={val.max_iter_pct:.1%}",
             flush=True,
         )
 

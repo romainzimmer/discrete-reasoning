@@ -278,7 +278,6 @@
       <canvas id="rolloutChart"></canvas>
       <div class="axis-x-label">epoch</div>
       <div class="legend">
-        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
         <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
       </div>
     </div>
@@ -287,7 +286,6 @@
       <canvas id="maxIterChart"></canvas>
       <div class="axis-x-label">epoch</div>
       <div class="legend">
-        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
         <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
       </div>
     </div>
@@ -296,16 +294,7 @@
       <canvas id="cycleLengthChart"></canvas>
       <div class="axis-x-label">epoch</div>
       <div class="legend">
-        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
         <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
-      </div>
-    </div>
-    <div class="chart">
-      <div class="chart-title">Epoch time</div>
-      <canvas id="epochTimeChart"></canvas>
-      <div class="axis-x-label">epoch</div>
-      <div class="legend">
-        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> duration</div>
       </div>
     </div>
     </div>
@@ -444,7 +433,14 @@
         { label: "Weight decay", value: args.weight_decay ?? 0 },
         { label: "Hidden layers", value: formatHiddenSizes(args) },
         { label: "Rollout mode", value: args.rollout_mode ?? "categorical" },
-        { label: "Max rollout iter", value: args.max_rollout_iter ?? 100 },
+        {
+          label: "Train rollout iter",
+          value: args.train_rollout_iter ?? args.train_max_rollout_iter,
+        },
+        {
+          label: "Eval max rollout iter",
+          value: args.eval_max_rollout_iter ?? args.max_rollout_iter ?? 100,
+        },
         { label: "Epochs", value: args.epochs },
       ];
       const totalSeconds = totalRunSeconds(history);
@@ -605,6 +601,10 @@
       ];
     }
 
+    function valMetricSeries(epochs, valKey) {
+      return [{ color: "#dc2626", values: epochs.map(e => e[valKey] ?? null) }];
+    }
+
     function renderTestSummary() {
       const gridEl = document.getElementById("testSummary");
       const noteEl = document.getElementById("testSectionNote");
@@ -671,25 +671,19 @@
         xLabels,
         formatY: pct,
       });
-      drawSeries(document.getElementById("rolloutChart"), metricSeries(epochs, "train_avg_rollout_steps", "val_avg_rollout_steps"), {
+      drawSeries(document.getElementById("rolloutChart"), valMetricSeries(epochs, "val_avg_rollout_steps"), {
         xLabels,
         formatY: v => Number(v).toFixed(1),
       });
-      drawSeries(document.getElementById("maxIterChart"), metricSeries(epochs, "train_max_iter_pct", "val_max_iter_pct"), {
+      drawSeries(document.getElementById("maxIterChart"), valMetricSeries(epochs, "val_max_iter_pct"), {
         yMin: 0,
         yMax: 1,
         xLabels,
         formatY: pct,
       });
-      drawSeries(document.getElementById("cycleLengthChart"), metricSeries(epochs, "train_avg_cycle_length", "val_avg_cycle_length"), {
+      drawSeries(document.getElementById("cycleLengthChart"), valMetricSeries(epochs, "val_avg_cycle_length"), {
         xLabels,
         formatY: v => Number(v).toFixed(1),
-      });
-      drawSeries(document.getElementById("epochTimeChart"), [
-        { color: "#2563eb", values: epochs.map(e => e.epoch_seconds ?? null) },
-      ], {
-        xLabels,
-        formatY: formatDurationAxis,
       });
       renderTestSummary();
     }
