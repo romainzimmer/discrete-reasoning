@@ -158,7 +158,7 @@ def _threshold_state(config: RolloutConfig) -> bool:
 
 
 def final_eval_grid(logits: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
-    """Final readout for accuracy/viz: always argmax (softmax winner)."""
+    """Readout for accuracy/viz: argmax winner per cell."""
     return predict_grid(logits, clues)
 
 
@@ -420,7 +420,7 @@ def rollout_trace(
     *,
     config: RolloutConfig | None = None,
 ) -> list[str]:
-    """Rollout with mode decode; last frame is argmax readout on the final step."""
+    """Rollout for viz; every displayed frame uses argmax decode (one digit per cell)."""
     config = config or RolloutConfig()
     threshold_state = _threshold_state(config)
     ctx = _ClueContext.from_clues(clues)
@@ -433,10 +433,7 @@ def rollout_trace(
         ctx=ctx,
     )
     grids = [tensor_to_string(clues[0] if clues.dim() == 3 else clues)]
-    for i, logits in enumerate(logits_list):
-        if i == len(logits_list) - 1:
-            grid = final_eval_grid(logits, clues)
-        else:
-            grid = decode_grid(logits, clues, threshold=threshold_state)
+    for logits in logits_list:
+        grid = final_eval_grid(logits, clues)
         grids.append(tensor_to_string(grid[0] if grid.dim() == 3 else grid))
     return grids

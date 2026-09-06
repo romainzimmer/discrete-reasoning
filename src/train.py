@@ -441,7 +441,7 @@ def main() -> None:
         "--rollout-mode",
         choices=["threshold", "categorical"],
         default="threshold",
-        help="threshold: BCE + threshold rollout; categorical: CE + argmax rollout; acc/viz use argmax final",
+        help="threshold: BCE + threshold rollout; categorical: CE + argmax rollout; acc/viz frames use argmax",
     )
     parser.add_argument(
         "--train-init",
