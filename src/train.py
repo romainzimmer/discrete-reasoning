@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import secrets
 from dataclasses import dataclass, asdict
 from datetime import datetime
@@ -102,14 +103,17 @@ def split_train_val(
     val_samples: int | None,
     val_fraction: float,
     max_samples: int | None,
+    seed: int | None = None,
 ) -> tuple[list[dict], list[dict]]:
     pool = rows[:max_samples] if max_samples is not None else rows
     if not pool:
         return [], []
     n_val = val_samples if val_samples is not None else max(1, int(len(pool) * val_fraction))
     n_val = min(n_val, len(pool) - 1) if len(pool) > 1 else 1
-    val_rows = pool[:n_val]
-    train_rows = pool[n_val:]
+    indices = list(range(len(pool)))
+    random.Random(seed).shuffle(indices)
+    val_rows = [pool[i] for i in indices[:n_val]]
+    train_rows = [pool[i] for i in indices[n_val:]]
     return train_rows, val_rows
 
 
@@ -427,7 +431,7 @@ def measure_split(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train rollout sudoku model")
     parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--weight-decay", type=float, default=1.0, help="L2 regularization on weights only (not bias)")
     parser.add_argument("--width", type=int, default=512, help="FFN block width")
     parser.add_argument("--num-blocks", type=int, default=2, help="Number of FFN blocks")
@@ -464,7 +468,7 @@ def main() -> None:
     )
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--seed", type=int, default=None, help="Random seed for augment RNG and training")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed for augment RNG and training")
     parser.add_argument("--no-augment", action="store_true", help="Disable training data augmentations")
     parser.add_argument("--aug-digit-proba", type=float, default=0.5)
     parser.add_argument("--aug-rot-proba", type=float, default=0.5)
@@ -487,6 +491,7 @@ def main() -> None:
         val_samples=args.val_samples,
         val_fraction=args.val_fraction,
         max_samples=args.max_samples,
+        seed=args.seed,
     )
     aug_config = AugmentConfig(
         p_digit=args.aug_digit_proba,
