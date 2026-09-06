@@ -135,6 +135,36 @@ class TestApplyAugment:
         assert torch.equal(out_a[0], out_b[0])
         assert torch.equal(out_a[1], out_b[1])
 
+    def test_set_epoch_changes_augmentation(self) -> None:
+        ds = PuzzleDataset(
+            rows=[_sample_row()],
+            augment=True,
+            aug_config=AugmentConfig(p_digit=1.0, p_rot=1.0, p_band=1.0),
+            aug_seed=7,
+        )
+        ds.set_epoch(1)
+        epoch_one = ds[0]["clues"].clone()
+        ds.set_epoch(2)
+        epoch_two = ds[0]["clues"].clone()
+        assert not torch.equal(epoch_one, epoch_two)
+
+    def test_same_epoch_and_idx_are_reproducible(self) -> None:
+        ds_a = PuzzleDataset(
+            rows=[_sample_row()],
+            augment=True,
+            aug_config=AugmentConfig(p_digit=1.0, p_rot=1.0, p_band=1.0),
+            aug_seed=7,
+        )
+        ds_b = PuzzleDataset(
+            rows=[_sample_row()],
+            augment=True,
+            aug_config=AugmentConfig(p_digit=1.0, p_rot=1.0, p_band=1.0),
+            aug_seed=7,
+        )
+        ds_a.set_epoch(3)
+        ds_b.set_epoch(3)
+        assert torch.equal(ds_a[0]["clues"], ds_b[0]["clues"])
+
 
 class TestEncodingSync:
     def test_clues_onehot_matches_augmented_grid(self) -> None:

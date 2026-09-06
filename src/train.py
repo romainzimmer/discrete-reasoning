@@ -178,13 +178,15 @@ def save_checkpoint(
 def _update_accuracy(
     pred: torch.Tensor,
     answer: torch.Tensor,
+    clues: torch.Tensor,
     *,
     correct_cells: int,
     total_cells: int,
     correct_puzzles: int,
 ) -> tuple[int, int, int]:
-    correct_cells += (pred == answer).sum().item()
-    total_cells += answer.numel()
+    mask = clues == 0
+    correct_cells += (pred[mask] == answer[mask]).sum().item()
+    total_cells += int(mask.sum().item())
     if torch.equal(pred, answer):
         correct_puzzles += 1
     return correct_cells, total_cells, correct_puzzles
@@ -206,6 +208,7 @@ def _accumulate_loss(
 def _accumulate_rollout_stats(
     result: RolloutResult,
     answer: torch.Tensor,
+    clues: torch.Tensor,
     *,
     total_loss: float,
     total_steps: int,
@@ -236,10 +239,12 @@ def _accumulate_rollout_stats(
     if result.pred is not None:
         preds = result.pred.unsqueeze(0) if result.pred.dim() == 2 else result.pred
         answers = answer.unsqueeze(0) if answer.dim() == 2 else answer
+        clue_rows = clues.unsqueeze(0) if clues.dim() == 2 else clues
         for i in range(preds.size(0)):
             correct_cells, total_cells, correct_puzzles = _update_accuracy(
                 preds[i],
                 answers[i],
+                clue_rows[i],
                 correct_cells=correct_cells,
                 total_cells=total_cells,
                 correct_puzzles=correct_puzzles,
@@ -397,6 +402,7 @@ def measure_split(
         ) = _accumulate_rollout_stats(
             result,
             batch["answer"],
+            batch["clues"],
             total_loss=total_loss,
             total_steps=total_steps,
             max_iter_count=max_iter_count,
@@ -429,8 +435,8 @@ def measure_split(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train rollout sudoku model")
     parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1.0, help="L2 regularization on weights only (not bias)")
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-1, help="L2 regularization on weights only (not bias)")
     parser.add_argument("--width", type=int, default=512, help="FFN block width")
     parser.add_argument("--num-blocks", type=int, default=2, help="Number of FFN blocks")
     parser.add_argument(
@@ -544,6 +550,7 @@ def main() -> None:
     }
 
     for epoch in range(1, args.epochs + 1):
+        train_ds.set_epoch(epoch)
         train = train_epoch(
             model,
             train_loader,

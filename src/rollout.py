@@ -186,27 +186,41 @@ def _answer_state_in(
     return attach_clue_mask(onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
 
 
-def _mean_cell_confidence(logits: torch.Tensor) -> torch.Tensor:
-    cell_conf = F.softmax(logits, dim=-1).max(dim=-1).values
+def _non_clue_mask(clues: torch.Tensor) -> torch.Tensor:
+    """True for cells the model must fill (not given clues)."""
+    return clues == 0
+
+
+def _mean_cell_entropy(logits: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
+    """Mean per-cell output entropy over non-clue cells; lower = more peaked."""
+    log_probs = F.log_softmax(logits, dim=-1)
+    probs = log_probs.exp()
+    cell_entropy = -(probs * log_probs).sum(dim=-1)
+    mask = _non_clue_mask(clues)
     if logits.dim() == 4:
-        return cell_conf.mean(dim=(-2, -1))
-    return cell_conf.mean()
+        masked_entropy = torch.where(mask, cell_entropy, torch.zeros_like(cell_entropy))
+        counts = mask.sum(dim=(-2, -1)).clamp_min(1)
+        return masked_entropy.sum(dim=(-2, -1)) / counts
+    masked_entropy = cell_entropy[mask]
+    if masked_entropy.numel() == 0:
+        return cell_entropy.mean()
+    return masked_entropy.mean()
 
 
-def _update_best_by_confidence(
-    confidence: torch.Tensor,
+def _update_best_by_entropy(
+    entropy: torch.Tensor,
     candidate: torch.Tensor,
     *,
-    best_confidence: torch.Tensor | None,
+    best_entropy: torch.Tensor | None,
     best: torch.Tensor | None,
     batch_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if best is None or best_confidence is None:
-        return confidence, candidate
-    improved = confidence > best_confidence
-    best_confidence = torch.where(improved, confidence, best_confidence)
+    if best is None or best_entropy is None:
+        return entropy, candidate
+    improved = entropy < best_entropy
+    best_entropy = torch.where(improved, entropy, best_entropy)
     best = torch.where(improved.view(batch_size, 1, 1, 1), candidate, best)
-    return best_confidence, best
+    return best_entropy, best
 
 
 def _compute_rollout_loss(
@@ -215,6 +229,7 @@ def _compute_rollout_loss(
     clues: torch.Tensor,
     answer: torch.Tensor,
 ) -> torch.Tensor:
+    """Per-puzzle CE over masked non-clue cells."""
     mask = target_mask(answer, clues)
     return _masked_ce(logits, answer, mask)
 
@@ -225,6 +240,7 @@ def _compute_rollout_loss_batch_mean(
     clues: torch.Tensor,
     answer: torch.Tensor,
 ) -> torch.Tensor:
+    """Mean of per-puzzle masked CE (equal weight per puzzle)."""
     if logits.dim() == 3:
         return _compute_rollout_loss(logits, clues=clues, answer=answer)
     losses = [
@@ -232,6 +248,24 @@ def _compute_rollout_loss_batch_mean(
         for i in range(logits.size(0))
     ]
     return torch.stack(losses).mean()
+
+
+def _dual_rollout_loss_batch_mean(
+    model: NextStateModel,
+    confident_logits: torch.Tensor,
+    *,
+    clues: torch.Tensor,
+    answer: torch.Tensor,
+    ctx: _ClueContext,
+) -> torch.Tensor:
+    """(confident-step loss + GT fixed-point loss) / 2, mean over batch."""
+    target_state_in = _answer_state_in(answer, clues, ctx=ctx)
+    target_logits = model(target_state_in)
+    confident_loss = _compute_rollout_loss_batch_mean(
+        confident_logits, clues=clues, answer=answer
+    )
+    target_loss = _compute_rollout_loss_batch_mean(target_logits, clues=clues, answer=answer)
+    return (confident_loss + target_loss) / 2.0
 
 
 def _rollout_result_stats(
@@ -261,7 +295,8 @@ def _advance_rollout_state(
     return attach_clue_mask(new_onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
 
 
-def _fixed_rollout_confidence_loop(
+@torch.no_grad()
+def _fixed_rollout_entropy_loop(
     model: NextStateModel,
     state: torch.Tensor,
     clues: torch.Tensor,
@@ -271,26 +306,22 @@ def _fixed_rollout_confidence_loop(
     clue_mask: torch.Tensor,
     clue_mask_channel: torch.Tensor,
 ) -> torch.Tensor:
+    """Return model input state at the step with lowest mean non-clue cell entropy."""
     batch_size = clues.size(0)
-    best_confidence: torch.Tensor | None = None
+    best_entropy: torch.Tensor | None = None
     best_state_in = state.clone()
-    prev_state = state.clone()
+    ctx = _ClueContext(clue_state, clue_mask, clue_mask_channel)
     for _ in range(rollout_iters):
         logits = model(state)
-        confidence = _mean_cell_confidence(logits)
-        best_confidence, best_state_in = _update_best_by_confidence(
-            confidence,
-            prev_state,
-            best_confidence=best_confidence,
+        entropy = _mean_cell_entropy(logits, clues)
+        best_entropy, best_state_in = _update_best_by_entropy(
+            entropy,
+            state,
+            best_entropy=best_entropy,
             best=best_state_in,
             batch_size=batch_size,
         )
-        prev_state = state.clone()
-        state = _advance_rollout_state(
-            logits,
-            clues,
-            ctx=_ClueContext(clue_state, clue_mask, clue_mask_channel),
-        )
+        state = _advance_rollout_state(logits, clues, ctx=ctx)
     return best_state_in
 
 
@@ -320,18 +351,18 @@ def _run_rollout(
     steps_per_item = torch.zeros(batch_size, dtype=torch.long, device=device)
     hit_max_iter_per_item = torch.zeros(batch_size, dtype=torch.bool, device=device)
     cycle_length_per_item = torch.full((batch_size,), float("nan"), device=device)
-    best_confidence: torch.Tensor | None = None
+    best_entropy: torch.Tensor | None = None
     best_logits: torch.Tensor | None = None
 
     for step in range(max_rollout_iter):
         with torch.no_grad():
             logits = model(state)
         logits_list.append(logits)
-        confidence = _mean_cell_confidence(logits)
-        best_confidence, best_logits = _update_best_by_confidence(
-            confidence,
+        entropy = _mean_cell_entropy(logits, clues)
+        best_entropy, best_logits = _update_best_by_entropy(
+            entropy,
             logits,
-            best_confidence=best_confidence,
+            best_entropy=best_entropy,
             best=best_logits,
             batch_size=batch_size,
         )
@@ -365,6 +396,7 @@ def _run_rollout(
     )
 
 
+@torch.no_grad()
 def _run_rollout_fixed_select_confident_state(
     model: NextStateModel,
     clues_onehot: torch.Tensor,
@@ -373,7 +405,7 @@ def _run_rollout_fixed_select_confident_state(
     *,
     initial_onehot: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Roll out without grad; return input state before the most confident step."""
+    """Roll out without grad; return input state at the lowest-entropy step."""
     clues, _ = _ensure_batched_clues(clues)
     clues_onehot, _ = _ensure_batched_onehot(clues_onehot)
     if initial_onehot is None:
@@ -382,7 +414,7 @@ def _run_rollout_fixed_select_confident_state(
         initial_onehot, _ = _ensure_batched_onehot(initial_onehot)
     ctx = _ClueContext.from_clues(clues, clues_onehot)
     state = attach_clue_mask(initial_onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
-    return _fixed_rollout_confidence_loop(
+    return _fixed_rollout_entropy_loop(
         model,
         state,
         clues,
@@ -404,39 +436,41 @@ def rollout_train_batch(
     fixed_steps: bool = False,
     compute_pred: bool = True,
 ) -> RolloutResult:
-    """Training: grad-free rollout, then two grad steps (confident state + target fixed point).
+    """Training: grad-free rollout, then two grad steps (lowest-entropy state + target fixed point).
 
-    Eval: early-stop rollout; readout uses highest-confidence step.
+    Eval: early-stop rollout; readout uses lowest-entropy step.
     """
     config = config or RolloutConfig()
-    ctx = _ClueContext.from_clues(clues, clues_onehot)
     initial_onehot = (
         _training_initial_onehot(config, answer, clues, clues_onehot) if model.training else None
     )
 
     if fixed_steps:
+        clues_batched, was_batched = _ensure_batched_clues(clues)
+        clues_onehot_batched, _ = _ensure_batched_onehot(clues_onehot)
+        answer_batched, _ = _ensure_batched_clues(answer)
+        ctx_batched = _ClueContext.from_clues(clues_batched, clues_onehot_batched)
+        initial_batched = initial_onehot
+        if initial_batched is not None:
+            initial_batched, _ = _ensure_batched_onehot(initial_batched)
         confident_state_in = _run_rollout_fixed_select_confident_state(
             model,
-            clues_onehot,
-            clues,
+            clues_onehot_batched,
+            clues_batched,
             rollout_iters,
-            initial_onehot=initial_onehot,
+            initial_onehot=initial_batched,
         )
-        target_state_in = _answer_state_in(answer, clues, ctx=ctx)
         confident_logits = model(confident_state_in)
-        target_logits = model(target_state_in)
-        confident_loss = _compute_rollout_loss(
+        total_loss = _dual_rollout_loss_batch_mean(
+            model,
             confident_logits,
-            clues=clues,
-            answer=answer,
+            clues=clues_batched,
+            answer=answer_batched,
+            ctx=ctx_batched,
         )
-        target_loss = _compute_rollout_loss(
-            target_logits,
-            clues=clues,
-            answer=answer,
-        )
-        total_loss = (confident_loss + target_loss) / 2.0
         eval_logits = confident_logits
+        if not was_batched:
+            eval_logits = eval_logits.squeeze(0)
         cycle_length = None
         hit_max_iter = True
         steps = rollout_iters
@@ -466,10 +500,13 @@ def rollout_train_batch(
         eval_logits = eval_out.best_logits
         if not was_batched:
             eval_logits = eval_logits.squeeze(0)
-        total_loss = _compute_rollout_loss_batch_mean(
+        ctx_batched = _ClueContext.from_clues(clues_batched, clues_onehot_batched)
+        total_loss = _dual_rollout_loss_batch_mean(
+            model,
             eval_out.best_logits,
             clues=clues_batched,
             answer=answer_batched,
+            ctx=ctx_batched,
         )
         steps, hit_max_iter, cycle_length = _rollout_result_stats(
             eval_out.steps_per_item,

@@ -52,6 +52,17 @@ class PuzzleDataset(Dataset):
         self.augment = augment
         self.aug_config = aug_config
         self.aug_seed = aug_seed
+        self._epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch = epoch
+
+    def _aug_generator(self, idx: int) -> torch.Generator | None:
+        if self.aug_seed is None:
+            return None
+        # Vary augmentations across epochs while keeping them deterministic per (epoch, idx).
+        seed = self.aug_seed + self._epoch * len(self.rows) + idx
+        return torch.Generator().manual_seed(seed)
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -61,14 +72,11 @@ class PuzzleDataset(Dataset):
         clues = puzzle_to_tensor(row["question"])
         answer = answer_to_tensor(row["answer"])
         if self.augment and self.aug_config is not None:
-            generator = None
-            if self.aug_seed is not None:
-                generator = torch.Generator().manual_seed(self.aug_seed + idx)
             clues, answer = apply_augment(
                 clues,
                 answer,
                 self.aug_config,
-                generator=generator,
+                generator=self._aug_generator(idx),
             )
         return {
             "clues": clues,

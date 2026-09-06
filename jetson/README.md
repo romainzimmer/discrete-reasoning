@@ -74,8 +74,6 @@ Filter test by rating (omit both flags to evaluate all ratings):
 docker compose run --rm eval runs/20260906-145132-bda4748d --min-rating 5 --max-rating 9
 ```
 
-Full test split (omit `--max-test-samples`).
-
 ## Visualize
 
 On the Jetson:
