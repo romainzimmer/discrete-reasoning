@@ -43,14 +43,7 @@ Writes `data/train.csv` and `data/test.csv` (~798 MB).
 ## Train
 
 ```bash
-docker compose run --rm train --epochs 30 --width 1024 --num-blocks 3 --batch-size 512 --num-workers 1 --val-samples 10000 --train-init noisy-gt
-# Add --no-augment to match pre-augment training runs
-```
-
-Easy sudoku only (rating 0):
-
-```bash
-docker compose run --rm train --epochs 30 --width 1024 --num-blocks 3 --batch-size 512 --num-workers 1 --val-samples 10000 --min-rating 0 --max-rating 0 --train-init noisy-gt
+docker compose run --rm train --epochs 30 --width 1024 --num-blocks 3 --batch-size 512 --num-workers 1 --val-samples 5000 --train-init noisy-gt --max-samples 300000
 ```
 
 Quick test (easy sudoku, 1k train cap):
