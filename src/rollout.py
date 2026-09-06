@@ -80,6 +80,22 @@ def _noisy_ground_truth_initial(answer: torch.Tensor, clues: torch.Tensor) -> to
     return torch.where(ctx.clue_mask, ctx.clue_state, corrupted)
 
 
+def _noisy_ground_truth_initial_categorical(answer: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
+    """Start from ground truth; flip whole non-clue cells to another digit with prob p~U[0,1]."""
+    ctx = _ClueContext.from_clues(clues)
+    non_clue = clues == 0
+    if answer.dim() == 2:
+        p = torch.rand((), device=answer.device)
+    else:
+        p = torch.rand(answer.size(0), 1, 1, device=answer.device)
+    flip_cell = (torch.rand_like(clues, dtype=torch.float32) < p) & non_clue
+    offset = torch.randint(1, 9, answer.shape, device=answer.device)
+    flipped = (answer - 1 + offset) % 9 + 1
+    corrupted_grid = torch.where(flip_cell, flipped, answer)
+    onehot = grid_to_onehot(corrupted_grid)
+    return torch.where(ctx.clue_mask, ctx.clue_state, onehot)
+
+
 def _zeroed_ground_truth_initial(answer: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
     """Start from ground truth; zero each non-clue cell with prob p~U[0,1] (same as val/test empty init)."""
     ctx = _ClueContext.from_clues(clues)
@@ -100,6 +116,8 @@ def _training_initial_onehot(
     clues: torch.Tensor,
 ) -> torch.Tensor | None:
     if config.train_init == "noisy_gt":
+        if config.mode == "categorical":
+            return _noisy_ground_truth_initial_categorical(answer, clues)
         return _noisy_ground_truth_initial(answer, clues)
     if config.train_init == "zero_gt":
         return _zeroed_ground_truth_initial(answer, clues)

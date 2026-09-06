@@ -51,6 +51,9 @@ Easy sudoku only (rating 0):
 ```bash
 docker compose run --rm train --epochs 30 --lr 0.001 --weight-decay 0.01 --hidden-sizes 1024 1024 1024 --train-max-rollout-iter 5 --eval-max-rollout-iter 100 --batch-size 32 --max-samples 10000 --min-rating 0 --max-rating 0 --rollout-mode threshold --train-init noisy-gt
 ```
+docker compose run --rm train --epochs 30 --lr 0.001 --weight-decay 0.01 --hidden-sizes 1024 1024 1024 --train-max-rollout-iter 5 --eval-max-rollout-iter 100 --batch-size 32 --max-samples 10000 --min-rating 0 --max-rating 0 --rollout-mode threshold --train-init zero-gt
+
+docker compose run --rm train --epochs 30 --lr 0.001 --weight-decay 0.01 --hidden-sizes 1024 1024 1024 --train-max-rollout-iter 10 --eval-max-rollout-iter 100 --batch-size 32 --max-samples 10000 --min-rating 0 --max-rating 0 --rollout-mode categorical --train-init zero-gt
 
 Checkpoints and trajectories are written to `runs/`.
 
