@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from encoding import NUM_STATE_CHANNELS
@@ -11,39 +12,53 @@ INPUT_DIM = GRID_SIZE * GRID_SIZE * NUM_STATE_CHANNELS
 OUTPUT_DIM = GRID_SIZE * GRID_SIZE * NUM_CLASSES
 
 
-class ResidualBlock(nn.Module):
-    """Linear + ReLU with a skip when input and output dims match."""
+def _ffn_intermediate_dim(width: int) -> int:
+    hidden = int(2 * (4 * width) / 3)
+    return ((hidden + 7) // 8) * 8
 
-    def __init__(self, dim: int):
+
+class FFNBlock(nn.Module):
+    """Pre-norm SwiGLU block: x + down(silu(gate(norm(x))) * up(norm(x)))."""
+
+    def __init__(self, width: int, intermediate_dim: int | None = None):
         super().__init__()
-        self.fc = nn.Linear(dim, dim)
-        self.act = nn.ReLU()
+        hidden = intermediate_dim if intermediate_dim is not None else _ffn_intermediate_dim(width)
+        self.norm = nn.LayerNorm(width)
+        self.gate = nn.Linear(width, hidden, bias=False)
+        self.up = nn.Linear(width, hidden, bias=False)
+        self.down = nn.Linear(hidden, width, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.act(self.fc(x))
+        h = self.norm(x)
+        return x + self.down(F.silu(self.gate(h)) * self.up(h))
+
+
+class OutputHead(nn.Module):
+    def __init__(self, width: int, out_dim: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(width)
+        self.proj = nn.Linear(width, out_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(self.norm(x))
 
 
 class NextStateModel(nn.Module):
     """Predict solved grid logits from current one-hot state + clue mask."""
 
-    def __init__(self, hidden_sizes: list[int] | None = None):
+    def __init__(self, *, width: int = 512, num_blocks: int = 2):
         super().__init__()
-        if hidden_sizes is None:
-            hidden_sizes = [512, 512]
-        if not hidden_sizes:
-            raise ValueError("hidden_sizes must contain at least one layer width")
+        if width <= 0:
+            raise ValueError("width must be positive")
+        if num_blocks <= 0:
+            raise ValueError("num_blocks must be positive")
 
-        layers: list[nn.Module] = []
-        in_dim = INPUT_DIM
-        for i, hidden in enumerate(hidden_sizes):
-            if i == 0 or hidden != in_dim:
-                layers.extend([nn.Linear(in_dim, hidden), nn.ReLU()])
-            else:
-                layers.append(ResidualBlock(in_dim))
-            in_dim = hidden
-        layers.append(nn.Linear(in_dim, OUTPUT_DIM))
+        layers: list[nn.Module] = [nn.Linear(INPUT_DIM, width)]
+        layers.extend(FFNBlock(width) for _ in range(num_blocks))
+        layers.append(OutputHead(width, OUTPUT_DIM))
         self.net = nn.Sequential(*layers)
-        self.hidden_sizes = list(hidden_sizes)
+        self.width = width
+        self.num_blocks = num_blocks
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: (B, 9, 9, 10) -> logits (B, 9, 9, 9). Last channel is clue mask."""

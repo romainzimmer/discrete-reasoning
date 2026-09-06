@@ -423,14 +423,8 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=0.0, help="L2 regularization on weights only (not bias)")
-    parser.add_argument(
-        "--hidden-sizes",
-        type=int,
-        nargs="+",
-        default=[512],
-        metavar="N",
-        help="Hidden layer widths (e.g. 512 for one layer, 512 512 for two)",
-    )
+    parser.add_argument("--width", type=int, default=512, help="FFN block width")
+    parser.add_argument("--num-blocks", type=int, default=2, help="Number of FFN blocks")
     parser.add_argument(
         "--train-max-rollout-iter",
         type=int,
@@ -500,7 +494,7 @@ def main() -> None:
     val_loader = DataLoader(val_ds, batch_size=1, **loader_kwargs)
     test_loader = DataLoader(test_ds, batch_size=1, **loader_kwargs)
 
-    model = NextStateModel(hidden_sizes=args.hidden_sizes).to(device)
+    model = NextStateModel(width=args.width, num_blocks=args.num_blocks).to(device)
     decay_params, no_decay_params = [], []
     for name, param in model.named_parameters():
         if not param.requires_grad:

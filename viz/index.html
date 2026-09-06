@@ -427,6 +427,9 @@
     }
 
     function formatHiddenSizes(args) {
+      if (args.width != null && args.num_blocks != null) {
+        return `${args.width} x${args.num_blocks}`;
+      }
       if (args.hidden_sizes?.length) return args.hidden_sizes.join(" → ");
       if (args.hidden != null) return String(args.hidden);
       return "—";
