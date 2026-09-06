@@ -175,23 +175,6 @@ def save_checkpoint(
     torch.save(payload, path)
 
 
-def _update_accuracy(
-    pred: torch.Tensor,
-    answer: torch.Tensor,
-    clues: torch.Tensor,
-    *,
-    correct_cells: int,
-    total_cells: int,
-    correct_puzzles: int,
-) -> tuple[int, int, int]:
-    mask = clues == 0
-    correct_cells += (pred[mask] == answer[mask]).sum().item()
-    total_cells += int(mask.sum().item())
-    if torch.equal(pred, answer):
-        correct_puzzles += 1
-    return correct_cells, total_cells, correct_puzzles
-
-
 def _accumulate_loss(
     result: RolloutResult,
     answer: torch.Tensor,
@@ -240,15 +223,10 @@ def _accumulate_rollout_stats(
         preds = result.pred.unsqueeze(0) if result.pred.dim() == 2 else result.pred
         answers = answer.unsqueeze(0) if answer.dim() == 2 else answer
         clue_rows = clues.unsqueeze(0) if clues.dim() == 2 else clues
-        for i in range(preds.size(0)):
-            correct_cells, total_cells, correct_puzzles = _update_accuracy(
-                preds[i],
-                answers[i],
-                clue_rows[i],
-                correct_cells=correct_cells,
-                total_cells=total_cells,
-                correct_puzzles=correct_puzzles,
-            )
+        mask = clue_rows == 0
+        correct_cells += int((preds[mask] == answers[mask]).sum().item())
+        total_cells += int(mask.sum().item())
+        correct_puzzles += int((preds == answers).all(dim=(-2, -1)).sum().item())
     return (
         total_loss,
         total_steps,

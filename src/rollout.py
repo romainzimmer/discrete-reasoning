@@ -151,8 +151,15 @@ def _ensure_batched_onehot(onehot: torch.Tensor) -> tuple[torch.Tensor, bool]:
     return onehot, True
 
 
-def _find_revisited_index_batched(state_stack: torch.Tensor, new_state: torch.Tensor) -> torch.Tensor:
+def _find_revisited_index_batched(
+    state_stack: torch.Tensor,
+    new_state: torch.Tensor,
+    *,
+    stack_len: int | None = None,
+) -> torch.Tensor:
     """Earliest revisit index per batch item, or -1."""
+    if stack_len is not None:
+        state_stack = state_stack[:stack_len]
     if state_stack.dim() == 4:
         state_stack = state_stack.unsqueeze(1)
         new_state = new_state.unsqueeze(0)
@@ -243,11 +250,18 @@ def _compute_rollout_loss_batch_mean(
     """Mean of per-puzzle masked CE (equal weight per puzzle)."""
     if logits.dim() == 3:
         return _compute_rollout_loss(logits, clues=clues, answer=answer)
-    losses = [
-        _compute_rollout_loss(logits[i], clues=clues[i], answer=answer[i])
-        for i in range(logits.size(0))
-    ]
-    return torch.stack(losses).mean()
+    mask = target_mask(answer, clues)
+    flat_logits = logits.flatten(1, 2)
+    flat_targets = answer.flatten(1, 2) - 1
+    flat_mask = mask.flatten(1, 2)
+    b, n_cells, n_classes = flat_logits.shape
+    per_cell = F.cross_entropy(
+        flat_logits.reshape(-1, n_classes),
+        flat_targets.reshape(-1),
+        reduction="none",
+    ).reshape(b, n_cells)
+    per_puzzle = (per_cell * flat_mask).sum(dim=1) / flat_mask.sum(dim=1).clamp_min(1)
+    return per_puzzle.mean()
 
 
 def _dual_rollout_loss_batch_mean(
@@ -345,7 +359,9 @@ def _run_rollout(
     batch_size = clues.size(0)
     device = clues.device
     state = attach_clue_mask(initial_onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
-    state_stack = state.unsqueeze(0)
+    state_stack = state.new_empty((max_rollout_iter + 1, *state.shape))
+    state_stack[0] = state
+    stack_len = 1
     logits_list: list[torch.Tensor] = []
     active = torch.ones(batch_size, dtype=torch.bool, device=device)
     steps_per_item = torch.zeros(batch_size, dtype=torch.long, device=device)
@@ -368,17 +384,18 @@ def _run_rollout(
         )
 
         new_state = _advance_rollout_state(logits, clues, ctx=ctx)
-        revisit = _find_revisited_index_batched(state_stack, new_state)
+        revisit = _find_revisited_index_batched(state_stack, new_state, stack_len=stack_len)
         found_cycle = (revisit >= 0) & active
         cycle_length_per_item = torch.where(
             found_cycle,
-            (state_stack.size(0) - revisit).float(),
+            (stack_len - revisit).float(),
             cycle_length_per_item,
         )
         steps_per_item = torch.where(active, step + 1, steps_per_item)
         active = active & ~found_cycle
         state = torch.where(active.view(batch_size, 1, 1, 1), new_state, state)
-        state_stack = torch.cat([state_stack, new_state.unsqueeze(0)], dim=0)
+        state_stack[stack_len] = new_state
+        stack_len += 1
         if not active.any():
             break
     else:
