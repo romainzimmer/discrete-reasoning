@@ -258,6 +258,7 @@ def train_epoch(
     max_rollout_iter: int,
     rollout_config: RolloutConfig,
     batch_size: int,
+    use_cuda: bool,
 ) -> EpochStats:
     model.train()
     total_loss = 0.0
@@ -276,7 +277,7 @@ def train_epoch(
         unit="batch" if batch_size > 1 else "puzzle",
     )
     for batch in progress:
-        batch = {k: v.to(device) for k, v in batch.items()}
+        batch = {k: v.to(device, non_blocking=use_cuda) for k, v in batch.items()}
         result = rollout_train_batch(
             model,
             batch["clues"],
@@ -287,7 +288,7 @@ def train_epoch(
             config=rollout_config,
             fixed_steps=batch["clues"].size(0) > 1,
         )
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         result.loss.backward()
         optimizer.step()
         (
@@ -346,6 +347,7 @@ def measure_split(
     phase: str,
     max_rollout_iter: int,
     rollout_config: RolloutConfig,
+    use_cuda: bool,
 ) -> EpochStats:
     model.eval()
     total_loss = 0.0
@@ -364,7 +366,7 @@ def measure_split(
         unit="puzzle",
     )
     for batch in progress:
-        batch = {k: v.to(device) for k, v in batch.items()}
+        batch = {k: v.to(device, non_blocking=use_cuda) for k, v in batch.items()}
         result = rollout_train_batch(
             model,
             batch["clues"],
@@ -441,7 +443,7 @@ def main() -> None:
         default=DEFAULT_MAX_ROLLOUT_ITER,
         help="Max rollout iterations per puzzle during val/test/viz",
     )
-    parser.add_argument("--batch-size", type=int, default=1, help="Training batch size (>1 uses fixed-length parallel rollout)")
+    parser.add_argument("--batch-size", type=int, default=8, help="Training batch size (>1 uses fixed-length parallel rollout)")
     parser.add_argument("--min-rating", type=int, default=None)
     parser.add_argument("--max-rating", type=int, default=None)
     parser.add_argument("--max-samples", type=int, default=None, help="Max puzzles from train.csv before train/val split")
@@ -488,11 +490,15 @@ def main() -> None:
     args.val_samples_count = len(val_rows)
     args.test_samples_count = len(test_rows)
 
-    train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_puzzles
-    )
-    val_loader = DataLoader(val_ds, batch_size=1, collate_fn=collate_puzzles)
-    test_loader = DataLoader(test_ds, batch_size=1, collate_fn=collate_puzzles)
+    use_cuda = device.type == "cuda"
+    loader_kwargs = {
+        "collate_fn": collate_puzzles,
+        "pin_memory": use_cuda,
+        "num_workers": 2 if use_cuda else 0,
+    }
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(val_ds, batch_size=1, **loader_kwargs)
+    test_loader = DataLoader(test_ds, batch_size=1, **loader_kwargs)
 
     model = NextStateModel(hidden_sizes=args.hidden_sizes).to(device)
     decay_params, no_decay_params = [], []
@@ -541,6 +547,7 @@ def main() -> None:
             max_rollout_iter=args.train_max_rollout_iter,
             rollout_config=rollout_config,
             batch_size=args.batch_size,
+            use_cuda=use_cuda,
         )
         epoch_seconds = time.perf_counter() - epoch_start
         val = measure_split(
@@ -553,6 +560,7 @@ def main() -> None:
             phase="val",
             max_rollout_iter=args.eval_max_rollout_iter,
             rollout_config=rollout_config,
+            use_cuda=use_cuda,
         )
         save_epoch_checkpoint(run_dir, epoch, model)
         model.eval()
@@ -593,6 +601,7 @@ def main() -> None:
                 phase="test",
                 max_rollout_iter=args.eval_max_rollout_iter,
                 rollout_config=rollout_config,
+                use_cuda=use_cuda,
             )
             save_checkpoint(run_dir / "best.pt", **ckpt_kwargs, test=test)
         save_epoch_metrics(

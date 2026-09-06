@@ -30,9 +30,16 @@ def clue_mask(clues: torch.Tensor) -> torch.Tensor:
     return (clues > 0).unsqueeze(-1).to(dtype=torch.float32)
 
 
-def attach_clue_mask(onehot: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
+def attach_clue_mask(
+    onehot: torch.Tensor,
+    clues: torch.Tensor,
+    *,
+    clue_mask_channel: torch.Tensor | None = None,
+) -> torch.Tensor:
     """Stack digit one-hot with a per-cell clue indicator."""
-    return torch.cat([onehot, clue_mask(clues)], dim=-1)
+    if clue_mask_channel is None:
+        clue_mask_channel = clue_mask(clues)
+    return torch.cat([onehot, clue_mask_channel], dim=-1)
 
 
 def decode_logits(logits: torch.Tensor) -> torch.Tensor:
