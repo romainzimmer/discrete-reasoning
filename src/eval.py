@@ -6,12 +6,11 @@ from dataclasses import asdict
 from pathlib import Path
 
 import torch
-from torch import nn
 from torch.utils.data import DataLoader
 
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import NextStateModel
-from rollout import RolloutConfig
+from rollout import RolloutConfig, configure_rollout_compile
 from train import EpochStats, measure_split, require_run_args
 
 
@@ -85,33 +84,37 @@ def main() -> None:
         raise ValueError("No test puzzles after filters")
 
     use_cuda = device.type == "cuda"
+    batch_size = int(run_args.get("batch_size", 1))
+    use_compile = bool(run_args.get("compile", use_cuda))
     test_loader = DataLoader(
         PuzzleDataset(rows=test_rows),
-        batch_size=1,
+        batch_size=batch_size,
         collate_fn=collate_puzzles,
         pin_memory=use_cuda,
         num_workers=run_args["num_workers"],
     )
 
-    rollout_mode = run_args["rollout_mode"]
+    rollout_mode = run_args.get("rollout_mode")
+    if rollout_mode == "threshold":
+        raise ValueError(
+            f"Run {run_dir} uses removed threshold rollout mode; re-train with the current code."
+        )
+
     model = NextStateModel(
         width=run_args["width"],
         num_blocks=run_args["num_blocks"],
     ).to(device)
     model.load_state_dict(ckpt["model"])
+    if use_compile:
+        model = torch.compile(model)
+        configure_rollout_compile(True)
 
-    loss_fn = (
-        nn.BCEWithLogitsLoss()
-        if rollout_mode == "threshold"
-        else nn.CrossEntropyLoss()
-    )
-    rollout_config = RolloutConfig(mode=rollout_mode, train_init="clues")
+    rollout_config = RolloutConfig(train_init="clues")
 
     epoch = int(ckpt["epoch"])
     test = measure_split(
         model,
         test_loader,
-        loss_fn,
         device,
         epoch=epoch,
         epochs=epoch,

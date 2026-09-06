@@ -7,16 +7,14 @@ import torch
 import torch.nn.functional as F
 
 from data import tensor_to_string
-from encoding import attach_clue_mask, decode_logits, grid_to_onehot, onehot_to_grid
+from encoding import attach_clue_mask, decode_logits, grid_to_onehot
 from model import NextStateModel
 
-RolloutMode = Literal["threshold", "categorical"]
 TrainInitMode = Literal["clues", "noisy_gt", "zero_gt"]
 
 
 @dataclass(frozen=True)
 class RolloutConfig:
-    mode: RolloutMode = "categorical"
     train_init: TrainInitMode = "noisy_gt"
 
 
@@ -43,21 +41,48 @@ class RolloutResult:
     hit_max_iter: bool
     cycle_length: int | None = None
     pred: torch.Tensor | None = None
+    steps_per_item: torch.Tensor | None = None
+    hit_max_iter_per_item: torch.Tensor | None = None
+    cycle_length_per_item: torch.Tensor | None = None
+
+
+@dataclass(frozen=True)
+class _RolloutEvalOutput:
+    logits_list: list[torch.Tensor]
+    best_logits: torch.Tensor
+    steps_per_item: torch.Tensor
+    hit_max_iter_per_item: torch.Tensor
+    cycle_length_per_item: torch.Tensor
+
+
+DEFAULT_EVAL_MAX_ROLLOUT_ITER = 30
+DEFAULT_TRAIN_ROLLOUT_ITER = 10
+DEFAULT_MAX_ROLLOUT_ITER = DEFAULT_EVAL_MAX_ROLLOUT_ITER
+
+_fixed_rollout_confidence_fn = None
+
+
+def configure_rollout_compile(enabled: bool) -> None:
+    """Enable torch.compile on the fixed-step training rollout loop (CUDA recommended)."""
+    global _fixed_rollout_confidence_fn
+    if enabled:
+        _fixed_rollout_confidence_fn = torch.compile(
+            _fixed_rollout_confidence_loop,
+            mode="reduce-overhead",
+        )
+    else:
+        _fixed_rollout_confidence_fn = _fixed_rollout_confidence_loop
 
 
 def logits_to_state(
     logits: torch.Tensor,
     clues: torch.Tensor,
     *,
-    threshold: bool = False,
     clue_state: torch.Tensor | None = None,
     clue_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Feed back decoded logits as one-hot, detached, with clues pinned."""
-    if threshold:
-        decoded = (logits > 0).float().detach()
-    else:
-        decoded = grid_to_onehot(decode_logits(logits).detach())
+    """Feed back argmax-decoded logits as one-hot, detached, with clues pinned."""
+    decoded = grid_to_onehot(decode_logits(logits).detach())
     if clue_state is None:
         clue_state = grid_to_onehot(clues)
     if clue_mask is None:
@@ -66,26 +91,6 @@ def logits_to_state(
 
 
 def _noisy_ground_truth_initial(
-    answer: torch.Tensor,
-    clues: torch.Tensor,
-    *,
-    clues_onehot: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Start from ground truth; replace each non-clue bit with prob p~U[0,1] by random 50/50 bit."""
-    ctx = _ClueContext.from_clues(clues, clues_onehot)
-    onehot = grid_to_onehot(answer)
-    non_clue = clues == 0
-    if answer.dim() == 2:
-        p = torch.rand((), device=answer.device)
-    else:
-        p = torch.rand(answer.size(0), 1, 1, 1, device=answer.device)
-    replace = (torch.rand_like(onehot) < p) & non_clue.unsqueeze(-1)
-    random_bits = (torch.rand_like(onehot) < 0.5).float()
-    corrupted = torch.where(replace, random_bits, onehot)
-    return torch.where(ctx.clue_mask, ctx.clue_state, corrupted)
-
-
-def _noisy_ground_truth_initial_categorical(
     answer: torch.Tensor,
     clues: torch.Tensor,
     *,
@@ -132,8 +137,6 @@ def _training_initial_onehot(
     clues_onehot: torch.Tensor,
 ) -> torch.Tensor | None:
     if config.train_init == "noisy_gt":
-        if config.mode == "categorical":
-            return _noisy_ground_truth_initial_categorical(answer, clues, clues_onehot=clues_onehot)
         return _noisy_ground_truth_initial(answer, clues, clues_onehot=clues_onehot)
     if config.train_init == "zero_gt":
         return _zeroed_ground_truth_initial(answer, clues, clues_onehot=clues_onehot)
@@ -146,73 +149,39 @@ def predict_grid(logits: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
     return torch.where(clues > 0, clues, pred)
 
 
-def decode_grid(logits: torch.Tensor, clues: torch.Tensor, *, threshold: bool = False) -> torch.Tensor:
-    """Decode logits to a digit grid using the active rollout mode."""
-    if threshold:
-        return onehot_to_grid(logits_to_state(logits, clues, threshold=True))
-    return predict_grid(logits, clues)
-
-
-def _threshold_state(config: RolloutConfig) -> bool:
-    return config.mode == "threshold"
-
-
-def final_eval_grid(logits: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
-    """Readout for accuracy/viz: argmax winner per cell."""
-    return predict_grid(logits, clues)
-
-
 def target_mask(target: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
     """Loss mask: non-clue cells that are filled in the target."""
     return (target > 0) & (clues == 0)
 
 
-def masked_cross_entropy(
-    logits: torch.Tensor,
-    target: torch.Tensor,
-    mask: torch.Tensor,
-    loss_fn: torch.nn.CrossEntropyLoss,
-) -> torch.Tensor:
-    if not mask.any():
-        return logits.sum() * 0.0
-    return loss_fn(logits[mask], target[mask] - 1)
+def _ensure_batched_clues(clues: torch.Tensor) -> tuple[torch.Tensor, bool]:
+    if clues.dim() == 2:
+        return clues.unsqueeze(0), False
+    return clues, True
 
 
-def masked_bce_with_logits(
-    logits: torch.Tensor,
-    target: torch.Tensor,
-    mask: torch.Tensor,
-    loss_fn: torch.nn.BCEWithLogitsLoss,
-) -> torch.Tensor:
-    target_onehot = grid_to_onehot(target)
-    mask_exp = mask.unsqueeze(-1).expand_as(logits)
-    if not mask.any():
-        return logits.sum() * 0.0
-    return loss_fn(logits[mask_exp], target_onehot[mask_exp])
+def _ensure_batched_onehot(onehot: torch.Tensor) -> tuple[torch.Tensor, bool]:
+    if onehot.dim() == 3:
+        return onehot.unsqueeze(0), False
+    return onehot, True
 
 
-DEFAULT_EVAL_MAX_ROLLOUT_ITER = 30
-DEFAULT_TRAIN_ROLLOUT_ITER = 100
-DEFAULT_MAX_ROLLOUT_ITER = DEFAULT_EVAL_MAX_ROLLOUT_ITER
-
-
-def _find_revisited_index(state_stack: torch.Tensor, new_state: torch.Tensor) -> int | None:
-    """Return earliest matching index in state_stack, or None (one small GPU sync)."""
-    matches = (state_stack == new_state.unsqueeze(0)).flatten(start_dim=1).all(dim=1)
-    if not matches.any():
-        return None
-    return int(matches.nonzero(as_tuple=False)[0, 0].item())
-
-
-def _masked_bce(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    target_onehot = grid_to_onehot(target)
-    mask_exp = mask.unsqueeze(-1).expand_as(logits)
-    elem = F.binary_cross_entropy_with_logits(
-        logits[mask_exp],
-        target_onehot[mask_exp],
-        reduction="none",
-    )
-    return elem.sum() / mask_exp.sum()
+def _find_revisited_index_batched(state_stack: torch.Tensor, new_state: torch.Tensor) -> torch.Tensor:
+    """Earliest revisit index per batch item, or -1."""
+    if state_stack.dim() == 4:
+        state_stack = state_stack.unsqueeze(1)
+        new_state = new_state.unsqueeze(0)
+        squeeze = True
+    else:
+        squeeze = False
+    matches = (state_stack == new_state.unsqueeze(0)).flatten(start_dim=2).all(dim=2)
+    any_match = matches.any(dim=0)
+    step_ids = torch.arange(matches.size(0), device=matches.device, dtype=torch.long).unsqueeze(1)
+    first = torch.where(matches, step_ids, matches.size(0) + 1).min(dim=0).values
+    result = torch.where(any_match, first, torch.full_like(first, -1))
+    if squeeze:
+        return result.squeeze(0)
+    return result
 
 
 def _masked_ce(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -221,79 +190,38 @@ def _masked_ce(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -
     return F.cross_entropy(masked_logits, targets)
 
 
-def _run_rollout(
-    model: NextStateModel,
-    clues_onehot: torch.Tensor,
+def _answer_state_in(
+    answer: torch.Tensor,
     clues: torch.Tensor,
-    max_rollout_iter: int,
     *,
-    threshold_state: bool,
-    initial_onehot: torch.Tensor | None = None,
-    ctx: _ClueContext,
-) -> tuple[list[torch.Tensor], int | None, bool, torch.Tensor]:
-    """Collect logits; stop on revisit or max_rollout_iter."""
-    if initial_onehot is None:
-        initial_onehot = clues_onehot
-    state = attach_clue_mask(initial_onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
-    state_stack = state.unsqueeze(0)
-    logits_list: list[torch.Tensor] = []
-    cycle_length: int | None = None
-    hit_max_iter = False
-    last_state_in = state
-
-    for _ in range(max_rollout_iter):
-        last_state_in = state
-        with torch.no_grad():
-            logits = model(state)
-        logits_list.append(logits)
-        new_onehot = logits_to_state(
-            logits,
-            clues,
-            threshold=threshold_state,
-            clue_state=ctx.clue_state,
-            clue_mask=ctx.clue_mask,
-        )
-        new_state = attach_clue_mask(new_onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
-        revisit = _find_revisited_index(state_stack, new_state)
-        if revisit is not None:
-            cycle_length = state_stack.size(0) - revisit
-            break
-        state_stack = torch.cat([state_stack, new_state.unsqueeze(0)], dim=0)
-        state = new_state
-    else:
-        hit_max_iter = True
-
-    return logits_list, cycle_length, hit_max_iter, last_state_in
-
-
-def _run_rollout_fixed(
-    model: NextStateModel,
-    clues_onehot: torch.Tensor,
-    clues: torch.Tensor,
-    rollout_iters: int,
-    *,
-    threshold_state: bool,
-    initial_onehot: torch.Tensor | None = None,
     ctx: _ClueContext,
 ) -> torch.Tensor:
-    """Roll out for exactly rollout_iters steps (no early stop). Returns final recurrent input."""
-    if initial_onehot is None:
-        initial_onehot = clues_onehot
-    state = attach_clue_mask(initial_onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
-    last_state_in = state
-    for _ in range(rollout_iters):
-        last_state_in = state
-        with torch.no_grad():
-            logits = model(state)
-        new_onehot = logits_to_state(
-            logits,
-            clues,
-            threshold=threshold_state,
-            clue_state=ctx.clue_state,
-            clue_mask=ctx.clue_mask,
-        )
-        state = attach_clue_mask(new_onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
-    return last_state_in
+    onehot = grid_to_onehot(answer)
+    onehot = torch.where(ctx.clue_mask, ctx.clue_state, onehot)
+    return attach_clue_mask(onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
+
+
+def _mean_cell_confidence(logits: torch.Tensor) -> torch.Tensor:
+    cell_conf = F.softmax(logits, dim=-1).max(dim=-1).values
+    if logits.dim() == 4:
+        return cell_conf.mean(dim=(-2, -1))
+    return cell_conf.mean()
+
+
+def _update_best_by_confidence(
+    confidence: torch.Tensor,
+    candidate: torch.Tensor,
+    *,
+    best_confidence: torch.Tensor | None,
+    best: torch.Tensor | None,
+    batch_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if best is None or best_confidence is None:
+        return confidence, candidate
+    improved = confidence > best_confidence
+    best_confidence = torch.where(improved, confidence, best_confidence)
+    best = torch.where(improved.view(batch_size, 1, 1, 1), candidate, best)
+    return best_confidence, best
 
 
 def _compute_rollout_loss(
@@ -301,12 +229,185 @@ def _compute_rollout_loss(
     *,
     clues: torch.Tensor,
     answer: torch.Tensor,
-    config: RolloutConfig,
 ) -> torch.Tensor:
     mask = target_mask(answer, clues)
-    if config.mode == "threshold":
-        return _masked_bce(logits, answer, mask)
     return _masked_ce(logits, answer, mask)
+
+
+def _compute_rollout_loss_batch_mean(
+    logits: torch.Tensor,
+    *,
+    clues: torch.Tensor,
+    answer: torch.Tensor,
+) -> torch.Tensor:
+    if logits.dim() == 3:
+        return _compute_rollout_loss(logits, clues=clues, answer=answer)
+    losses = [
+        _compute_rollout_loss(logits[i], clues=clues[i], answer=answer[i])
+        for i in range(logits.size(0))
+    ]
+    return torch.stack(losses).mean()
+
+
+def _rollout_result_stats(
+    steps_per_item: torch.Tensor,
+    hit_max_iter_per_item: torch.Tensor,
+    cycle_length_per_item: torch.Tensor,
+) -> tuple[int, bool, int | None]:
+    mean_steps = int(steps_per_item.float().mean().round().item())
+    hit_max_iter = bool(hit_max_iter_per_item.any().item())
+    cycled = cycle_length_per_item[~torch.isnan(cycle_length_per_item)]
+    cycle_length = int(cycled.float().mean().round().item()) if cycled.numel() else None
+    return mean_steps, hit_max_iter, cycle_length
+
+
+def _advance_rollout_state(
+    logits: torch.Tensor,
+    clues: torch.Tensor,
+    *,
+    ctx: _ClueContext,
+) -> torch.Tensor:
+    new_onehot = logits_to_state(
+        logits,
+        clues,
+        clue_state=ctx.clue_state,
+        clue_mask=ctx.clue_mask,
+    )
+    return attach_clue_mask(new_onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
+
+
+def _get_fixed_rollout_confidence_loop():
+    return _fixed_rollout_confidence_fn or _fixed_rollout_confidence_loop
+
+
+def _fixed_rollout_confidence_loop(
+    model: NextStateModel,
+    state: torch.Tensor,
+    clues: torch.Tensor,
+    rollout_iters: int,
+    *,
+    clue_state: torch.Tensor,
+    clue_mask: torch.Tensor,
+    clue_mask_channel: torch.Tensor,
+) -> torch.Tensor:
+    batch_size = clues.size(0)
+    best_confidence: torch.Tensor | None = None
+    best_state_in = state.clone()
+    for _ in range(rollout_iters):
+        logits = model(state)
+        confidence = _mean_cell_confidence(logits)
+        best_confidence, best_state_in = _update_best_by_confidence(
+            confidence,
+            state,
+            best_confidence=best_confidence,
+            best=best_state_in,
+            batch_size=batch_size,
+        )
+        state = _advance_rollout_state(
+            logits,
+            clues,
+            ctx=_ClueContext(clue_state, clue_mask, clue_mask_channel),
+        )
+    return best_state_in
+
+
+def _run_rollout(
+    model: NextStateModel,
+    clues_onehot: torch.Tensor,
+    clues: torch.Tensor,
+    max_rollout_iter: int,
+    *,
+    initial_onehot: torch.Tensor | None = None,
+) -> _RolloutEvalOutput:
+    """Collect logits; stop on revisit or max_rollout_iter (batched)."""
+    clues, _ = _ensure_batched_clues(clues)
+    clues_onehot, _ = _ensure_batched_onehot(clues_onehot)
+    if initial_onehot is None:
+        initial_onehot = clues_onehot
+    else:
+        initial_onehot, _ = _ensure_batched_onehot(initial_onehot)
+    ctx = _ClueContext.from_clues(clues, clues_onehot)
+
+    batch_size = clues.size(0)
+    device = clues.device
+    state = attach_clue_mask(initial_onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
+    state_stack = state.unsqueeze(0)
+    logits_list: list[torch.Tensor] = []
+    active = torch.ones(batch_size, dtype=torch.bool, device=device)
+    steps_per_item = torch.zeros(batch_size, dtype=torch.long, device=device)
+    hit_max_iter_per_item = torch.zeros(batch_size, dtype=torch.bool, device=device)
+    cycle_length_per_item = torch.full((batch_size,), float("nan"), device=device)
+    best_confidence: torch.Tensor | None = None
+    best_logits: torch.Tensor | None = None
+
+    for step in range(max_rollout_iter):
+        with torch.no_grad():
+            logits = model(state)
+        logits_list.append(logits)
+        confidence = _mean_cell_confidence(logits)
+        best_confidence, best_logits = _update_best_by_confidence(
+            confidence,
+            logits,
+            best_confidence=best_confidence,
+            best=best_logits,
+            batch_size=batch_size,
+        )
+
+        new_state = _advance_rollout_state(logits, clues, ctx=ctx)
+        revisit = _find_revisited_index_batched(state_stack, new_state)
+        found_cycle = (revisit >= 0) & active
+        cycle_length_per_item = torch.where(
+            found_cycle,
+            (state_stack.size(0) - revisit).float(),
+            cycle_length_per_item,
+        )
+        steps_per_item = torch.where(active, step + 1, steps_per_item)
+        active = active & ~found_cycle
+        state = torch.where(active.view(batch_size, 1, 1, 1), new_state, state)
+        state_stack = torch.cat([state_stack, new_state.unsqueeze(0)], dim=0)
+        if not active.any():
+            break
+    else:
+        hit_max_iter_per_item = active.clone()
+        steps_per_item = torch.where(active, max_rollout_iter, steps_per_item)
+
+    if best_logits is None:
+        best_logits = logits_list[-1]
+    return _RolloutEvalOutput(
+        logits_list=logits_list,
+        best_logits=best_logits,
+        steps_per_item=steps_per_item,
+        hit_max_iter_per_item=hit_max_iter_per_item,
+        cycle_length_per_item=cycle_length_per_item,
+    )
+
+
+def _run_rollout_fixed_select_confident_state(
+    model: NextStateModel,
+    clues_onehot: torch.Tensor,
+    clues: torch.Tensor,
+    rollout_iters: int,
+    *,
+    initial_onehot: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Roll out without grad; return input state with highest mean cell confidence."""
+    clues, _ = _ensure_batched_clues(clues)
+    clues_onehot, _ = _ensure_batched_onehot(clues_onehot)
+    if initial_onehot is None:
+        initial_onehot = clues_onehot
+    else:
+        initial_onehot, _ = _ensure_batched_onehot(initial_onehot)
+    ctx = _ClueContext.from_clues(clues, clues_onehot)
+    state = attach_clue_mask(initial_onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
+    return _get_fixed_rollout_confidence_loop()(
+        model,
+        state,
+        clues,
+        rollout_iters,
+        clue_state=ctx.clue_state,
+        clue_mask=ctx.clue_mask,
+        clue_mask_channel=ctx.clue_mask_channel,
+    )
 
 
 def rollout_train_batch(
@@ -314,76 +415,102 @@ def rollout_train_batch(
     clues: torch.Tensor,
     clues_onehot: torch.Tensor,
     answer: torch.Tensor,
-    loss_fn: torch.nn.Module,
     rollout_iters: int = DEFAULT_EVAL_MAX_ROLLOUT_ITER,
     *,
     config: RolloutConfig | None = None,
     fixed_steps: bool = False,
     compute_pred: bool = True,
 ) -> RolloutResult:
-    """Rollout; loss is computed on the final step's logits only."""
+    """Training: grad-free rollout, then two grad steps (confident state + target fixed point).
+
+    Eval: early-stop rollout; readout uses highest-confidence step.
+    """
     config = config or RolloutConfig()
-    threshold_state = _threshold_state(config)
     ctx = _ClueContext.from_clues(clues, clues_onehot)
     initial_onehot = (
         _training_initial_onehot(config, answer, clues, clues_onehot) if model.training else None
     )
 
     if fixed_steps:
-        last_state_in = _run_rollout_fixed(
+        confident_state_in = _run_rollout_fixed_select_confident_state(
             model,
             clues_onehot,
             clues,
             rollout_iters,
-            threshold_state=threshold_state,
             initial_onehot=initial_onehot,
-            ctx=ctx,
         )
+        target_state_in = _answer_state_in(answer, clues, ctx=ctx)
+        confident_logits = model(confident_state_in)
+        target_logits = model(target_state_in)
+        confident_loss = _compute_rollout_loss(
+            confident_logits,
+            clues=clues,
+            answer=answer,
+        )
+        target_loss = _compute_rollout_loss(
+            target_logits,
+            clues=clues,
+            answer=answer,
+        )
+        total_loss = (confident_loss + target_loss) / 2.0
+        eval_logits = confident_logits
         cycle_length = None
         hit_max_iter = True
         steps = rollout_iters
     else:
-        if clues.dim() == 3 and clues.size(0) > 1:
-            raise ValueError("batch size > 1 requires fixed_steps=True")
-        logits_list, cycle_length, hit_max_iter, last_state_in = _run_rollout(
+        clues_batched, was_batched = _ensure_batched_clues(clues)
+        clues_onehot_batched, _ = _ensure_batched_onehot(clues_onehot)
+        answer_batched, _ = _ensure_batched_clues(answer)
+        initial_batched = initial_onehot
+        if initial_batched is not None:
+            initial_batched, _ = _ensure_batched_onehot(initial_batched)
+        eval_out = _run_rollout(
             model,
-            clues_onehot,
-            clues,
+            clues_onehot_batched,
+            clues_batched,
             rollout_iters,
-            threshold_state=threshold_state,
-            initial_onehot=initial_onehot,
-            ctx=ctx,
+            initial_onehot=initial_batched,
         )
-        steps = len(logits_list)
-        if not logits_list:
+        if not eval_out.logits_list:
             zero = torch.zeros((), device=clues.device)
             return RolloutResult(
                 loss=zero,
                 steps=0,
                 hit_max_iter=False,
-                cycle_length=cycle_length,
+                cycle_length=None,
                 pred=None,
             )
+        eval_logits = eval_out.best_logits
+        if not was_batched:
+            eval_logits = eval_logits.squeeze(0)
+        total_loss = _compute_rollout_loss_batch_mean(
+            eval_out.best_logits,
+            clues=clues_batched,
+            answer=answer_batched,
+        )
+        steps, hit_max_iter, cycle_length = _rollout_result_stats(
+            eval_out.steps_per_item,
+            eval_out.hit_max_iter_per_item,
+            eval_out.cycle_length_per_item,
+        )
+        steps_per_item = eval_out.steps_per_item
+        hit_max_iter_per_item = eval_out.hit_max_iter_per_item
+        cycle_length_per_item = eval_out.cycle_length_per_item
+        if not was_batched:
+            steps_per_item = None
+            hit_max_iter_per_item = None
+            cycle_length_per_item = None
 
-    if model.training:
-        last_logits = model(last_state_in)
-    else:
-        last_logits = logits_list[-1]
-
-    total_loss = _compute_rollout_loss(
-        last_logits,
-        clues=clues,
-        answer=answer,
-        config=config,
-    )
-
-    pred = final_eval_grid(last_logits.detach(), clues) if compute_pred else None
+    pred = predict_grid(eval_logits.detach(), clues) if compute_pred else None
     return RolloutResult(
         loss=total_loss,
         steps=steps,
         hit_max_iter=hit_max_iter,
         cycle_length=cycle_length,
         pred=pred,
+        steps_per_item=steps_per_item if not fixed_steps else None,
+        hit_max_iter_per_item=hit_max_iter_per_item if not fixed_steps else None,
+        cycle_length_per_item=cycle_length_per_item if not fixed_steps else None,
     )
 
 
@@ -393,22 +520,15 @@ def rollout_solve(
     clues_onehot: torch.Tensor,
     clues: torch.Tensor,
     max_rollout_iter: int = DEFAULT_MAX_ROLLOUT_ITER,
-    *,
-    config: RolloutConfig | None = None,
 ) -> torch.Tensor:
     """Run f until revisit or max_rollout_iter."""
-    config = config or RolloutConfig()
-    threshold_state = _threshold_state(config)
-    ctx = _ClueContext.from_clues(clues)
-    logits_list, _, _, _ = _run_rollout(
+    eval_out = _run_rollout(
         model,
         clues_onehot,
         clues,
         max_rollout_iter,
-        threshold_state=threshold_state,
-        ctx=ctx,
     )
-    return final_eval_grid(logits_list[-1], clues)
+    return predict_grid(eval_out.best_logits, clues)
 
 
 @torch.no_grad()
@@ -417,23 +537,16 @@ def rollout_trace(
     clues_onehot: torch.Tensor,
     clues: torch.Tensor,
     max_rollout_iter: int = DEFAULT_MAX_ROLLOUT_ITER,
-    *,
-    config: RolloutConfig | None = None,
 ) -> list[str]:
     """Rollout for viz; every displayed frame uses argmax decode (one digit per cell)."""
-    config = config or RolloutConfig()
-    threshold_state = _threshold_state(config)
-    ctx = _ClueContext.from_clues(clues)
-    logits_list, _, _, _ = _run_rollout(
+    eval_out = _run_rollout(
         model,
         clues_onehot,
         clues,
         max_rollout_iter,
-        threshold_state=threshold_state,
-        ctx=ctx,
     )
     grids = [tensor_to_string(clues[0] if clues.dim() == 3 else clues)]
-    for logits in logits_list:
-        grid = final_eval_grid(logits, clues)
+    for logits in eval_out.logits_list:
+        grid = predict_grid(logits, clues)
         grids.append(tensor_to_string(grid[0] if grid.dim() == 3 else grid))
     return grids

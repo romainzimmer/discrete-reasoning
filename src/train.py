@@ -8,14 +8,20 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
-from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from augment import AugmentConfig
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import NextStateModel
-from rollout import DEFAULT_EVAL_MAX_ROLLOUT_ITER, DEFAULT_TRAIN_ROLLOUT_ITER, RolloutConfig, RolloutResult, rollout_train_batch
+from rollout import (
+    DEFAULT_EVAL_MAX_ROLLOUT_ITER,
+    DEFAULT_TRAIN_ROLLOUT_ITER,
+    RolloutConfig,
+    RolloutResult,
+    configure_rollout_compile,
+    rollout_train_batch,
+)
 from viz_data import (
     load_manifest,
     save_epoch_trajectories,
@@ -28,7 +34,6 @@ DEFAULT_RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
 REQUIRED_RUN_ARGS = (
     "width",
     "num_blocks",
-    "rollout_mode",
     "eval_max_rollout_iter",
     "num_workers",
     "min_rating",
@@ -213,11 +218,19 @@ def _accumulate_rollout_stats(
 ) -> tuple[float, int, int, float, int, int, int, int, int]:
     batch_size = answer.size(0) if answer.dim() == 3 else 1
     total_loss += result.loss.item() * batch_size
-    total_steps += result.steps * batch_size
-    max_iter_count += int(result.hit_max_iter) * batch_size
-    if result.cycle_length is not None:
-        total_cycle_length += result.cycle_length * batch_size
-        cycle_count += batch_size
+    if result.steps_per_item is not None:
+        total_steps += int(result.steps_per_item.sum().item())
+        max_iter_count += int(result.hit_max_iter_per_item.sum().item())
+        if result.cycle_length_per_item is not None:
+            cycled = result.cycle_length_per_item[~torch.isnan(result.cycle_length_per_item)]
+            total_cycle_length += cycled.sum().item()
+            cycle_count += int(cycled.numel())
+    else:
+        total_steps += result.steps * batch_size
+        max_iter_count += int(result.hit_max_iter) * batch_size
+        if result.cycle_length is not None:
+            total_cycle_length += result.cycle_length * batch_size
+            cycle_count += batch_size
     n += batch_size
     if result.pred is not None:
         preds = result.pred.unsqueeze(0) if result.pred.dim() == 2 else result.pred
@@ -281,7 +294,6 @@ def train_epoch(
     model: NextStateModel,
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
-    loss_fn: nn.Module,
     device: torch.device,
     *,
     epoch: int,
@@ -307,7 +319,6 @@ def train_epoch(
             batch["clues"],
             batch["clues_onehot"],
             batch["answer"],
-            loss_fn,
             rollout_iters=rollout_iters,
             config=rollout_config,
             fixed_steps=True,
@@ -337,7 +348,6 @@ def train_epoch(
 def measure_split(
     model: NextStateModel,
     loader: DataLoader,
-    loss_fn: nn.Module,
     device: torch.device,
     *,
     epoch: int,
@@ -370,7 +380,6 @@ def measure_split(
             batch["clues"],
             batch["clues_onehot"],
             batch["answer"],
-            loss_fn,
             rollout_iters=max_rollout_iters,
             config=rollout_config,
         )
@@ -419,8 +428,8 @@ def measure_split(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train rollout sudoku model")
     parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=0.0, help="L2 regularization on weights only (not bias)")
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-1, help="L2 regularization on weights only (not bias)")
     parser.add_argument("--width", type=int, default=512, help="FFN block width")
     parser.add_argument("--num-blocks", type=int, default=2, help="Number of FFN blocks")
     parser.add_argument(
@@ -449,21 +458,21 @@ def main() -> None:
     parser.add_argument("--val-samples", type=int, default=None, help="Validation puzzles (overrides val-fraction)")
     parser.add_argument("--viz-samples", type=int, default=10, help="Puzzles per split to save for viz")
     parser.add_argument(
-        "--rollout-mode",
-        choices=["threshold", "categorical"],
-        default="categorical",
-        help="threshold: BCE + threshold rollout; categorical: CE + argmax rollout; acc/viz frames use argmax",
-    )
-    parser.add_argument(
         "--train-init",
         choices=["clues", "noisy-gt", "zero-gt"],
         default="noisy-gt",
-        help="clues: clues only, empty elsewhere (same as val/test); noisy-gt: random GT bit noise on non-clue cells; zero-gt: randomly zero non-clue GT cells",
+        help="clues: clues only, empty elsewhere (same as val/test); noisy-gt: flip non-clue cells to random digits; zero-gt: randomly zero non-clue GT cells",
     )
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for augment RNG and training")
     parser.add_argument("--no-augment", action="store_true", help="Disable training data augmentations")
+    parser.add_argument(
+        "--compile",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="torch.compile model and training rollout loop (default: on for CUDA)",
+    )
     parser.add_argument("--aug-digit-proba", type=float, default=0.5)
     parser.add_argument("--aug-rot-proba", type=float, default=0.5)
     parser.add_argument("--aug-band-proba", type=float, default=0.3)
@@ -473,6 +482,8 @@ def main() -> None:
         torch.manual_seed(args.seed)
 
     device = torch.device(args.device)
+    use_compile = args.compile if args.compile is not None else device.type == "cuda"
+    args.compile = use_compile
     run_dir = make_run_dir(args.runs_dir)
     print(f"Run dir: {run_dir}")
     ds_kwargs = {
@@ -509,9 +520,12 @@ def main() -> None:
         "num_workers": args.num_workers,
     }
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **loader_kwargs)
-    val_loader = DataLoader(val_ds, batch_size=1, **loader_kwargs)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, **loader_kwargs)
 
     model = NextStateModel(width=args.width, num_blocks=args.num_blocks).to(device)
+    if use_compile:
+        model = torch.compile(model)
+        configure_rollout_compile(True)
     decay_params, no_decay_params = [], []
     for name, param in model.named_parameters():
         if not param.requires_grad:
@@ -527,17 +541,12 @@ def main() -> None:
         ],
         lr=args.lr,
     )
-    loss_fn = (
-        nn.BCEWithLogitsLoss()
-        if args.rollout_mode == "threshold"
-        else nn.CrossEntropyLoss()
-    )
     train_init = {
         "clues": "clues",
         "noisy-gt": "noisy_gt",
         "zero-gt": "zero_gt",
     }[args.train_init]
-    rollout_config = RolloutConfig(mode=args.rollout_mode, train_init=train_init)
+    rollout_config = RolloutConfig(train_init=train_init)
     best_val_cell_acc = -1.0
     manifest = load_manifest(run_dir)
     viz_rows = {
@@ -550,7 +559,6 @@ def main() -> None:
             model,
             train_loader,
             optimizer,
-            loss_fn,
             device,
             epoch=epoch,
             epochs=args.epochs,
@@ -562,7 +570,6 @@ def main() -> None:
         val = measure_split(
             model,
             val_loader,
-            loss_fn,
             device,
             epoch=epoch,
             epochs=args.epochs,
@@ -584,7 +591,6 @@ def main() -> None:
                 run_dir=run_dir,
                 device=device,
                 max_rollout_iter=args.eval_max_rollout_iter,
-                rollout_config=rollout_config,
             )
             update_manifest_split(manifest, split, epoch, puzzle_indices)
         save_manifest(run_dir, manifest)
