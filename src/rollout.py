@@ -274,16 +274,18 @@ def _fixed_rollout_confidence_loop(
     batch_size = clues.size(0)
     best_confidence: torch.Tensor | None = None
     best_state_in = state.clone()
+    prev_state = state.clone()
     for _ in range(rollout_iters):
         logits = model(state)
         confidence = _mean_cell_confidence(logits)
         best_confidence, best_state_in = _update_best_by_confidence(
             confidence,
-            state,
+            prev_state,
             best_confidence=best_confidence,
             best=best_state_in,
             batch_size=batch_size,
         )
+        prev_state = state.clone()
         state = _advance_rollout_state(
             logits,
             clues,
@@ -371,7 +373,7 @@ def _run_rollout_fixed_select_confident_state(
     *,
     initial_onehot: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Roll out without grad; return input state with highest mean cell confidence."""
+    """Roll out without grad; return input state before the most confident step."""
     clues, _ = _ensure_batched_clues(clues)
     clues_onehot, _ = _ensure_batched_onehot(clues_onehot)
     if initial_onehot is None:
