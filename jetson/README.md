@@ -44,6 +44,7 @@ Writes `data/train.csv` and `data/test.csv` (~798 MB).
 
 ```bash
 docker compose run --rm train --epochs 30 --lr 0.001 --weight-decay 0.01 --width 1024 --num-blocks 3 --train-rollout-iter 10 --eval-max-rollout-iter 30 --batch-size 512 --num-workers 1 --val-samples 10000 --rollout-mode categorical --train-init noisy-gt
+# Add --no-augment to match pre-augment training runs
 ```
 
 Easy sudoku only (rating 0):
@@ -62,7 +63,7 @@ Checkpoints and trajectories are written to `runs/`.
 
 ## Test
 
-Evaluate `best.pt` from a run (reuses rollout, rating, and dataloader settings from the checkpoint):
+Evaluate `best.pt` from a run (reuses model and rollout settings from the checkpoint; test rating filters are independent of training):
 
 ```bash
 docker compose run --rm eval runs/20260906-145132-bda4748d
@@ -72,6 +73,12 @@ Cap test puzzles:
 
 ```bash
 docker compose run --rm eval runs/20260906-145132-bda4748d --max-test-samples 1000
+```
+
+Filter test by rating (omit both flags to evaluate all ratings):
+
+```bash
+docker compose run --rm eval runs/20260906-145132-bda4748d --min-rating 5 --max-rating 9
 ```
 
 Full test split (omit `--max-test-samples`).

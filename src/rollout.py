@@ -16,8 +16,8 @@ TrainInitMode = Literal["clues", "noisy_gt", "zero_gt"]
 
 @dataclass(frozen=True)
 class RolloutConfig:
-    mode: RolloutMode = "threshold"
-    train_init: TrainInitMode = "clues"
+    mode: RolloutMode = "categorical"
+    train_init: TrainInitMode = "noisy_gt"
 
 
 @dataclass(frozen=True)

@@ -12,6 +12,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from augment import AugmentConfig
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import NextStateModel
 from rollout import DEFAULT_EVAL_MAX_ROLLOUT_ITER, DEFAULT_TRAIN_ROLLOUT_ITER, RolloutConfig, RolloutResult, rollout_train_batch
@@ -450,7 +451,7 @@ def main() -> None:
     parser.add_argument(
         "--rollout-mode",
         choices=["threshold", "categorical"],
-        default="threshold",
+        default="categorical",
         help="threshold: BCE + threshold rollout; categorical: CE + argmax rollout; acc/viz frames use argmax",
     )
     parser.add_argument(
@@ -461,7 +462,15 @@ def main() -> None:
     )
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for augment RNG and training")
+    parser.add_argument("--no-augment", action="store_true", help="Disable training data augmentations")
+    parser.add_argument("--aug-digit-proba", type=float, default=0.5)
+    parser.add_argument("--aug-rot-proba", type=float, default=0.5)
+    parser.add_argument("--aug-band-proba", type=float, default=0.3)
     args = parser.parse_args()
+
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
 
     device = torch.device(args.device)
     run_dir = make_run_dir(args.runs_dir)
@@ -477,7 +486,17 @@ def main() -> None:
         val_fraction=args.val_fraction,
         max_samples=args.max_samples,
     )
-    train_ds = PuzzleDataset(rows=train_rows)
+    aug_config = AugmentConfig(
+        p_digit=args.aug_digit_proba,
+        p_rot=args.aug_rot_proba,
+        p_band=args.aug_band_proba,
+    )
+    train_ds = PuzzleDataset(
+        rows=train_rows,
+        augment=not args.no_augment,
+        aug_config=aug_config,
+        aug_seed=args.seed,
+    )
     val_ds = PuzzleDataset(rows=val_rows)
     args.train_samples = len(train_rows)
     args.val_samples_count = len(val_rows)

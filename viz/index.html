@@ -384,11 +384,16 @@
       return parts.join(" · ");
     }
 
+    function formatRatingRange(minRating, maxRating) {
+      if (minRating == null && maxRating == null) return "all";
+      const lo = minRating ?? "…";
+      const hi = maxRating ?? "…";
+      return `${lo} – ${hi}`;
+    }
+
     function formatRating(args) {
       if (args.min_rating == null && args.max_rating == null) return null;
-      const lo = args.min_rating ?? "…";
-      const hi = args.max_rating ?? "…";
-      return `${lo} – ${hi}`;
+      return formatRatingRange(args.min_rating, args.max_rating);
     }
 
     function formatDuration(seconds) {
@@ -619,6 +624,11 @@
       noteEl.textContent = `Held-out test split · best validation epoch ${epoch}`;
       const pct = v => `${(Number(v) * 100).toFixed(1)}%`;
       const stats = [
+        { label: "Puzzles", value: test.test_samples_count },
+        {
+          label: "Rating",
+          value: formatRatingRange(test.min_rating, test.max_rating),
+        },
         { label: "Loss", value: test.loss, format: v => Number(v).toFixed(4) },
         { label: "Cell accuracy", value: test.cell_acc, format: pct },
         { label: "Puzzle accuracy", value: test.puzzle_acc, format: pct },
@@ -627,7 +637,10 @@
         { label: "Max-iter rollout", value: test.max_iter_pct, format: pct },
       ]
         .filter(stat => stat.value != null)
-        .map(stat => ({ label: stat.label, value: stat.format(stat.value) }));
+        .map(stat => ({
+          label: stat.label,
+          value: stat.format ? stat.format(stat.value) : stat.value,
+        }));
       gridEl.innerHTML = renderStatGrid(stats);
     }
 

@@ -11,6 +11,9 @@ dependencies = [
     "torch>=2.0.0; platform_machine != 'x86_64' or sys_platform != 'darwin'",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest"]
+
 [project.scripts]
 download-dataset = "download:main"
 train = "train:main"
@@ -26,3 +29,7 @@ only-packages = false
 
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

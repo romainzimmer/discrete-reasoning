@@ -15,7 +15,15 @@ from rollout import RolloutConfig
 from train import EpochStats, measure_split, require_run_args
 
 
-def save_test_metrics(run_dir: Path, *, epoch: int, test: EpochStats, test_samples: int) -> None:
+def save_test_metrics(
+    run_dir: Path,
+    *,
+    epoch: int,
+    test: EpochStats,
+    test_samples: int,
+    min_rating: int | None,
+    max_rating: int | None,
+) -> None:
     history_path = run_dir / "history.json"
     if history_path.exists():
         history = json.loads(history_path.read_text())
@@ -24,6 +32,8 @@ def save_test_metrics(run_dir: Path, *, epoch: int, test: EpochStats, test_sampl
     history["test"] = {
         "best_epoch": epoch,
         "test_samples_count": test_samples,
+        "min_rating": min_rating,
+        "max_rating": max_rating,
         **asdict(test),
     }
     history_path.write_text(json.dumps(history, indent=2))
@@ -45,6 +55,18 @@ def main() -> None:
         default=None,
         help="Max puzzles from test.csv after filters (default: all)",
     )
+    parser.add_argument(
+        "--min-rating",
+        type=int,
+        default=None,
+        help="Min puzzle rating on test split (default: no filter)",
+    )
+    parser.add_argument(
+        "--max-rating",
+        type=int,
+        default=None,
+        help="Max puzzle rating on test split (default: no filter)",
+    )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
@@ -55,8 +77,8 @@ def main() -> None:
 
     test_rows = filter_rows(
         "test",
-        min_rating=run_args["min_rating"],
-        max_rating=run_args["max_rating"],
+        min_rating=args.min_rating,
+        max_rating=args.max_rating,
         max_samples=args.max_test_samples,
     )
     if not test_rows:
@@ -98,7 +120,14 @@ def main() -> None:
         rollout_config=rollout_config,
         use_cuda=use_cuda,
     )
-    save_test_metrics(run_dir, epoch=epoch, test=test, test_samples=len(test_rows))
+    save_test_metrics(
+        run_dir,
+        epoch=epoch,
+        test=test,
+        test_samples=len(test_rows),
+        min_rating=args.min_rating,
+        max_rating=args.max_rating,
+    )
     print(
         f"test (epoch {epoch}, n={len(test_rows)}): "
         f"loss={test.loss:.4f} cell_acc={test.cell_acc:.4f} "
