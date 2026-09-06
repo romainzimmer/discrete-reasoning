@@ -50,8 +50,16 @@ Checkpoints and trajectories are written to `runs/`.
 
 ## Visualize
 
+On the Jetson:
+
 ```bash
 docker compose up viz
 ```
 
-Open http://localhost:8000/viz/
+Configure a jetson SSH config then forward port 8000:
+
+```bash
+ssh -L 8000:localhost:8000 jetson
+```
+
+Then open http://localhost:8000/viz/
