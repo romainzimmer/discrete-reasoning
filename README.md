@@ -20,7 +20,7 @@ Writes `data/train.csv` and `data/test.csv` (~798 MB).
 
 ```bash
 uv run train --min-rating 0 --max-rating 0 --max-samples 100 --epochs 30
-uv run python -m http.server
+uv run python -m http.server 8000
 ```
 
 Open http://localhost:8000/viz/

@@ -419,9 +419,9 @@ def main() -> None:
         "--hidden-sizes",
         type=int,
         nargs="+",
-        default=[512, 512],
+        default=[512],
         metavar="N",
-        help="Hidden layer widths (e.g. 256 for one layer, 512 512 for two)",
+        help="Hidden layer widths (e.g. 512 for one layer, 512 512 for two)",
     )
     parser.add_argument(
         "--max-rollout-iter",
@@ -444,9 +444,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--train-init",
-        choices=["clues", "noisy-gt"],
+        choices=["clues", "noisy-gt", "zero-gt"],
         default="clues",
-        help="clues: clues only, empty elsewhere (same as val/test); noisy-gt: random GT corruption on non-clue cells",
+        help="clues: clues only, empty elsewhere (same as val/test); noisy-gt: random GT bit noise on non-clue cells; zero-gt: randomly zero non-clue GT cells",
     )
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -500,7 +500,11 @@ def main() -> None:
         if args.rollout_mode == "threshold"
         else nn.CrossEntropyLoss()
     )
-    train_init = "noisy_gt" if args.train_init == "noisy-gt" else "clues"
+    train_init = {
+        "clues": "clues",
+        "noisy-gt": "noisy_gt",
+        "zero-gt": "zero_gt",
+    }[args.train_init]
     rollout_config = RolloutConfig(mode=args.rollout_mode, train_init=train_init)
     best_val_loss = float("inf")
     manifest = load_manifest(run_dir)

@@ -10,7 +10,7 @@ from encoding import attach_clue_mask, decode_logits, grid_to_onehot, onehot_to_
 from model import NextStateModel
 
 RolloutMode = Literal["threshold", "categorical"]
-TrainInitMode = Literal["clues", "noisy_gt"]
+TrainInitMode = Literal["clues", "noisy_gt", "zero_gt"]
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,18 @@ def _noisy_ground_truth_initial(answer: torch.Tensor, clues: torch.Tensor) -> to
     return torch.where(clue_mask, clue_state, corrupted)
 
 
+def _zeroed_ground_truth_initial(answer: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
+    """Start from ground truth; zero each non-clue cell with prob p~U[0,1] (same as val/test empty init)."""
+    onehot = grid_to_onehot(answer)
+    p = torch.rand((), device=answer.device).item()
+    non_clue = clues == 0
+    zero_out = (torch.rand_like(clues, dtype=torch.float32) < p) & non_clue
+    clue_state = grid_to_onehot(clues)
+    clue_mask = (clues > 0).unsqueeze(-1)
+    zeroed = torch.where(zero_out.unsqueeze(-1), torch.zeros_like(onehot), onehot)
+    return torch.where(clue_mask, clue_state, zeroed)
+
+
 def _training_initial_onehot(
     config: RolloutConfig,
     answer: torch.Tensor,
@@ -59,6 +71,8 @@ def _training_initial_onehot(
 ) -> torch.Tensor | None:
     if config.train_init == "noisy_gt":
         return _noisy_ground_truth_initial(answer, clues)
+    if config.train_init == "zero_gt":
+        return _zeroed_ground_truth_initial(answer, clues)
     return None
 
 
