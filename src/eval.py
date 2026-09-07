@@ -10,8 +10,8 @@ from torch.utils.data import DataLoader
 
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import NextStateModel
-from rollout import DEFAULT_ROLLOUT_ITER, RolloutConfig
-from train import EpochStats, measure_split, require_run_args
+from rollout import DEFAULT_EXPONENTIAL_T_MIN, DEFAULT_ROLLOUT_ITER, RolloutConfig
+from train import EpochStats, build_rollout_config, measure_split, require_run_args
 
 
 def save_test_metrics(
@@ -113,9 +113,11 @@ def main() -> None:
         if args.rollout_iter is not None
         else int(run_args.get("eval_rollout_iter", DEFAULT_ROLLOUT_ITER))
     )
-    rollout_config = RolloutConfig(
+    rollout_config = build_rollout_config(
         train_init="clues",
-        t_max=float(run_args.get("rollout_t_max", 3.0)),
+        temperature_schedule=run_args.get("temperature_schedule", "cosine"),
+        rollout_t_max=float(run_args.get("rollout_t_max", 3.0)),
+        rollout_t_min=float(run_args.get("rollout_t_min", DEFAULT_EXPONENTIAL_T_MIN)),
     )
 
     epoch = int(ckpt["epoch"])

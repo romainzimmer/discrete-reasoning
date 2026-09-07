@@ -17,15 +17,18 @@ from encoding import (
 from model import NextStateModel
 
 TrainInitMode = Literal["clues", "noisy_gt", "zero_gt", "curriculum"]
+TemperatureSchedule = Literal["cosine", "exponential"]
 
 DEFAULT_ROLLOUT_ITER = 10
 DEFAULT_T_MAX = 3.0
 DEFAULT_T_MIN = 0.0
+DEFAULT_EXPONENTIAL_T_MIN = 1e-2
 
 
 @dataclass(frozen=True)
 class RolloutConfig:
     train_init: TrainInitMode = "noisy_gt"
+    temperature_schedule: TemperatureSchedule = "cosine"
     t_max: float = DEFAULT_T_MAX
     t_min: float = DEFAULT_T_MIN
 
@@ -52,15 +55,43 @@ class RolloutResult:
     pred: torch.Tensor | None = None
 
 
-def temperature_at_step(step: int, total_steps: int, t_max: float, t_min: float) -> float:
+def exponential_decay_rate(t_max: float, t_min: float) -> float:
+    """Rate λ so T(s) = t_max * exp(-λ * s/(S-1)) reaches t_min at the last step."""
+    if t_min <= 0:
+        raise ValueError("t_min must be positive for exponential decay rate")
+    if t_max <= t_min:
+        raise ValueError("t_max must be greater than t_min")
+    return math.log(t_max / t_min)
+
+
+def temperature_at_step(
+    step: int,
+    total_steps: int,
+    t_max: float,
+    t_min: float,
+    *,
+    schedule: TemperatureSchedule = "cosine",
+) -> float:
     if total_steps <= 1:
-        return t_min
+        return 0.0 if schedule == "cosine" else t_min
     t = step / (total_steps - 1)
-    return t_min + (t_max - t_min) * 0.5 * (1 + math.cos(math.pi * t))
+    if schedule == "cosine":
+        return t_min + (t_max - t_min) * 0.5 * (1 + math.cos(math.pi * t))
+    rate = exponential_decay_rate(t_max, t_min)
+    return t_max * math.exp(-rate * t)
 
 
-def temperature_schedule(rollout_iters: int, t_max: float, t_min: float) -> list[float]:
-    return [temperature_at_step(s, rollout_iters, t_max, t_min) for s in range(rollout_iters)]
+def temperature_schedule(
+    rollout_iters: int,
+    t_max: float,
+    t_min: float,
+    *,
+    schedule: TemperatureSchedule = "cosine",
+) -> list[float]:
+    return [
+        temperature_at_step(s, rollout_iters, t_max, t_min, schedule=schedule)
+        for s in range(rollout_iters)
+    ]
 
 
 def logits_to_state(
@@ -235,7 +266,12 @@ def _rollout_loop(
     answer: torch.Tensor | None = None,
     collect_state_grids: bool = False,
 ) -> tuple[torch.Tensor, list[torch.Tensor] | None, list[torch.Tensor] | None]:
-    temperatures = temperature_schedule(rollout_iters, config.t_max, config.t_min)
+    temperatures = temperature_schedule(
+        rollout_iters,
+        config.t_max,
+        config.t_min,
+        schedule=config.temperature_schedule,
+    )
     state_grids: list[torch.Tensor] | None = [] if collect_state_grids else None
     step_losses: list[torch.Tensor] | None = [] if answer is not None else None
     logits = state.new_zeros((clues.size(0), 9, 9, 9))

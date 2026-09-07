@@ -15,7 +15,14 @@ from tqdm import tqdm
 from augment import AugmentConfig
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import NextStateModel
-from rollout import DEFAULT_ROLLOUT_ITER, RolloutConfig, RolloutResult, rollout_train_batch
+from rollout import (
+    DEFAULT_EXPONENTIAL_T_MIN,
+    DEFAULT_ROLLOUT_ITER,
+    RolloutConfig,
+    RolloutResult,
+    exponential_decay_rate,
+    rollout_train_batch,
+)
 from viz_data import (
     load_manifest,
     save_epoch_trajectories,
@@ -34,6 +41,32 @@ REQUIRED_RUN_ARGS = (
     "min_rating",
     "max_rating",
 )
+
+OPTIONAL_RUN_ARGS_DEFAULTS = {
+    "temperature_schedule": "cosine",
+    "rollout_t_min": DEFAULT_EXPONENTIAL_T_MIN,
+}
+
+
+def rollout_t_min_for_schedule(schedule: str, rollout_t_min: float) -> float:
+    if schedule == "cosine":
+        return 0.0
+    return rollout_t_min
+
+
+def build_rollout_config(
+    *,
+    train_init: str,
+    temperature_schedule: str,
+    rollout_t_max: float,
+    rollout_t_min: float,
+) -> RolloutConfig:
+    return RolloutConfig(
+        train_init=train_init,
+        temperature_schedule=temperature_schedule,
+        t_max=rollout_t_max,
+        t_min=rollout_t_min_for_schedule(temperature_schedule, rollout_t_min),
+    )
 
 
 def _epoch_desc(epoch: int, epochs: int, phase: str) -> str:
@@ -80,6 +113,8 @@ def require_run_args(raw: dict, *, source: str) -> dict:
             f"{source} args missing required keys: {', '.join(missing)}. "
             "Re-run training with the current train script so defaults are saved explicitly."
         )
+    for key, default in OPTIONAL_RUN_ARGS_DEFAULTS.items():
+        args.setdefault(key, default)
     return args
 
 
@@ -375,6 +410,18 @@ def main() -> None:
         default=3.0,
         help="Max sampling temperature at first rollout step",
     )
+    parser.add_argument(
+        "--rollout-t-min",
+        type=float,
+        default=DEFAULT_EXPONENTIAL_T_MIN,
+        help="Target min temperature for exponential schedule (cosine ends at 0)",
+    )
+    parser.add_argument(
+        "--temperature-schedule",
+        choices=["cosine", "exponential"],
+        default="cosine",
+        help="Temperature annealing schedule during rollout",
+    )
     parser.add_argument("--batch-size", type=int, default=8, help="Training batch size")
     parser.add_argument(
         "--num-workers",
@@ -433,6 +480,13 @@ def main() -> None:
     val_ds = PuzzleDataset(rows=val_rows)
     args.train_samples = len(train_rows)
     args.val_samples_count = len(val_rows)
+    if args.temperature_schedule == "exponential":
+        args.temperature_decay_rate = exponential_decay_rate(
+            args.rollout_t_max,
+            args.rollout_t_min,
+        )
+    else:
+        args.temperature_decay_rate = None
     save_run_config(run_dir, args)
 
     use_cuda = device.type == "cuda"
@@ -466,8 +520,18 @@ def main() -> None:
         "zero-gt": "zero_gt",
         "curriculum": "curriculum",
     }[args.train_init]
-    rollout_config = RolloutConfig(train_init=train_init, t_max=args.rollout_t_max)
-    eval_rollout_config = RolloutConfig(train_init="clues", t_max=args.rollout_t_max)
+    rollout_config = build_rollout_config(
+        train_init=train_init,
+        temperature_schedule=args.temperature_schedule,
+        rollout_t_max=args.rollout_t_max,
+        rollout_t_min=args.rollout_t_min,
+    )
+    eval_rollout_config = build_rollout_config(
+        train_init="clues",
+        temperature_schedule=args.temperature_schedule,
+        rollout_t_max=args.rollout_t_max,
+        rollout_t_min=args.rollout_t_min,
+    )
     best_val_cell_acc = -1.0
     manifest = load_manifest(run_dir)
     viz_rows = {

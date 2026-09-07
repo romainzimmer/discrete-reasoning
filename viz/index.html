@@ -420,6 +420,13 @@
           value: args.eval_rollout_iter,
         },
         { label: "Rollout T max", value: args.rollout_t_max },
+        { label: "Temperature schedule", value: args.temperature_schedule ?? "cosine" },
+        ...(args.temperature_schedule === "exponential"
+          ? [
+              { label: "Rollout T min", value: args.rollout_t_min },
+              { label: "Temperature decay rate", value: Number(args.temperature_decay_rate).toFixed(2) },
+            ]
+          : []),
         { label: "Epochs", value: args.epochs },
       ];
       const totalSeconds = totalRunSeconds(history);

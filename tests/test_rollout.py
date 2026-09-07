@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 
 from encoding import attach_clue_mask, decode_logits, grid_to_onehot, onehot_to_grid, sample_decode_logits
 from model import NextStateModel
 from rollout import (
+    DEFAULT_EXPONENTIAL_T_MIN,
     DEFAULT_T_MAX,
     RolloutConfig,
     _ClueContext,
     _curriculum_initial,
     _rollout_loop,
+    exponential_decay_rate,
     predict_grid,
     rollout_train_batch,
     rollout_trace,
@@ -43,19 +47,43 @@ def _tiny_batch():
 
 def test_temperature_endpoints_and_monotonic():
     for total in (2, 10, 30):
-        temps = temperature_schedule(total, t_max=3.0, t_min=0.0)
+        temps = temperature_schedule(total, t_max=3.0, t_min=0.0, schedule="cosine")
         assert len(temps) == total
         assert temps[0] == pytest.approx(3.0)
         assert temps[-1] == pytest.approx(0.0)
         assert all(temps[i] >= temps[i + 1] for i in range(total - 1))
 
 
+def test_exponential_temperature_endpoints_and_monotonic():
+    t_min = DEFAULT_EXPONENTIAL_T_MIN
+    for total in (2, 10, 30):
+        temps = temperature_schedule(total, t_max=3.0, t_min=t_min, schedule="exponential")
+        assert len(temps) == total
+        assert temps[0] == pytest.approx(3.0)
+        assert temps[-1] == pytest.approx(t_min)
+        assert all(temps[i] >= temps[i + 1] for i in range(total - 1))
+
+
+def test_exponential_decay_rate_matches_endpoints():
+    t_max = 3.0
+    t_min = DEFAULT_EXPONENTIAL_T_MIN
+    rate = exponential_decay_rate(t_max, t_min)
+    assert rate == pytest.approx(math.log(t_max / t_min))
+    total = 10
+    assert temperature_at_step(total - 1, total, t_max, t_min, schedule="exponential") == pytest.approx(t_min)
+
+
 def test_temperature_adapts_to_length():
-    assert temperature_at_step(1, 10, 3.0, 0.0) != temperature_at_step(1, 30, 3.0, 0.0)
+    assert temperature_at_step(1, 10, 3.0, 0.0, schedule="cosine") != temperature_at_step(
+        1, 30, 3.0, 0.0, schedule="cosine"
+    )
 
 
 def test_temperature_single_step():
-    assert temperature_at_step(0, 1, 3.0, 0.0) == 0.0
+    assert temperature_at_step(0, 1, 3.0, 0.0, schedule="cosine") == 0.0
+    assert temperature_at_step(0, 1, 3.0, DEFAULT_EXPONENTIAL_T_MIN, schedule="exponential") == pytest.approx(
+        DEFAULT_EXPONENTIAL_T_MIN
+    )
 
 
 def test_sample_decode_t0_matches_argmax():
