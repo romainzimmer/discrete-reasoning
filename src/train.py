@@ -379,7 +379,7 @@ def measure_split(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train rollout sudoku model")
     parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-2, help="L2 regularization on weights only (not bias)")
     parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Clip gradient global norm (0 disables)")
     parser.add_argument("--width", type=int, default=512, help="FFN block width")
