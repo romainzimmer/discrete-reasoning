@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -8,29 +7,26 @@ import torch
 import torch.nn.functional as F
 
 from data import tensor_to_string
-from encoding import (
-    attach_clue_mask,
-    grid_to_onehot,
-    onehot_to_grid,
-    sample_decode_logits,
-)
+from encoding import attach_clue_mask, grid_to_onehot, onehot_to_grid
 from model import NextStateModel
 
 TrainInitMode = Literal["clues", "noisy_gt", "zero_gt", "curriculum"]
-TemperatureSchedule = Literal["cosine", "exponential"]
 
-DEFAULT_ROLLOUT_ITER = 10
-DEFAULT_T_MAX = 3.0
-DEFAULT_T_MIN = 0.0
-DEFAULT_EXPONENTIAL_T_MIN = 1e-2
+DEFAULT_INNER_ITERS = 5
+DEFAULT_OUTER_ITERS = 10
 
 
 @dataclass(frozen=True)
 class RolloutConfig:
     train_init: TrainInitMode = "noisy_gt"
-    temperature_schedule: TemperatureSchedule = "cosine"
-    t_max: float = DEFAULT_T_MAX
-    t_min: float = DEFAULT_T_MIN
+    inner_iters: int = DEFAULT_INNER_ITERS
+    outer_iters: int = DEFAULT_OUTER_ITERS
+
+    def __post_init__(self) -> None:
+        if self.inner_iters < 1:
+            raise ValueError("inner_iters must be >= 1")
+        if self.outer_iters < 1:
+            raise ValueError("outer_iters must be >= 1")
 
 
 @dataclass(frozen=True)
@@ -53,62 +49,6 @@ class _ClueContext:
 class RolloutResult:
     loss: torch.Tensor
     pred: torch.Tensor | None = None
-
-
-def exponential_decay_rate(t_max: float, t_min: float) -> float:
-    """Rate λ so T(s) = t_max * exp(-λ * s/(S-1)) reaches t_min at the last step."""
-    if t_min <= 0:
-        raise ValueError("t_min must be positive for exponential decay rate")
-    if t_max <= t_min:
-        raise ValueError("t_max must be greater than t_min")
-    return math.log(t_max / t_min)
-
-
-def temperature_at_step(
-    step: int,
-    total_steps: int,
-    t_max: float,
-    t_min: float,
-    *,
-    schedule: TemperatureSchedule = "cosine",
-) -> float:
-    if total_steps <= 1:
-        return 0.0 if schedule == "cosine" else t_min
-    t = step / (total_steps - 1)
-    if schedule == "cosine":
-        return t_min + (t_max - t_min) * 0.5 * (1 + math.cos(math.pi * t))
-    rate = exponential_decay_rate(t_max, t_min)
-    return t_max * math.exp(-rate * t)
-
-
-def temperature_schedule(
-    rollout_iters: int,
-    t_max: float,
-    t_min: float,
-    *,
-    schedule: TemperatureSchedule = "cosine",
-) -> list[float]:
-    return [
-        temperature_at_step(s, rollout_iters, t_max, t_min, schedule=schedule)
-        for s in range(rollout_iters)
-    ]
-
-
-def logits_to_state(
-    logits: torch.Tensor,
-    clues: torch.Tensor,
-    *,
-    temperature: float,
-    clue_state: torch.Tensor | None = None,
-    clue_mask: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Feed back sampled-decoded logits as one-hot, detached, with clues pinned."""
-    decoded = grid_to_onehot(sample_decode_logits(logits, temperature, clues=clues).detach())
-    if clue_state is None:
-        clue_state = grid_to_onehot(clues)
-    if clue_mask is None:
-        clue_mask = (clues > 0).unsqueeze(-1)
-    return torch.where(clue_mask, clue_state, decoded)
 
 
 def _random_zero_non_clue_grid(answer: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
@@ -238,68 +178,92 @@ def _compute_rollout_loss_batch_mean(
     return per_puzzle.mean()
 
 
-def _advance_rollout_state(
+def logits_to_softmax_state(
     logits: torch.Tensor,
-    clues: torch.Tensor,
-    *,
-    temperature: float,
     ctx: _ClueContext,
+    rollout_clues: torch.Tensor,
 ) -> torch.Tensor:
-    new_onehot = logits_to_state(
-        logits,
-        clues,
-        temperature=temperature,
-        clue_state=ctx.clue_state,
-        clue_mask=ctx.clue_mask,
-    )
-    return attach_clue_mask(new_onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
+    probs = F.softmax(logits, dim=-1)
+    digits = torch.where(ctx.clue_mask, ctx.clue_state, probs)
+    return attach_clue_mask(digits, rollout_clues, clue_mask_channel=ctx.clue_mask_channel)
+
+
+def logits_to_argmax_state(
+    logits: torch.Tensor,
+    ctx: _ClueContext,
+    rollout_clues: torch.Tensor,
+) -> torch.Tensor:
+    decoded = grid_to_onehot(predict_grid(logits, rollout_clues).detach())
+    digits = torch.where(ctx.clue_mask, ctx.clue_state, decoded)
+    return attach_clue_mask(digits, rollout_clues, clue_mask_channel=ctx.clue_mask_channel)
+
+
+def _inner_loop(
+    model: NextStateModel,
+    state: torch.Tensor,
+    ctx: _ClueContext,
+    rollout_clues: torch.Tensor,
+    inner_iters: int,
+) -> torch.Tensor:
+    for _ in range(inner_iters - 1):
+        logits = model(state)
+        state = logits_to_softmax_state(logits, ctx, rollout_clues)
+    return model(state)
 
 
 def _rollout_loop(
     model: NextStateModel,
     state: torch.Tensor,
-    clues: torch.Tensor,
+    rollout_clues: torch.Tensor,
     ctx: _ClueContext,
-    rollout_iters: int,
-    config: RolloutConfig,
+    inner_iters: int,
+    outer_iters: int,
     *,
     answer: torch.Tensor | None = None,
     collect_state_grids: bool = False,
-) -> tuple[torch.Tensor, list[torch.Tensor] | None, list[torch.Tensor] | None]:
-    temperatures = temperature_schedule(
-        rollout_iters,
-        config.t_max,
-        config.t_min,
-        schedule=config.temperature_schedule,
-    )
+    accumulate_grad: bool = False,
+) -> tuple[torch.Tensor, list[torch.Tensor] | None, torch.Tensor]:
     state_grids: list[torch.Tensor] | None = [] if collect_state_grids else None
-    step_losses: list[torch.Tensor] | None = [] if answer is not None else None
-    logits = state.new_zeros((clues.size(0), 9, 9, 9))
+    outer_losses: list[torch.Tensor] = []
+    logits = state.new_zeros((rollout_clues.size(0), 9, 9, 9))
 
-    for temp in temperatures:
-        logits = model(state)
-        if step_losses is not None:
-            step_losses.append(
-                _compute_rollout_loss_batch_mean(logits, clues=clues, answer=answer)
+    for _ in range(outer_iters):
+        logits = _inner_loop(model, state, ctx, rollout_clues, inner_iters)
+        if answer is not None:
+            outer_loss = _compute_rollout_loss_batch_mean(
+                logits,
+                clues=rollout_clues,
+                answer=answer,
             )
-        state = _advance_rollout_state(logits, clues, temperature=temp, ctx=ctx)
+            if accumulate_grad:
+                (outer_loss / outer_iters).backward()
+                outer_losses.append(outer_loss.detach())
+            else:
+                outer_losses.append(outer_loss)
+        state = logits_to_argmax_state(logits, ctx, rollout_clues)
         if state_grids is not None:
             state_grids.append(onehot_to_grid(state[..., :9]))
 
-    return logits, state_grids, step_losses
+    if answer is None:
+        total_loss = logits.new_zeros(())
+    elif outer_losses:
+        total_loss = torch.stack(outer_losses).mean()
+    else:
+        total_loss = logits.new_zeros(())
+
+    return logits, state_grids, total_loss
 
 
 def _run_rollout(
     model: NextStateModel,
     clues_onehot: torch.Tensor,
     clues: torch.Tensor,
-    rollout_iters: int,
     *,
     config: RolloutConfig,
     initial_onehot: torch.Tensor | None = None,
     collect_state_grids: bool = False,
 ) -> tuple[torch.Tensor, list[torch.Tensor] | None]:
-    """Fixed-step rollout with temperature-annealed sampling. Returns final logits."""
+    """Inner/outer rollout with argmax commits. Returns final logits."""
     clues, _ = _ensure_batched_clues(clues)
     clues_onehot, _ = _ensure_batched_onehot(clues_onehot)
     if initial_onehot is None:
@@ -314,8 +278,8 @@ def _run_rollout(
         state,
         clues,
         ctx,
-        rollout_iters,
-        config,
+        config.inner_iters,
+        config.outer_iters,
         collect_state_grids=collect_state_grids,
     )
     return logits, state_grids
@@ -326,12 +290,14 @@ def rollout_train_batch(
     clues: torch.Tensor,
     clues_onehot: torch.Tensor,
     answer: torch.Tensor,
-    rollout_iters: int = DEFAULT_ROLLOUT_ITER,
     *,
     config: RolloutConfig | None = None,
     compute_pred: bool = True,
+    accumulate_grad: bool = False,
 ) -> RolloutResult:
-    """All-step rollout loss; train and eval share the same loop dynamics."""
+    """Rollout loss over outer loops; per-outer backward when training."""
+    if model.training and not accumulate_grad:
+        raise ValueError("accumulate_grad must be True when model.training")
     config = config or RolloutConfig()
     rollout_clues = clues
     rollout_clues_onehot = clues_onehot
@@ -353,17 +319,16 @@ def rollout_train_batch(
         initial_batched = clues_onehot_batched
     state = attach_clue_mask(initial_batched, clues_batched, clue_mask_channel=ctx.clue_mask_channel)
 
-    logits, _, step_losses = _rollout_loop(
+    logits, _, total_loss = _rollout_loop(
         model,
         state,
         clues_batched,
         ctx,
-        rollout_iters,
-        config,
+        config.inner_iters,
+        config.outer_iters,
         answer=answer_batched,
+        accumulate_grad=accumulate_grad,
     )
-    assert step_losses is not None
-    total_loss = torch.stack(step_losses).mean()
     eval_logits = logits
     if not was_batched:
         eval_logits = eval_logits.squeeze(0)
@@ -376,7 +341,6 @@ def rollout_solve(
     model: NextStateModel,
     clues_onehot: torch.Tensor,
     clues: torch.Tensor,
-    rollout_iters: int = DEFAULT_ROLLOUT_ITER,
     *,
     config: RolloutConfig | None = None,
 ) -> torch.Tensor:
@@ -385,7 +349,6 @@ def rollout_solve(
         model,
         clues_onehot,
         clues,
-        rollout_iters,
         config=config,
     )
     return predict_grid(logits, clues)
@@ -396,17 +359,15 @@ def rollout_trace(
     model: NextStateModel,
     clues_onehot: torch.Tensor,
     clues: torch.Tensor,
-    rollout_iters: int = DEFAULT_ROLLOUT_ITER,
     *,
     config: RolloutConfig | None = None,
 ) -> list[str]:
-    """Rollout for viz; frames show sampled state grids."""
+    """Rollout for viz; one frame per outer argmax commit."""
     config = config or RolloutConfig(train_init="clues")
     _, state_grids = _run_rollout(
         model,
         clues_onehot,
         clues,
-        rollout_iters,
         config=config,
         collect_state_grids=True,
     )

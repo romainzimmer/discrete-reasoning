@@ -1,27 +1,25 @@
 from __future__ import annotations
 
-import math
-
 import pytest
 import torch
 
-from encoding import attach_clue_mask, decode_logits, grid_to_onehot, onehot_to_grid, sample_decode_logits
+from encoding import attach_clue_mask, grid_to_onehot, onehot_to_grid
 from model import NextStateModel
 from rollout import (
-    DEFAULT_EXPONENTIAL_T_MIN,
-    DEFAULT_T_MAX,
+    DEFAULT_INNER_ITERS,
+    DEFAULT_OUTER_ITERS,
     RolloutConfig,
     _ClueContext,
     _curriculum_initial,
+    _inner_loop,
     _rollout_loop,
-    exponential_decay_rate,
+    logits_to_argmax_state,
+    logits_to_softmax_state,
     predict_grid,
     rollout_train_batch,
     rollout_trace,
-    temperature_at_step,
-    temperature_schedule,
+    target_mask,
 )
-from encoding import attach_clue_mask
 
 
 def _tiny_batch():
@@ -45,94 +43,108 @@ def _tiny_batch():
     return clues, clues_onehot, answer
 
 
-def test_temperature_endpoints_and_monotonic():
-    for total in (2, 10, 30):
-        temps = temperature_schedule(total, t_max=3.0, t_min=0.0, schedule="cosine")
-        assert len(temps) == total
-        assert temps[0] == pytest.approx(3.0)
-        assert temps[-1] == pytest.approx(0.0)
-        assert all(temps[i] >= temps[i + 1] for i in range(total - 1))
-
-
-def test_exponential_temperature_endpoints_and_monotonic():
-    t_min = DEFAULT_EXPONENTIAL_T_MIN
-    for total in (2, 10, 30):
-        temps = temperature_schedule(total, t_max=3.0, t_min=t_min, schedule="exponential")
-        assert len(temps) == total
-        assert temps[0] == pytest.approx(3.0)
-        assert temps[-1] == pytest.approx(t_min)
-        assert all(temps[i] >= temps[i + 1] for i in range(total - 1))
-
-
-def test_exponential_decay_rate_matches_endpoints():
-    t_max = 3.0
-    t_min = DEFAULT_EXPONENTIAL_T_MIN
-    rate = exponential_decay_rate(t_max, t_min)
-    assert rate == pytest.approx(math.log(t_max / t_min))
-    total = 10
-    assert temperature_at_step(total - 1, total, t_max, t_min, schedule="exponential") == pytest.approx(t_min)
-
-
-def test_temperature_adapts_to_length():
-    assert temperature_at_step(1, 10, 3.0, 0.0, schedule="cosine") != temperature_at_step(
-        1, 30, 3.0, 0.0, schedule="cosine"
-    )
-
-
-def test_temperature_single_step():
-    assert temperature_at_step(0, 1, 3.0, 0.0, schedule="cosine") == 0.0
-    assert temperature_at_step(0, 1, 3.0, DEFAULT_EXPONENTIAL_T_MIN, schedule="exponential") == pytest.approx(
-        DEFAULT_EXPONENTIAL_T_MIN
-    )
-
-
-def test_sample_decode_t0_matches_argmax():
-    logits = torch.randn(2, 9, 9, 9)
-    assert torch.equal(sample_decode_logits(logits, 0.0), decode_logits(logits))
-
-
-def test_sample_decode_high_temperature_more_uniform():
-    logits = torch.zeros(1, 9, 9, 9)
-    torch.manual_seed(0)
-    high = sample_decode_logits(logits, 10.0)
-    assert high.unique().numel() > 1
+def test_rollout_config_validation():
+    with pytest.raises(ValueError):
+        RolloutConfig(inner_iters=0)
+    with pytest.raises(ValueError):
+        RolloutConfig(outer_iters=0)
 
 
 def test_rollout_fixed_steps_and_clues_pinned():
     model = NextStateModel(width=32, num_blocks=1)
     model.eval()
     clues, clues_onehot, answer = _tiny_batch()
-    config = RolloutConfig(train_init="clues", t_max=2.0)
+    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=4)
     with torch.inference_mode():
         result = rollout_train_batch(
             model,
             clues[0],
             clues_onehot[0],
             answer[0],
-            rollout_iters=4,
             config=config,
         )
     assert result.pred is not None
     assert torch.all(result.pred[clues[0] > 0] == clues[0][clues[0] > 0])
 
 
-def test_grad_isolation_and_backward():
+def test_inner_bptt_grad():
     model = NextStateModel(width=32, num_blocks=1)
     model.train()
     clues, clues_onehot, answer = _tiny_batch()
-    config = RolloutConfig(train_init="clues", t_max=1.5)
+    config = RolloutConfig(train_init="clues", inner_iters=3, outer_iters=1)
     result = rollout_train_batch(
         model,
         clues,
         clues_onehot,
         answer,
-        rollout_iters=3,
         config=config,
         compute_pred=False,
+        accumulate_grad=True,
     )
-    result.loss.backward()
+    assert result.loss.item() > 0
     assert model.net[0].weight.grad is not None
     assert model.net[0].weight.grad.abs().sum().item() > 0
+
+
+def test_outer_detach_isolates_blocks():
+    model = NextStateModel(width=32, num_blocks=1)
+    model.train()
+    clues, clues_onehot, answer = _tiny_batch()
+    clues_b = clues
+    clues_onehot_b = clues_onehot
+    ctx = _ClueContext.from_clues(clues_b, clues_onehot_b)
+    state = attach_clue_mask(clues_onehot_b, clues_b, clue_mask_channel=ctx.clue_mask_channel)
+
+    logits_o1 = _inner_loop(model, state, ctx, clues_b, inner_iters=2)
+    state_o1 = logits_to_argmax_state(logits_o1, ctx, clues_b)
+    assert not state_o1.requires_grad
+
+    state_o1_leaf = state_o1.detach().requires_grad_(True)
+    logits_o2 = _inner_loop(model, state_o1_leaf, ctx, clues_b, inner_iters=2)
+    logits_o2.sum().backward()
+    assert state_o1_leaf.grad is not None
+    assert state.grad is None
+
+
+def test_per_outer_backward_matches_stacked_mean():
+    model = NextStateModel(width=32, num_blocks=1)
+    model.train()
+    clues, clues_onehot, answer = _tiny_batch()
+    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=3)
+    clues_b = clues
+    clues_onehot_b = clues_onehot
+    ctx = _ClueContext.from_clues(clues_b, clues_onehot_b)
+    state = attach_clue_mask(clues_onehot_b, clues_b, clue_mask_channel=ctx.clue_mask_channel)
+
+    torch.manual_seed(0)
+    result_acc = rollout_train_batch(
+        model,
+        clues,
+        clues_onehot,
+        answer,
+        config=config,
+        compute_pred=False,
+        accumulate_grad=True,
+    )
+    grad_acc = model.net[0].weight.grad.clone()
+
+    model.zero_grad(set_to_none=True)
+    torch.manual_seed(0)
+    _, _, stacked_loss = _rollout_loop(
+        model,
+        state,
+        clues_b,
+        ctx,
+        config.inner_iters,
+        config.outer_iters,
+        answer=answer,
+        accumulate_grad=False,
+    )
+    stacked_loss.backward()
+    grad_stack = model.net[0].weight.grad
+
+    assert result_acc.loss.item() == pytest.approx(stacked_loss.item())
+    assert torch.allclose(grad_acc, grad_stack, rtol=1e-5, atol=1e-5)
 
 
 def test_curriculum_init():
@@ -164,69 +176,134 @@ def test_curriculum_init():
         assert torch.all((grid[hidden] >= 1) & (grid[hidden] <= 9))
 
 
-def test_reproducible_eval_with_seed():
+def test_curriculum_pins_revealed_cells_in_state():
+    clues = torch.zeros(9, 9, dtype=torch.long)
+    clues[0, 0] = 5
+    answer = torch.full((9, 9), 4)
+    answer[0, 0] = 5
+    torch.manual_seed(1)
+    initial_onehot, rollout_clues = _curriculum_initial(answer, clues)
+    ctx = _ClueContext.from_clues(rollout_clues.unsqueeze(0), grid_to_onehot(rollout_clues).unsqueeze(0))
+    logits = torch.randn(1, 9, 9, 9)
+    softmax_state = logits_to_softmax_state(logits, ctx, rollout_clues.unsqueeze(0))
+    argmax_state = logits_to_argmax_state(logits, ctx, rollout_clues.unsqueeze(0))
+    for state in (softmax_state, argmax_state):
+        grid = onehot_to_grid(state[0, ..., :9])
+        assert grid[0, 0] == 5
+        revealed = (rollout_clues > 0) & (clues == 0)
+        if revealed.any():
+            assert torch.all(grid[revealed] == answer[revealed])
+
+
+def test_curriculum_excludes_revealed_from_loss_mask():
+    clues = torch.zeros(9, 9, dtype=torch.long)
+    clues[0, 0] = 5
+    answer = torch.full((9, 9), 4)
+    answer[0, 0] = 5
+    answer[0, 1] = 6
+    torch.manual_seed(2)
+    _, rollout_clues = _curriculum_initial(answer, clues)
+    mask = target_mask(answer, rollout_clues)
+    revealed = (rollout_clues > 0) & (clues == 0)
+    if revealed.any():
+        assert not mask[revealed].any()
+
+
+def test_reproducible_eval():
     model = NextStateModel(width=32, num_blocks=1)
     model.eval()
     clues, clues_onehot, answer = _tiny_batch()
-    config = RolloutConfig(train_init="clues", t_max=2.0)
+    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=3)
 
-    torch.manual_seed(42)
-    r1 = rollout_train_batch(
-        model, clues, clues_onehot, answer, rollout_iters=5, config=config
-    )
-    torch.manual_seed(42)
-    r2 = rollout_train_batch(
-        model, clues, clues_onehot, answer, rollout_iters=5, config=config
-    )
+    r1 = rollout_train_batch(model, clues, clues_onehot, answer, config=config)
+    r2 = rollout_train_batch(model, clues, clues_onehot, answer, config=config)
     assert torch.equal(r1.pred, r2.pred)
     assert r1.loss.item() == r2.loss.item()
-
-
-def test_sample_decode_pins_clue_cells():
-    logits = torch.randn(1, 9, 9, 9)
-    clues = torch.zeros(1, 9, 9, dtype=torch.long)
-    clues[0, 0, 0] = 5
-    clues[0, 1, 1] = 7
-    torch.manual_seed(0)
-    decoded = sample_decode_logits(logits, 5.0, clues=clues)
-    assert decoded[0, 0, 0] == 5
-    assert decoded[0, 1, 1] == 7
 
 
 def test_rollout_trace_frame_count():
     model = NextStateModel(width=32, num_blocks=1)
     model.eval()
     clues, clues_onehot, _ = _tiny_batch()
-    config = RolloutConfig(train_init="clues", t_max=DEFAULT_T_MAX)
-    torch.manual_seed(1)
-    grids = rollout_trace(model, clues_onehot, clues, rollout_iters=3, config=config)
-    assert len(grids) == 4  # clues + 3 sampled steps
+    outer_iters = 3
+    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=outer_iters)
+    grids = rollout_trace(model, clues_onehot, clues, config=config)
+    assert len(grids) == outer_iters + 1
 
 
-def test_sampled_state_differs_from_argmax_at_high_temp():
+def test_inner_one_outer_n_commits():
     model = NextStateModel(width=32, num_blocks=1)
     model.eval()
-    clues, clues_onehot, _ = _tiny_batch()
-    config = RolloutConfig(train_init="clues", t_max=DEFAULT_T_MAX)
-    clues_b = clues.unsqueeze(0)
-    clues_onehot_b = clues_onehot.unsqueeze(0)
-    clue_ctx = _ClueContext.from_clues(clues_b, clues_onehot_b)
-
-    torch.manual_seed(1)
-    with torch.inference_mode():
-        state = attach_clue_mask(clues_onehot_b, clues_b, clue_mask_channel=clue_ctx.clue_mask_channel)
-        _, state_grids, _ = _rollout_loop(
-            model,
-            state,
-            clues_b,
-            clue_ctx,
-            2,
-            config,
-            collect_state_grids=True,
-        )
-        first_logits = model(state)
+    clues, clues_onehot, answer = _tiny_batch()
+    clues_b = clues
+    clues_onehot_b = clues_onehot
+    ctx = _ClueContext.from_clues(clues_b, clues_onehot_b)
+    state = attach_clue_mask(clues_onehot_b, clues_b, clue_mask_channel=ctx.clue_mask_channel)
+    outer_iters = 4
+    _, state_grids, losses = _rollout_loop(
+        model,
+        state,
+        clues_b,
+        ctx,
+        inner_iters=1,
+        outer_iters=outer_iters,
+        answer=answer,
+        collect_state_grids=True,
+    )
     assert state_grids is not None
-    argmax_grid = predict_grid(first_logits, clues_b)[0]
-    sampled_grid = state_grids[0][0]
-    non_clue = clues == 0
-    assert not torch.equal(sampled_grid[non_clue], argmax_grid[non_clue])
+    assert len(state_grids) == outer_iters
+    assert losses.ndim == 0
+
+
+def test_defaults():
+    config = RolloutConfig()
+    assert config.inner_iters == DEFAULT_INNER_ITERS
+    assert config.outer_iters == DEFAULT_OUTER_ITERS
+
+
+def test_curriculum_training_rollout():
+    model = NextStateModel(width=32, num_blocks=1)
+    model.train()
+    clues = torch.tensor(
+        [
+            [5, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ]
+    )
+    answer = torch.full((9, 9), 4)
+    answer[0, 0] = 5
+    clues_onehot = grid_to_onehot(clues)
+    config = RolloutConfig(train_init="curriculum", inner_iters=2, outer_iters=2)
+    torch.manual_seed(0)
+    result = rollout_train_batch(
+        model,
+        clues,
+        clues_onehot,
+        answer,
+        config=config,
+        compute_pred=False,
+        accumulate_grad=True,
+    )
+    assert result.loss.item() > 0
+    assert model.net[0].weight.grad is not None
+
+
+def test_accumulate_grad_required_in_training():
+    model = NextStateModel(width=32, num_blocks=1)
+    model.train()
+    clues, clues_onehot, answer = _tiny_batch()
+    with pytest.raises(ValueError, match="accumulate_grad"):
+        rollout_train_batch(
+            model,
+            clues,
+            clues_onehot,
+            answer,
+            config=RolloutConfig(train_init="clues", inner_iters=1, outer_iters=1),
+        )

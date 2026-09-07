@@ -10,8 +10,16 @@ from torch.utils.data import DataLoader
 
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import NextStateModel
-from rollout import DEFAULT_EXPONENTIAL_T_MIN, DEFAULT_ROLLOUT_ITER, RolloutConfig
+from rollout import DEFAULT_INNER_ITERS, DEFAULT_OUTER_ITERS, RolloutConfig
 from train import EpochStats, build_rollout_config, measure_split, require_run_args
+
+
+def eval_rollout_iters_from_run_args(run_args: dict) -> tuple[int, int]:
+    if "eval_inner_iters" in run_args and "eval_outer_iters" in run_args:
+        return int(run_args["eval_inner_iters"]), int(run_args["eval_outer_iters"])
+    if "eval_rollout_iter" in run_args:
+        return 1, int(run_args["eval_rollout_iter"])
+    return DEFAULT_INNER_ITERS, DEFAULT_OUTER_ITERS
 
 
 def save_test_metrics(
@@ -22,7 +30,8 @@ def save_test_metrics(
     test_samples: int,
     min_rating: int | None,
     max_rating: int | None,
-    rollout_iters: int,
+    inner_iters: int,
+    outer_iters: int,
 ) -> None:
     history_path = run_dir / "history.json"
     if history_path.exists():
@@ -34,7 +43,8 @@ def save_test_metrics(
         "test_samples_count": test_samples,
         "min_rating": min_rating,
         "max_rating": max_rating,
-        "rollout_iters": rollout_iters,
+        "inner_iters": inner_iters,
+        "outer_iters": outer_iters,
         **asdict(test),
     }
     history_path.write_text(json.dumps(history, indent=2))
@@ -69,10 +79,16 @@ def main() -> None:
         help="Max puzzle rating on test split (default: no filter)",
     )
     parser.add_argument(
-        "--rollout-iter",
+        "--inner-iters",
         type=int,
         default=None,
-        help="Rollout steps for test (default: eval_rollout_iter from checkpoint)",
+        help="Inner steps per outer loop (default: from checkpoint)",
+    )
+    parser.add_argument(
+        "--outer-iters",
+        type=int,
+        default=None,
+        help="Outer argmax commits (default: from checkpoint)",
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducible test metrics")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -108,16 +124,13 @@ def main() -> None:
     ).to(device)
     model.load_state_dict(ckpt["model"])
 
-    rollout_iters = (
-        args.rollout_iter
-        if args.rollout_iter is not None
-        else int(run_args.get("eval_rollout_iter", DEFAULT_ROLLOUT_ITER))
-    )
+    default_inner, default_outer = eval_rollout_iters_from_run_args(run_args)
+    inner_iters = args.inner_iters if args.inner_iters is not None else default_inner
+    outer_iters = args.outer_iters if args.outer_iters is not None else default_outer
     rollout_config = build_rollout_config(
         train_init="clues",
-        temperature_schedule=run_args.get("temperature_schedule", "cosine"),
-        rollout_t_max=float(run_args.get("rollout_t_max", 3.0)),
-        rollout_t_min=float(run_args.get("rollout_t_min", DEFAULT_EXPONENTIAL_T_MIN)),
+        inner_iters=inner_iters,
+        outer_iters=outer_iters,
     )
 
     epoch = int(ckpt["epoch"])
@@ -128,7 +141,6 @@ def main() -> None:
         epoch=epoch,
         epochs=epoch,
         phase="test",
-        rollout_iters=rollout_iters,
         rollout_config=rollout_config,
         use_cuda=use_cuda,
         seed=args.seed,
@@ -140,10 +152,11 @@ def main() -> None:
         test_samples=len(test_rows),
         min_rating=args.min_rating,
         max_rating=args.max_rating,
-        rollout_iters=rollout_iters,
+        inner_iters=inner_iters,
+        outer_iters=outer_iters,
     )
     print(
-        f"test (epoch {epoch}, n={len(test_rows)}, rollout_iters={rollout_iters}): "
+        f"test (epoch {epoch}, n={len(test_rows)}, inner={inner_iters}, outer={outer_iters}): "
         f"loss={test.loss:.4f} cell_acc={test.cell_acc:.4f} "
         f"puzzle_acc={test.puzzle_acc:.4f}",
         flush=True,

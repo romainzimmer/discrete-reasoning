@@ -16,11 +16,10 @@ from augment import AugmentConfig
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import NextStateModel
 from rollout import (
-    DEFAULT_EXPONENTIAL_T_MIN,
-    DEFAULT_ROLLOUT_ITER,
+    DEFAULT_INNER_ITERS,
+    DEFAULT_OUTER_ITERS,
     RolloutConfig,
     RolloutResult,
-    exponential_decay_rate,
     rollout_train_batch,
 )
 from viz_data import (
@@ -35,37 +34,26 @@ DEFAULT_RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
 REQUIRED_RUN_ARGS = (
     "width",
     "num_blocks",
-    "eval_rollout_iter",
-    "rollout_t_max",
+    "train_inner_iters",
+    "train_outer_iters",
+    "eval_inner_iters",
+    "eval_outer_iters",
     "num_workers",
     "min_rating",
     "max_rating",
 )
 
-OPTIONAL_RUN_ARGS_DEFAULTS = {
-    "temperature_schedule": "cosine",
-    "rollout_t_min": DEFAULT_EXPONENTIAL_T_MIN,
-}
-
-
-def rollout_t_min_for_schedule(schedule: str, rollout_t_min: float) -> float:
-    if schedule == "cosine":
-        return 0.0
-    return rollout_t_min
-
 
 def build_rollout_config(
     *,
     train_init: str,
-    temperature_schedule: str,
-    rollout_t_max: float,
-    rollout_t_min: float,
+    inner_iters: int,
+    outer_iters: int,
 ) -> RolloutConfig:
     return RolloutConfig(
         train_init=train_init,
-        temperature_schedule=temperature_schedule,
-        t_max=rollout_t_max,
-        t_min=rollout_t_min_for_schedule(temperature_schedule, rollout_t_min),
+        inner_iters=inner_iters,
+        outer_iters=outer_iters,
     )
 
 
@@ -107,14 +95,18 @@ def require_run_args(raw: dict, *, source: str) -> dict:
     args = raw.get("args")
     if args is None:
         raise KeyError(f"{source} has no 'args'")
+    if "train_inner_iters" not in args and "train_rollout_iter" in args:
+        args.setdefault("train_inner_iters", 1)
+        args.setdefault("train_outer_iters", args["train_rollout_iter"])
+    if "eval_inner_iters" not in args and "eval_rollout_iter" in args:
+        args.setdefault("eval_inner_iters", 1)
+        args.setdefault("eval_outer_iters", args["eval_rollout_iter"])
     missing = [key for key in REQUIRED_RUN_ARGS if key not in args]
     if missing:
         raise KeyError(
             f"{source} args missing required keys: {', '.join(missing)}. "
             "Re-run training with the current train script so defaults are saved explicitly."
         )
-    for key, default in OPTIONAL_RUN_ARGS_DEFAULTS.items():
-        args.setdefault(key, default)
     return args
 
 
@@ -271,7 +263,6 @@ def train_epoch(
     *,
     epoch: int,
     epochs: int,
-    rollout_iters: int,
     rollout_config: RolloutConfig,
     batch_size: int,
     use_cuda: bool,
@@ -287,17 +278,16 @@ def train_epoch(
     )
     for batch in progress:
         batch = {k: v.to(device, non_blocking=use_cuda) for k, v in batch.items()}
+        optimizer.zero_grad(set_to_none=True)
         result = rollout_train_batch(
             model,
             batch["clues"],
             batch["clues_onehot"],
             batch["answer"],
-            rollout_iters=rollout_iters,
             config=rollout_config,
             compute_pred=False,
+            accumulate_grad=True,
         )
-        optimizer.zero_grad(set_to_none=True)
-        result.loss.backward()
         optimizer.step()
         total_loss, n = _accumulate_loss(
             result,
@@ -331,7 +321,6 @@ def measure_split(
     epoch: int,
     epochs: int,
     phase: str,
-    rollout_iters: int,
     rollout_config: RolloutConfig,
     use_cuda: bool,
     seed: int | None = None,
@@ -357,7 +346,6 @@ def measure_split(
             batch["clues"],
             batch["clues_onehot"],
             batch["answer"],
-            rollout_iters=rollout_iters,
             config=rollout_config,
         )
         total_loss, correct_cells, total_cells, correct_puzzles, n = _accumulate_eval_stats(
@@ -393,34 +381,28 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=512, help="FFN block width")
     parser.add_argument("--num-blocks", type=int, default=2, help="Number of FFN blocks")
     parser.add_argument(
-        "--train-rollout-iter",
+        "--train-inner-iters",
         type=int,
-        default=DEFAULT_ROLLOUT_ITER,
-        help="Fixed rollout iterations per puzzle during training",
+        default=DEFAULT_INNER_ITERS,
+        help="Differentiable inner steps per outer loop during training",
     )
     parser.add_argument(
-        "--eval-rollout-iter",
+        "--train-outer-iters",
         type=int,
-        default=DEFAULT_ROLLOUT_ITER,
-        help="Fixed rollout iterations per puzzle during val/viz",
+        default=DEFAULT_OUTER_ITERS,
+        help="Argmax commits per puzzle during training",
     )
     parser.add_argument(
-        "--rollout-t-max",
-        type=float,
-        default=3.0,
-        help="Max sampling temperature at first rollout step",
+        "--eval-inner-iters",
+        type=int,
+        default=DEFAULT_INNER_ITERS,
+        help="Inner steps per outer loop during val/viz/test",
     )
     parser.add_argument(
-        "--rollout-t-min",
-        type=float,
-        default=DEFAULT_EXPONENTIAL_T_MIN,
-        help="Target min temperature for exponential schedule (cosine ends at 0)",
-    )
-    parser.add_argument(
-        "--temperature-schedule",
-        choices=["cosine", "exponential"],
-        default="cosine",
-        help="Temperature annealing schedule during rollout",
+        "--eval-outer-iters",
+        type=int,
+        default=DEFAULT_OUTER_ITERS,
+        help="Argmax commits per puzzle during val/viz/test",
     )
     parser.add_argument("--batch-size", type=int, default=8, help="Training batch size")
     parser.add_argument(
@@ -480,13 +462,6 @@ def main() -> None:
     val_ds = PuzzleDataset(rows=val_rows)
     args.train_samples = len(train_rows)
     args.val_samples_count = len(val_rows)
-    if args.temperature_schedule == "exponential":
-        args.temperature_decay_rate = exponential_decay_rate(
-            args.rollout_t_max,
-            args.rollout_t_min,
-        )
-    else:
-        args.temperature_decay_rate = None
     save_run_config(run_dir, args)
 
     use_cuda = device.type == "cuda"
@@ -522,15 +497,13 @@ def main() -> None:
     }[args.train_init]
     rollout_config = build_rollout_config(
         train_init=train_init,
-        temperature_schedule=args.temperature_schedule,
-        rollout_t_max=args.rollout_t_max,
-        rollout_t_min=args.rollout_t_min,
+        inner_iters=args.train_inner_iters,
+        outer_iters=args.train_outer_iters,
     )
     eval_rollout_config = build_rollout_config(
         train_init="clues",
-        temperature_schedule=args.temperature_schedule,
-        rollout_t_max=args.rollout_t_max,
-        rollout_t_min=args.rollout_t_min,
+        inner_iters=args.eval_inner_iters,
+        outer_iters=args.eval_outer_iters,
     )
     best_val_cell_acc = -1.0
     manifest = load_manifest(run_dir)
@@ -548,7 +521,6 @@ def main() -> None:
             device,
             epoch=epoch,
             epochs=args.epochs,
-            rollout_iters=args.train_rollout_iter,
             rollout_config=rollout_config,
             batch_size=args.batch_size,
             use_cuda=use_cuda,
@@ -560,7 +532,6 @@ def main() -> None:
             epoch=epoch,
             epochs=args.epochs,
             phase="val",
-            rollout_iters=args.eval_rollout_iter,
             rollout_config=eval_rollout_config,
             use_cuda=use_cuda,
             seed=args.seed,
@@ -577,7 +548,6 @@ def main() -> None:
                 epoch=epoch,
                 run_dir=run_dir,
                 device=device,
-                rollout_iters=args.eval_rollout_iter,
                 rollout_config=eval_rollout_config,
             )
             update_manifest_split(manifest, split, epoch, puzzle_indices)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 
 NUM_DIGIT_CHANNELS = 9
 NUM_STATE_CHANNELS = NUM_DIGIT_CHANNELS + 1
@@ -46,33 +45,6 @@ def attach_clue_mask(
 def decode_logits(logits: torch.Tensor) -> torch.Tensor:
     """Decode per-cell logits into a grid of digits 1-9."""
     return logits.argmax(dim=-1) + 1
-
-
-def sample_decode_logits(
-    logits: torch.Tensor,
-    temperature: float,
-    *,
-    clues: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Sample a digit grid from per-cell logits; argmax when temperature <= 0."""
-    if temperature <= 0:
-        decoded = decode_logits(logits)
-    else:
-        probs = F.softmax(logits / temperature, dim=-1)
-        *batch, h, w, num_classes = probs.shape
-        flat_probs = probs.reshape(-1, num_classes)
-        if clues is not None:
-            non_clue = (clues == 0).reshape(-1)
-            samples = torch.zeros(flat_probs.size(0), dtype=torch.long, device=logits.device)
-            if non_clue.any():
-                samples[non_clue] = torch.multinomial(flat_probs[non_clue], 1).squeeze(-1)
-            decoded = samples.reshape(*batch, h, w) + 1
-        else:
-            samples = torch.multinomial(flat_probs, 1).reshape(*batch, h, w)
-            decoded = samples + 1
-    if clues is not None:
-        decoded = torch.where(clues > 0, clues, decoded)
-    return decoded
 
 
 def onehot_to_grid(onehot: torch.Tensor) -> torch.Tensor:

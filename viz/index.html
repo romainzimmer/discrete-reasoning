@@ -412,21 +412,13 @@
         { label: "Weight decay", value: args.weight_decay ?? 0 },
         { label: "Hidden layers", value: formatHiddenSizes(args) },
         {
-          label: "Train rollout iter",
-          value: args.train_rollout_iter,
+          label: "Train inner / outer iters",
+          value: `${args.train_inner_iters ?? "?"} / ${args.train_outer_iters ?? "?"}`,
         },
         {
-          label: "Eval rollout iter",
-          value: args.eval_rollout_iter,
+          label: "Eval inner / outer iters",
+          value: `${args.eval_inner_iters ?? "?"} / ${args.eval_outer_iters ?? "?"}`,
         },
-        { label: "Rollout T max", value: args.rollout_t_max },
-        { label: "Temperature schedule", value: args.temperature_schedule ?? "cosine" },
-        ...(args.temperature_schedule === "exponential"
-          ? [
-              { label: "Rollout T min", value: args.rollout_t_min },
-              { label: "Temperature decay rate", value: Number(args.temperature_decay_rate).toFixed(2) },
-            ]
-          : []),
         { label: "Epochs", value: args.epochs },
       ];
       const totalSeconds = totalRunSeconds(history);
@@ -615,7 +607,10 @@
         { label: "Loss", value: test.loss, format: v => Number(v).toFixed(4) },
         { label: "Cell accuracy", value: test.cell_acc, format: pct },
         { label: "Puzzle accuracy", value: test.puzzle_acc, format: pct },
-        { label: "Rollout iter", value: test.rollout_iters, format: v => Number(v).toFixed(0) },
+        {
+          label: "Inner / outer iters",
+          value: `${test.inner_iters ?? "?"}/${test.outer_iters ?? test.rollout_iters ?? "?"}`,
+        },
       ]
         .filter(stat => stat.value != null)
         .map(stat => ({
