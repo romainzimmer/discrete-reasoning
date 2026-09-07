@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import NextStateModel
-from rollout import RolloutConfig
+from rollout import DEFAULT_ROLLOUT_ITER, RolloutConfig
 from train import EpochStats, measure_split, require_run_args
 
 
@@ -22,6 +22,7 @@ def save_test_metrics(
     test_samples: int,
     min_rating: int | None,
     max_rating: int | None,
+    rollout_iters: int,
 ) -> None:
     history_path = run_dir / "history.json"
     if history_path.exists():
@@ -33,6 +34,7 @@ def save_test_metrics(
         "test_samples_count": test_samples,
         "min_rating": min_rating,
         "max_rating": max_rating,
+        "rollout_iters": rollout_iters,
         **asdict(test),
     }
     history_path.write_text(json.dumps(history, indent=2))
@@ -66,6 +68,13 @@ def main() -> None:
         default=None,
         help="Max puzzle rating on test split (default: no filter)",
     )
+    parser.add_argument(
+        "--rollout-iter",
+        type=int,
+        default=None,
+        help="Rollout steps for test (default: eval_rollout_iter from checkpoint)",
+    )
+    parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducible test metrics")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
@@ -93,19 +102,21 @@ def main() -> None:
         num_workers=run_args["num_workers"],
     )
 
-    rollout_mode = run_args.get("rollout_mode")
-    if rollout_mode == "threshold":
-        raise ValueError(
-            f"Run {run_dir} uses removed threshold rollout mode; re-train with the current code."
-        )
-
     model = NextStateModel(
         width=run_args["width"],
         num_blocks=run_args["num_blocks"],
     ).to(device)
     model.load_state_dict(ckpt["model"])
 
-    rollout_config = RolloutConfig(train_init="clues")
+    rollout_iters = (
+        args.rollout_iter
+        if args.rollout_iter is not None
+        else int(run_args.get("eval_rollout_iter", DEFAULT_ROLLOUT_ITER))
+    )
+    rollout_config = RolloutConfig(
+        train_init="clues",
+        t_max=float(run_args.get("rollout_t_max", 3.0)),
+    )
 
     epoch = int(ckpt["epoch"])
     test = measure_split(
@@ -115,9 +126,10 @@ def main() -> None:
         epoch=epoch,
         epochs=epoch,
         phase="test",
-        max_rollout_iters=run_args["eval_max_rollout_iter"],
+        rollout_iters=rollout_iters,
         rollout_config=rollout_config,
         use_cuda=use_cuda,
+        seed=args.seed,
     )
     save_test_metrics(
         run_dir,
@@ -126,14 +138,12 @@ def main() -> None:
         test_samples=len(test_rows),
         min_rating=args.min_rating,
         max_rating=args.max_rating,
+        rollout_iters=rollout_iters,
     )
     print(
-        f"test (epoch {epoch}, n={len(test_rows)}): "
+        f"test (epoch {epoch}, n={len(test_rows)}, rollout_iters={rollout_iters}): "
         f"loss={test.loss:.4f} cell_acc={test.cell_acc:.4f} "
-        f"puzzle_acc={test.puzzle_acc:.4f} "
-        f"avg_rollout_steps={test.avg_rollout_steps:.1f} "
-        f"avg_cycle_length={test.avg_cycle_length:.1f} "
-        f"max_iter_pct={test.max_iter_pct:.1%}",
+        f"puzzle_acc={test.puzzle_acc:.4f}",
         flush=True,
     )
 

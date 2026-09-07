@@ -43,13 +43,13 @@ Writes `data/train.csv` and `data/test.csv` (~798 MB).
 ## Train
 
 ```bash
-docker compose run --rm train --epochs 150 --width 512 --num-blocks 2 --batch-size 1024 --num-workers 3 --val-samples 1024 --train-init noisy-gt --max-samples 103424
+docker compose run --rm train --epochs 150 --width 512 --num-blocks 2 --batch-size 1024 --num-workers 3 --val-samples 1024 --train-init curriculum --max-samples 103424
 ```
 
 Quick test (easy sudoku, 1k train cap):
 
 ```bash
-docker compose run --rm train --epochs 5 --width 512 --num-blocks 2 --train-rollout-iter 5 --batch-size 64 --num-workers 1 --max-samples 6464 --min-rating 0 --max-rating 0 --val-samples 64 --train-init noisy-gt
+docker compose run --rm train --epochs 5 --width 512 --num-blocks 2 --train-rollout-iter 5 --eval-rollout-iter 5 --rollout-t-max 3 --batch-size 64 --num-workers 1 --max-samples 6464 --min-rating 0 --max-rating 0 --val-samples 64 --train-init curriculum
 ```
 
 Checkpoints and trajectories are written to `runs/`.
