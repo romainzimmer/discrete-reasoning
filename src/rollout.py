@@ -10,7 +10,7 @@ from data import tensor_to_string
 from encoding import attach_clue_mask, decode_logits, grid_to_onehot
 from model import NextStateModel
 
-TrainInitMode = Literal["clues", "noisy_gt", "zero_gt"]
+TrainInitMode = Literal["clues", "noisy_gt", "zero_gt", "curriculum"]
 
 
 @dataclass(frozen=True)
@@ -75,6 +75,17 @@ def logits_to_state(
     return torch.where(clue_mask, clue_state, decoded)
 
 
+def _random_zero_non_clue_grid(answer: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
+    """Zero each non-clue cell with prob p~U[0,1]; keep clue cells unchanged."""
+    non_clue = clues == 0
+    if answer.dim() == 2:
+        p = torch.rand((), device=answer.device)
+    else:
+        p = torch.rand(answer.size(0), 1, 1, device=answer.device)
+    zero_out = (torch.rand_like(clues, dtype=torch.float32) < p) & non_clue
+    return torch.where(zero_out, torch.zeros_like(answer), answer)
+
+
 def _noisy_ground_truth_initial(
     answer: torch.Tensor,
     clues: torch.Tensor,
@@ -104,28 +115,34 @@ def _zeroed_ground_truth_initial(
 ) -> torch.Tensor:
     """Start from ground truth; zero each non-clue cell with prob p~U[0,1] (same as val/test empty init)."""
     ctx = _ClueContext.from_clues(clues, clues_onehot)
-    onehot = grid_to_onehot(answer)
-    non_clue = clues == 0
-    if answer.dim() == 2:
-        p = torch.rand((), device=answer.device)
-    else:
-        p = torch.rand(answer.size(0), 1, 1, device=answer.device)
-    zero_out = (torch.rand_like(clues, dtype=torch.float32) < p) & non_clue
-    zeroed = torch.where(zero_out.unsqueeze(-1), torch.zeros_like(onehot), onehot)
-    return torch.where(ctx.clue_mask, ctx.clue_state, zeroed)
+    onehot = grid_to_onehot(_random_zero_non_clue_grid(answer, clues))
+    return torch.where(ctx.clue_mask, ctx.clue_state, onehot)
 
 
-def _training_initial_onehot(
+def _curriculum_initial(
+    answer: torch.Tensor,
+    clues: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Like zero_gt; rollout treats every non-zero cell in the corrupted grid as a clue."""
+    grid = _random_zero_non_clue_grid(answer, clues)
+    return grid_to_onehot(grid), grid
+
+
+def _training_rollout_inputs(
     config: RolloutConfig,
     answer: torch.Tensor,
     clues: torch.Tensor,
     clues_onehot: torch.Tensor,
-) -> torch.Tensor | None:
+) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
+    if config.train_init == "curriculum":
+        initial_onehot, rollout_clues = _curriculum_initial(answer, clues)
+        return initial_onehot, rollout_clues, grid_to_onehot(rollout_clues)
+    initial_onehot = None
     if config.train_init == "noisy_gt":
-        return _noisy_ground_truth_initial(answer, clues, clues_onehot=clues_onehot)
-    if config.train_init == "zero_gt":
-        return _zeroed_ground_truth_initial(answer, clues, clues_onehot=clues_onehot)
-    return None
+        initial_onehot = _noisy_ground_truth_initial(answer, clues, clues_onehot=clues_onehot)
+    elif config.train_init == "zero_gt":
+        initial_onehot = _zeroed_ground_truth_initial(answer, clues, clues_onehot=clues_onehot)
+    return initial_onehot, clues, clues_onehot
 
 
 def predict_grid(logits: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
@@ -198,36 +215,45 @@ def _non_clue_mask(clues: torch.Tensor) -> torch.Tensor:
     return clues == 0
 
 
-def _mean_cell_entropy(logits: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
-    """Mean per-cell output entropy over non-clue cells; lower = more peaked."""
-    log_probs = F.log_softmax(logits, dim=-1)
-    probs = log_probs.exp()
-    cell_entropy = -(probs * log_probs).sum(dim=-1)
+def _mean_decoded_ce(logits: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
+    """Mean per-cell CE vs argmax-decoded state over non-clue cells; lower = more confident."""
+    decoded = decode_logits(logits)
     mask = _non_clue_mask(clues)
     if logits.dim() == 4:
-        masked_entropy = torch.where(mask, cell_entropy, torch.zeros_like(cell_entropy))
-        counts = mask.sum(dim=(-2, -1)).clamp_min(1)
-        return masked_entropy.sum(dim=(-2, -1)) / counts
-    masked_entropy = cell_entropy[mask]
-    if masked_entropy.numel() == 0:
-        return cell_entropy.mean()
-    return masked_entropy.mean()
+        flat_logits = logits.flatten(1, 2)
+        flat_targets = decoded.flatten(1, 2) - 1
+        flat_mask = mask.flatten(1, 2)
+        b, n_cells, n_classes = flat_logits.shape
+        per_cell = F.cross_entropy(
+            flat_logits.reshape(-1, n_classes),
+            flat_targets.reshape(-1),
+            reduction="none",
+        ).reshape(b, n_cells)
+        return (per_cell * flat_mask).sum(dim=1) / flat_mask.sum(dim=1).clamp_min(1)
+    flat_logits = logits.reshape(-1, logits.size(-1))
+    flat_targets = decoded.reshape(-1) - 1
+    flat_mask = mask.reshape(-1)
+    per_cell = F.cross_entropy(flat_logits, flat_targets, reduction="none")
+    masked = per_cell[flat_mask]
+    if masked.numel() == 0:
+        return per_cell.mean()
+    return masked.mean()
 
 
-def _update_best_by_entropy(
-    entropy: torch.Tensor,
+def _update_best_by_score(
+    score: torch.Tensor,
     candidate: torch.Tensor,
     *,
-    best_entropy: torch.Tensor | None,
+    best_score: torch.Tensor | None,
     best: torch.Tensor | None,
     batch_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if best is None or best_entropy is None:
-        return entropy, candidate
-    improved = entropy < best_entropy
-    best_entropy = torch.where(improved, entropy, best_entropy)
+    if best is None or best_score is None:
+        return score, candidate
+    improved = score < best_score
+    best_score = torch.where(improved, score, best_score)
     best = torch.where(improved.view(batch_size, 1, 1, 1), candidate, best)
-    return best_entropy, best
+    return best_score, best
 
 
 def _compute_rollout_loss(
@@ -310,7 +336,7 @@ def _advance_rollout_state(
 
 
 @torch.no_grad()
-def _fixed_rollout_entropy_loop(
+def _fixed_rollout_confidence_loop(
     model: NextStateModel,
     state: torch.Tensor,
     clues: torch.Tensor,
@@ -320,18 +346,18 @@ def _fixed_rollout_entropy_loop(
     clue_mask: torch.Tensor,
     clue_mask_channel: torch.Tensor,
 ) -> torch.Tensor:
-    """Return model input state at the step with lowest mean non-clue cell entropy."""
+    """Return model input state at the step with lowest mean decoded-state CE."""
     batch_size = clues.size(0)
-    best_entropy: torch.Tensor | None = None
+    best_score: torch.Tensor | None = None
     best_state_in = state.clone()
     ctx = _ClueContext(clue_state, clue_mask, clue_mask_channel)
     for _ in range(rollout_iters):
         logits = model(state)
-        entropy = _mean_cell_entropy(logits, clues)
-        best_entropy, best_state_in = _update_best_by_entropy(
-            entropy,
+        score = _mean_decoded_ce(logits, clues)
+        best_score, best_state_in = _update_best_by_score(
+            score,
             state,
-            best_entropy=best_entropy,
+            best_score=best_score,
             best=best_state_in,
             batch_size=batch_size,
         )
@@ -367,18 +393,18 @@ def _run_rollout(
     steps_per_item = torch.zeros(batch_size, dtype=torch.long, device=device)
     hit_max_iter_per_item = torch.zeros(batch_size, dtype=torch.bool, device=device)
     cycle_length_per_item = torch.full((batch_size,), float("nan"), device=device)
-    best_entropy: torch.Tensor | None = None
+    best_score: torch.Tensor | None = None
     best_logits: torch.Tensor | None = None
 
     for step in range(max_rollout_iter):
         with torch.no_grad():
             logits = model(state)
         logits_list.append(logits)
-        entropy = _mean_cell_entropy(logits, clues)
-        best_entropy, best_logits = _update_best_by_entropy(
-            entropy,
+        score = _mean_decoded_ce(logits, clues)
+        best_score, best_logits = _update_best_by_score(
+            score,
             logits,
-            best_entropy=best_entropy,
+            best_score=best_score,
             best=best_logits,
             batch_size=batch_size,
         )
@@ -422,7 +448,7 @@ def _run_rollout_fixed_select_confident_state(
     *,
     initial_onehot: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Roll out without grad; return input state at the lowest-entropy step."""
+    """Roll out without grad; return input state at the most confident (lowest decoded CE) step."""
     clues, _ = _ensure_batched_clues(clues)
     clues_onehot, _ = _ensure_batched_onehot(clues_onehot)
     if initial_onehot is None:
@@ -431,7 +457,7 @@ def _run_rollout_fixed_select_confident_state(
         initial_onehot, _ = _ensure_batched_onehot(initial_onehot)
     ctx = _ClueContext.from_clues(clues, clues_onehot)
     state = attach_clue_mask(initial_onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
-    return _fixed_rollout_entropy_loop(
+    return _fixed_rollout_confidence_loop(
         model,
         state,
         clues,
@@ -453,18 +479,22 @@ def rollout_train_batch(
     fixed_steps: bool = False,
     compute_pred: bool = True,
 ) -> RolloutResult:
-    """Training: grad-free rollout, then two grad steps (lowest-entropy state + target fixed point).
+    """Training: grad-free rollout, then two grad steps (most confident state + target fixed point).
 
-    Eval: early-stop rollout; readout uses lowest-entropy step.
+    Eval: early-stop rollout; readout uses the most confident (lowest decoded CE) step.
     """
     config = config or RolloutConfig()
-    initial_onehot = (
-        _training_initial_onehot(config, answer, clues, clues_onehot) if model.training else None
-    )
+    rollout_clues = clues
+    rollout_clues_onehot = clues_onehot
+    initial_onehot = None
+    if model.training:
+        initial_onehot, rollout_clues, rollout_clues_onehot = _training_rollout_inputs(
+            config, answer, clues, clues_onehot
+        )
 
     if fixed_steps:
-        clues_batched, was_batched = _ensure_batched_clues(clues)
-        clues_onehot_batched, _ = _ensure_batched_onehot(clues_onehot)
+        clues_batched, was_batched = _ensure_batched_clues(rollout_clues)
+        clues_onehot_batched, _ = _ensure_batched_onehot(rollout_clues_onehot)
         answer_batched, _ = _ensure_batched_clues(answer)
         ctx_batched = _ClueContext.from_clues(clues_batched, clues_onehot_batched)
         initial_batched = initial_onehot
@@ -492,8 +522,8 @@ def rollout_train_batch(
         hit_max_iter = True
         steps = rollout_iters
     else:
-        clues_batched, was_batched = _ensure_batched_clues(clues)
-        clues_onehot_batched, _ = _ensure_batched_onehot(clues_onehot)
+        clues_batched, was_batched = _ensure_batched_clues(rollout_clues)
+        clues_onehot_batched, _ = _ensure_batched_onehot(rollout_clues_onehot)
         answer_batched, _ = _ensure_batched_clues(answer)
         initial_batched = initial_onehot
         if initial_batched is not None:

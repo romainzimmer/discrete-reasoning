@@ -443,9 +443,9 @@ def main() -> None:
     parser.add_argument("--viz-samples", type=int, default=10, help="Puzzles per split to save for viz")
     parser.add_argument(
         "--train-init",
-        choices=["clues", "noisy-gt", "zero-gt"],
+        choices=["clues", "noisy-gt", "zero-gt", "curriculum"],
         default="noisy-gt",
-        help="clues: clues only, empty elsewhere (same as val/test); noisy-gt: flip non-clue cells to random digits; zero-gt: randomly zero non-clue GT cells",
+        help="clues: clues only, empty elsewhere (same as val/test); noisy-gt: flip non-clue cells to random digits; zero-gt: randomly zero non-clue GT cells; curriculum: like zero-gt but non-zero cells become rollout clues",
     )
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -518,6 +518,7 @@ def main() -> None:
         "clues": "clues",
         "noisy-gt": "noisy_gt",
         "zero-gt": "zero_gt",
+        "curriculum": "curriculum",
     }[args.train_init]
     rollout_config = RolloutConfig(train_init=train_init)
     best_val_cell_acc = -1.0
