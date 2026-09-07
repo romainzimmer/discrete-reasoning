@@ -127,13 +127,14 @@ def _zeroed_ground_truth_initial(
 def _curriculum_initial(
     answer: torch.Tensor,
     clues: torch.Tensor,
-) -> torch.Tensor:
-    """Uniform random digit 1-9 on each non-clue cell."""
-    grid = clues.clone()
-    non_clue = clues == 0
-    if non_clue.any():
-        grid[non_clue] = torch.randint(1, 10, (int(non_clue.sum().item()),), device=clues.device)
-    return grid_to_onehot(grid)
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reveal GT on non-clue cells with prob (1-p), p~U[0,1]; hidden cells get random digits."""
+    rollout_clues = _random_zero_non_clue_grid(answer, clues)
+    grid = rollout_clues.clone()
+    hidden = (rollout_clues == 0) & (clues == 0)
+    if hidden.any():
+        grid[hidden] = torch.randint(1, 10, (int(hidden.sum().item()),), device=clues.device)
+    return grid_to_onehot(grid), rollout_clues
 
 
 def _training_rollout_inputs(
@@ -141,14 +142,16 @@ def _training_rollout_inputs(
     answer: torch.Tensor,
     clues: torch.Tensor,
     clues_onehot: torch.Tensor,
-) -> torch.Tensor | None:
+) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
     if config.train_init == "curriculum":
-        return _curriculum_initial(answer, clues)
+        initial_onehot, rollout_clues = _curriculum_initial(answer, clues)
+        return initial_onehot, rollout_clues, grid_to_onehot(rollout_clues)
+    initial_onehot = None
     if config.train_init == "noisy_gt":
-        return _noisy_ground_truth_initial(answer, clues, clues_onehot=clues_onehot)
-    if config.train_init == "zero_gt":
-        return _zeroed_ground_truth_initial(answer, clues, clues_onehot=clues_onehot)
-    return None
+        initial_onehot = _noisy_ground_truth_initial(answer, clues, clues_onehot=clues_onehot)
+    elif config.train_init == "zero_gt":
+        initial_onehot = _zeroed_ground_truth_initial(answer, clues, clues_onehot=clues_onehot)
+    return initial_onehot, clues, clues_onehot
 
 
 def predict_grid(logits: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
@@ -294,12 +297,16 @@ def rollout_train_batch(
 ) -> RolloutResult:
     """All-step rollout loss; train and eval share the same loop dynamics."""
     config = config or RolloutConfig()
+    rollout_clues = clues
+    rollout_clues_onehot = clues_onehot
     initial_onehot = None
     if model.training:
-        initial_onehot = _training_rollout_inputs(config, answer, clues, clues_onehot)
+        initial_onehot, rollout_clues, rollout_clues_onehot = _training_rollout_inputs(
+            config, answer, clues, clues_onehot
+        )
 
-    clues_batched, was_batched = _ensure_batched_clues(clues)
-    clues_onehot_batched, _ = _ensure_batched_onehot(clues_onehot)
+    clues_batched, was_batched = _ensure_batched_clues(rollout_clues)
+    clues_onehot_batched, _ = _ensure_batched_onehot(rollout_clues_onehot)
     answer_batched, _ = _ensure_batched_clues(answer)
     initial_batched = initial_onehot
     if initial_batched is not None:

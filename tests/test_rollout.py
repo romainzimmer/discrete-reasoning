@@ -121,12 +121,19 @@ def test_curriculum_init():
             [0, 0, 0, 0, 0, 0, 0, 0, 0],
         ]
     )
-    answer = torch.ones(9, 9)
+    answer = torch.full((9, 9), 3)
+    answer[0, 0] = 5
     torch.manual_seed(0)
-    onehot = _curriculum_initial(answer, clues)
+    onehot, rollout_clues = _curriculum_initial(answer, clues)
     grid = onehot_to_grid(onehot)
     assert grid[0, 0] == 5
-    assert torch.all((grid[clues == 0] >= 1) & (grid[clues == 0] <= 9))
+    assert torch.all(rollout_clues[clues > 0] == clues[clues > 0])
+    revealed = (rollout_clues > 0) & (clues == 0)
+    if revealed.any():
+        assert torch.all(rollout_clues[revealed] == answer[revealed])
+    hidden = (rollout_clues == 0) & (clues == 0)
+    if hidden.any():
+        assert torch.all((grid[hidden] >= 1) & (grid[hidden] <= 9))
 
 
 def test_reproducible_eval_with_seed():

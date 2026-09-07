@@ -353,7 +353,7 @@ def measure_split(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train rollout sudoku model")
     parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-1, help="L2 regularization on weights only (not bias)")
     parser.add_argument("--width", type=int, default=512, help="FFN block width")
     parser.add_argument("--num-blocks", type=int, default=2, help="Number of FFN blocks")
@@ -391,7 +391,7 @@ def main() -> None:
         "--train-init",
         choices=["clues", "noisy-gt", "zero-gt", "curriculum"],
         default="noisy-gt",
-        help="clues: clues only; noisy-gt: flip non-clue cells; zero-gt: randomly zero non-clue GT cells; curriculum: random digit 1-9 per non-clue cell",
+        help="clues: clues only; noisy-gt: flip non-clue cells; zero-gt: randomly zero non-clue GT cells; curriculum: reveal GT as extra clues with prob (1-p), p~U[0,1], random digits elsewhere",
     )
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
