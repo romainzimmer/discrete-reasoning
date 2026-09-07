@@ -266,6 +266,7 @@ def train_epoch(
     rollout_config: RolloutConfig,
     batch_size: int,
     use_cuda: bool,
+    max_grad_norm: float,
 ) -> TrainEpochStats:
     model.train()
     total_loss = 0.0
@@ -288,6 +289,8 @@ def train_epoch(
             compute_pred=False,
             accumulate_grad=True,
         )
+        if max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
         total_loss, n = _accumulate_loss(
             result,
@@ -377,7 +380,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train rollout sudoku model")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--weight-decay", type=float, default=1e-1, help="L2 regularization on weights only (not bias)")
+    parser.add_argument("--weight-decay", type=float, default=1e-2, help="L2 regularization on weights only (not bias)")
+    parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Clip gradient global norm (0 disables)")
     parser.add_argument("--width", type=int, default=512, help="FFN block width")
     parser.add_argument("--num-blocks", type=int, default=2, help="Number of FFN blocks")
     parser.add_argument(
@@ -524,6 +528,7 @@ def main() -> None:
             rollout_config=rollout_config,
             batch_size=args.batch_size,
             use_cuda=use_cuda,
+            max_grad_norm=args.max_grad_norm,
         )
         val = measure_split(
             model,
