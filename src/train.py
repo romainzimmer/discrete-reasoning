@@ -65,6 +65,8 @@ def _epoch_desc(epoch: int, epochs: int, phase: str) -> str:
 @dataclass
 class TrainEpochStats:
     loss: float
+    cell_acc: float | None = None
+    puzzle_acc: float | None = None
 
 
 @dataclass
@@ -148,7 +150,7 @@ def save_epoch_metrics(
     history["epochs"].append(
         {
             "epoch": epoch,
-            **{f"train_{k}": v for k, v in asdict(train).items()},
+            **{f"train_{k}": v for k, v in asdict(train).items() if v is not None},
             **{f"val_{k}": v for k, v in asdict(val).items()},
         }
     )
@@ -429,6 +431,11 @@ def main() -> None:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for augment RNG and training")
     parser.add_argument("--no-augment", action="store_true", help="Disable training data augmentations")
+    parser.add_argument(
+        "--compute-train-acc",
+        action="store_true",
+        help="After each epoch, run eval-style rollouts on the train split for train cell/puzzle accuracy",
+    )
     parser.add_argument("--aug-digit-proba", type=float, default=0.5)
     parser.add_argument("--aug-rot-proba", type=float, default=0.5)
     parser.add_argument("--aug-band-proba", type=float, default=0.3)
@@ -475,6 +482,15 @@ def main() -> None:
     }
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **loader_kwargs)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, **loader_kwargs)
+    train_acc_loader: DataLoader | None = None
+    if args.compute_train_acc:
+        train_acc_ds = PuzzleDataset(rows=train_rows, augment=False)
+        train_acc_loader = DataLoader(
+            train_acc_ds,
+            batch_size=args.batch_size,
+            shuffle=False,
+            **loader_kwargs,
+        )
 
     args.model = "mixer-looped"
     model = MixerNextStateModel(dim=args.dim, num_blocks=args.num_blocks).to(device)
@@ -530,6 +546,24 @@ def main() -> None:
             use_cuda=use_cuda,
             max_grad_norm=args.max_grad_norm,
         )
+        if args.compute_train_acc:
+            assert train_acc_loader is not None
+            train_acc = measure_split(
+                model,
+                train_acc_loader,
+                device,
+                epoch=epoch,
+                epochs=args.epochs,
+                phase="train acc",
+                rollout_config=eval_rollout_config,
+                use_cuda=use_cuda,
+                seed=args.seed,
+            )
+            train = TrainEpochStats(
+                loss=train.loss,
+                cell_acc=train_acc.cell_acc,
+                puzzle_acc=train_acc.puzzle_acc,
+            )
         val = measure_split(
             model,
             val_loader,
@@ -577,9 +611,12 @@ def main() -> None:
             val=val,
             args=args,
         )
+        train_msg = f"train_loss={train.loss:.4f}"
+        if train.cell_acc is not None and train.puzzle_acc is not None:
+            train_msg += f" train_cell_acc={train.cell_acc:.4f} train_puzzle_acc={train.puzzle_acc:.4f}"
         print(
             f"epoch {epoch}/{args.epochs}: "
-            f"train_loss={train.loss:.4f} val_loss={val.loss:.4f} "
+            f"{train_msg} val_loss={val.loss:.4f} "
             f"val_cell_acc={val.cell_acc:.4f} val_puzzle_acc={val.puzzle_acc:.4f}",
             flush=True,
         )

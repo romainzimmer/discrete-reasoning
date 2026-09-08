@@ -259,7 +259,7 @@
       <div class="chart-title">Cell accuracy</div>
       <canvas id="cellAccChart"></canvas>
       <div class="axis-x-label">epoch</div>
-      <div class="legend">
+      <div class="legend" id="cellAccLegend">
         <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
       </div>
     </div>
@@ -267,7 +267,7 @@
       <div class="chart-title">Puzzle accuracy</div>
       <canvas id="puzzleAccChart"></canvas>
       <div class="axis-x-label">epoch</div>
-      <div class="legend">
+      <div class="legend" id="puzzleAccLegend">
         <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
       </div>
     </div>
@@ -598,6 +598,28 @@
       return [{ color: "#dc2626", values: epochs.map(e => epochValMetric(e, null, valKey)) }];
     }
 
+    function accMetricSeries(epochs, metricKey) {
+      const trainKey = `train_${metricKey}`;
+      const valKey = `val_${metricKey}`;
+      const series = [];
+      if (epochs.some(e => e[trainKey] != null)) {
+        series.push({ color: "#2563eb", values: epochs.map(e => e[trainKey] ?? null) });
+      }
+      series.push({ color: "#dc2626", values: epochs.map(e => epochValMetric(e, trainKey, valKey)) });
+      return series;
+    }
+
+    function renderAccLegend(elementId, epochs, metricKey) {
+      const el = document.getElementById(elementId);
+      const trainKey = `train_${metricKey}`;
+      const items = [];
+      if (epochs.some(e => e[trainKey] != null)) {
+        items.push('<div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>');
+      }
+      items.push('<div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>');
+      el.innerHTML = items.join("");
+    }
+
     function renderTestSummary() {
       const gridEl = document.getElementById("testSummary");
       const noteEl = document.getElementById("testSectionNote");
@@ -645,18 +667,20 @@
         xLabels,
         formatY: v => Number(v).toFixed(3),
       });
-      drawSeries(document.getElementById("cellAccChart"), valMetricSeries(epochs, "val_cell_acc"), {
+      drawSeries(document.getElementById("cellAccChart"), accMetricSeries(epochs, "cell_acc"), {
         yMin: 0,
         yMax: 1,
         xLabels,
         formatY: pct,
       });
-      drawSeries(document.getElementById("puzzleAccChart"), valMetricSeries(epochs, "val_puzzle_acc"), {
+      drawSeries(document.getElementById("puzzleAccChart"), accMetricSeries(epochs, "puzzle_acc"), {
         yMin: 0,
         yMax: 1,
         xLabels,
         formatY: pct,
       });
+      renderAccLegend("cellAccLegend", epochs, "cell_acc");
+      renderAccLegend("puzzleAccLegend", epochs, "puzzle_acc");
       renderTestSummary();
     }
 
