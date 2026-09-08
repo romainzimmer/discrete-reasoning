@@ -35,14 +35,14 @@ class StateEncoder(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
         self.digit_embed = nn.Embedding(NUM_VOCAB, dim)
-        self.clue_cell_embed = nn.Parameter(torch.empty(dim))
-        nn.init.normal_(self.clue_cell_embed, std=0.02)
+        self.clue_type_embed = nn.Embedding(2, dim)
 
     def encode_input(self, digit_id: torch.Tensor, clue_pin: torch.Tensor) -> torch.Tensor:
-        """digit_id, clue_pin: (B, 9, 9) -> (B, 81, D)."""
+        """digit_id, clue_pin: (B, 9, 9) -> (B, 81, D). clue_pin: 0 = non-clue, 1 = clue."""
         b = digit_id.size(0)
+        clue_type = clue_pin.reshape(b, SEQ_LEN).long()
         h = self.digit_embed(digit_id.reshape(b, SEQ_LEN))
-        return h + clue_pin.reshape(b, SEQ_LEN).unsqueeze(-1).float() * self.clue_cell_embed
+        return h + self.clue_type_embed(clue_type)
 
 
 class MixerBlock(nn.Module):

@@ -18,7 +18,6 @@ from model import MixerNextStateModel
 from rollout import (
     DEFAULT_INNER_ITERS,
     DEFAULT_OUTER_ITERS,
-    DEFAULT_TRUNCATED_BPTT_STEPS,
     RolloutConfig,
     RolloutResult,
     rollout_train_batch,
@@ -51,15 +50,11 @@ def build_rollout_config(
     train_init: str,
     inner_iters: int,
     outer_iters: int,
-    fixed_point: bool = True,
-    truncated_bptt_steps: int = DEFAULT_TRUNCATED_BPTT_STEPS,
 ) -> RolloutConfig:
     return RolloutConfig(
         train_init=train_init,
         inner_iters=inner_iters,
         outer_iters=outer_iters,
-        fixed_point=fixed_point,
-        truncated_bptt_steps=truncated_bptt_steps,
     )
 
 
@@ -386,7 +381,7 @@ def main() -> None:
         "--train-inner-iters",
         type=int,
         default=DEFAULT_INNER_ITERS,
-        help="Differentiable inner steps per outer loop during training",
+        help="Inner steps per outer loop during training (grad only on the last outer loop)",
     )
     parser.add_argument(
         "--train-outer-iters",
@@ -405,17 +400,6 @@ def main() -> None:
         type=int,
         default=DEFAULT_OUTER_ITERS,
         help="Argmax commits per puzzle during val/viz/test",
-    )
-    parser.add_argument(
-        "--no-fixed-point",
-        action="store_true",
-        help="Only supervise the final inner-loop logits (disable fixed-point training)",
-    )
-    parser.add_argument(
-        "--truncated-bptt-steps",
-        type=int,
-        default=DEFAULT_TRUNCATED_BPTT_STEPS,
-        help="Inner steps with BPTT during training (0: last logit only on detached state)",
     )
     parser.add_argument("--batch-size", type=int, default=8, help="Training batch size")
     parser.add_argument(
@@ -439,7 +423,7 @@ def main() -> None:
         "--train-init",
         choices=["clues", "noisy-gt", "zero-gt", "curriculum"],
         default="noisy-gt",
-        help="clues: clues only; noisy-gt: flip non-clue cells; zero-gt: randomly zero non-clue GT cells; curriculum: reveal GT as extra clues with prob (1-p), p~U[0,1], random digits elsewhere",
+        help="clues: clues only; noisy-gt: flip non-clue cells to random 0-9; zero-gt: randomly zero non-clue GT cells; curriculum: reveal GT as extra clues with prob (1-p), p~U[0,1], random 0-9 elsewhere",
     )
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -519,14 +503,11 @@ def main() -> None:
         train_init=train_init,
         inner_iters=args.train_inner_iters,
         outer_iters=args.train_outer_iters,
-        fixed_point=not args.no_fixed_point,
-        truncated_bptt_steps=args.truncated_bptt_steps,
     )
     eval_rollout_config = build_rollout_config(
         train_init="clues",
         inner_iters=args.eval_inner_iters,
         outer_iters=args.eval_outer_iters,
-        fixed_point=not args.no_fixed_point,
     )
     best_val_cell_acc = -1.0
     manifest = load_manifest(run_dir)

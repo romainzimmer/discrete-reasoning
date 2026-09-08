@@ -121,7 +121,6 @@ def main() -> None:
         train_init="clues",
         inner_iters=inner_iters,
         outer_iters=outer_iters,
-        fixed_point=bool(run_args.get("fixed_point", True)),
     )
 
     epoch = int(ckpt["epoch"])

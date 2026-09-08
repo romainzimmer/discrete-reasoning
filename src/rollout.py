@@ -15,7 +15,6 @@ TrainInitMode = Literal["clues", "noisy_gt", "zero_gt", "curriculum"]
 
 DEFAULT_INNER_ITERS = 5
 DEFAULT_OUTER_ITERS = 10
-DEFAULT_TRUNCATED_BPTT_STEPS = 2
 
 
 @dataclass(frozen=True)
@@ -23,18 +22,12 @@ class RolloutConfig:
     train_init: TrainInitMode = "noisy_gt"
     inner_iters: int = DEFAULT_INNER_ITERS
     outer_iters: int = DEFAULT_OUTER_ITERS
-    fixed_point: bool = True
-    truncated_bptt_steps: int = DEFAULT_TRUNCATED_BPTT_STEPS
 
     def __post_init__(self) -> None:
         if self.inner_iters < 1:
             raise ValueError("inner_iters must be >= 1")
         if self.outer_iters < 1:
             raise ValueError("outer_iters must be >= 1")
-        if not 0 <= self.truncated_bptt_steps <= self.inner_iters:
-            raise ValueError("truncated_bptt_steps must be in [0, inner_iters]")
-        if self.fixed_point and self.inner_iters < 2:
-            raise ValueError("fixed_point requires inner_iters >= 2")
 
 
 @dataclass(frozen=True)
@@ -81,15 +74,15 @@ def _noisy_ground_truth_initial(
     answer: torch.Tensor,
     clues: torch.Tensor,
 ) -> torch.Tensor:
-    """Start from ground truth; flip whole non-clue cells to another digit with prob p~U[0,1]."""
+    """Start from ground truth; flip non-clue cells to another digit in 0-9 with prob p~U[0,1]."""
     non_clue = clues == 0
     if answer.dim() == 2:
         p = torch.rand((), device=answer.device)
     else:
         p = torch.rand(answer.size(0), 1, 1, device=answer.device)
     flip_cell = (torch.rand_like(clues, dtype=torch.float32) < p) & non_clue
-    offset = torch.randint(1, 9, answer.shape, device=answer.device)
-    flipped = (answer - 1 + offset) % 9 + 1
+    offset = torch.randint(1, 10, answer.shape, device=answer.device)
+    flipped = (answer + offset) % 10
     corrupted = torch.where(flip_cell, flipped, answer)
     return _pin_clue_digits(corrupted, _ClueContext.from_rollout_clues(clues))
 
@@ -107,12 +100,12 @@ def _curriculum_initial(
     answer: torch.Tensor,
     clues: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Reveal GT on non-clue cells with prob (1-p), p~U[0,1]; hidden cells get random digits."""
+    """Reveal GT on non-clue cells with prob (1-p), p~U[0,1]; hidden cells get random digits in 0-9."""
     rollout_clues = _random_zero_non_clue_grid(answer, clues)
     digit_id = rollout_clues.clone()
     hidden = (rollout_clues == 0) & (clues == 0)
     if hidden.any():
-        digit_id[hidden] = torch.randint(1, 10, (int(hidden.sum().item()),), device=clues.device)
+        digit_id[hidden] = torch.randint(0, 10, (int(hidden.sum().item()),), device=clues.device)
     ctx = _ClueContext.from_rollout_clues(rollout_clues)
     digit_id = _pin_clue_digits(digit_id, ctx)
     return digit_id, rollout_clues
@@ -178,53 +171,9 @@ def _compute_rollout_loss_batch_mean(
     return per_puzzle.mean()
 
 
-def _compute_inner_loop_loss(
-    final_logits: torch.Tensor,
-    penultimate_logits: torch.Tensor | None,
-    *,
-    clue_pin: torch.Tensor,
-    answer: torch.Tensor,
-) -> torch.Tensor:
-    final_loss = _compute_rollout_loss_batch_mean(
-        final_logits,
-        clue_pin=clue_pin,
-        answer=answer,
-    )
-    if penultimate_logits is None:
-        return final_loss
-    penultimate_loss = _compute_rollout_loss_batch_mean(
-        penultimate_logits,
-        clue_pin=clue_pin,
-        answer=answer,
-    )
-    return (final_loss + penultimate_loss) / 2
-
-
 def _outer_commit(logits: torch.Tensor, ctx: _ClueContext) -> torch.Tensor:
     decoded = decode_logits(logits).detach()
     return torch.where(ctx.clue_pin, ctx.clue_digit_ids, decoded)
-
-
-def _no_grad_inner_steps(
-    model: MixerNextStateModel,
-    state: RolloutState,
-    *,
-    inner_iters: int,
-    fixed_point: bool,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    assert state.input_embed is not None
-    penultimate_logits: torch.Tensor | None = None
-    cell_embed = state.cell_embed
-    for step in range(inner_iters):
-        out = model(input_embed=state.input_embed, cell_embed=cell_embed)
-        logits = out.logits
-        cell_embed = out.cell_embed
-        if fixed_point and step == inner_iters - 2:
-            penultimate_logits = logits
-        if step == inner_iters - 1:
-            state.cell_embed = cell_embed
-            return logits, penultimate_logits
-    raise RuntimeError("unreachable")
 
 
 def _inner_loop(
@@ -232,43 +181,19 @@ def _inner_loop(
     state: RolloutState,
     inner_iters: int,
     *,
-    truncated_bptt_steps: int | None = None,
-    fixed_point: bool = True,
-    use_truncated_bptt: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if not use_truncated_bptt:
-        return _no_grad_inner_steps(
-            model,
-            state,
-            inner_iters=inner_iters,
-            fixed_point=fixed_point,
-        )
-
-    if truncated_bptt_steps is None:
-        truncated_bptt_steps = DEFAULT_TRUNCATED_BPTT_STEPS
-    no_grad_steps = inner_iters - 1 if truncated_bptt_steps == 0 else inner_iters - truncated_bptt_steps
-
+    with_grad: bool = False,
+) -> torch.Tensor:
     assert state.input_embed is not None
-    penultimate_logits: torch.Tensor | None = None
-    final_logits: torch.Tensor | None = None
     cell_embed = state.cell_embed
-
-    for step in range(inner_iters):
-        use_no_grad = step < no_grad_steps
-        with torch.no_grad() if use_no_grad else nullcontext():
+    logits: torch.Tensor | None = None
+    for _ in range(inner_iters):
+        with nullcontext() if with_grad else torch.no_grad():
             out = model(input_embed=state.input_embed, cell_embed=cell_embed)
             logits = out.logits
             cell_embed = out.cell_embed
-            if fixed_point and step == inner_iters - 2:
-                penultimate_logits = logits
-            if step == inner_iters - 1:
-                final_logits = logits
-        if use_no_grad and step == no_grad_steps - 1:
-            cell_embed = cell_embed.detach()
-
     state.cell_embed = cell_embed
-    assert final_logits is not None
-    return final_logits, penultimate_logits if fixed_point else None
+    assert logits is not None
+    return logits
 
 
 def _rollout_loop(
@@ -282,48 +207,37 @@ def _rollout_loop(
     answer: torch.Tensor | None = None,
     collect_state_grids: bool = False,
     accumulate_grad: bool = False,
-    fixed_point: bool = True,
-    truncated_bptt_steps: int | None = DEFAULT_TRUNCATED_BPTT_STEPS,
 ) -> tuple[torch.Tensor, list[torch.Tensor] | None, torch.Tensor]:
     state_grids: list[torch.Tensor] | None = [] if collect_state_grids else None
-    outer_losses: list[torch.Tensor] = []
+    total_loss: torch.Tensor | None = None
     logits = state.digit_id.new_zeros((rollout_clues.size(0), 9, 9, 10), dtype=torch.float32)
 
-    for _ in range(outer_iters):
+    for outer_idx in range(outer_iters):
+        is_last_outer = outer_idx == outer_iters - 1
         state.input_embed = model.encode_input(state.digit_id, state.clue_pin)
         state.cell_embed = None
-        logits, penultimate_logits = _inner_loop(
+        logits = _inner_loop(
             model,
             state,
             inner_iters,
-            truncated_bptt_steps=truncated_bptt_steps,
-            fixed_point=fixed_point,
-            use_truncated_bptt=accumulate_grad,
+            with_grad=accumulate_grad and is_last_outer,
         )
-        if answer is not None:
-            outer_loss = _compute_inner_loop_loss(
+        if answer is not None and is_last_outer:
+            total_loss = _compute_rollout_loss_batch_mean(
                 logits,
-                penultimate_logits,
                 clue_pin=ctx.clue_pin,
                 answer=answer,
             )
             if accumulate_grad:
-                (outer_loss / outer_iters).backward()
-                outer_losses.append(outer_loss.detach())
-            else:
-                outer_losses.append(outer_loss)
+                total_loss.backward()
+                total_loss = total_loss.detach()
         state.digit_id = _outer_commit(logits, ctx)
         state.cell_embed = None
         if state_grids is not None:
             state_grids.append(state.digit_id.clone())
 
-    if answer is None:
+    if total_loss is None:
         total_loss = logits.new_zeros(())
-    elif outer_losses:
-        total_loss = torch.stack(outer_losses).mean()
-    else:
-        total_loss = logits.new_zeros(())
-
     return logits, state_grids, total_loss
 
 
@@ -380,7 +294,7 @@ def rollout_train_batch(
     compute_pred: bool = True,
     accumulate_grad: bool = False,
 ) -> RolloutResult:
-    """Rollout loss over outer loops; per-outer backward when training."""
+    """Rollout loss on the final outer loop; earlier outer loops run without grad."""
     if model.training and not accumulate_grad:
         raise ValueError("accumulate_grad must be True when model.training")
     config = config or RolloutConfig()
@@ -413,8 +327,6 @@ def rollout_train_batch(
         config.outer_iters,
         answer=answer_batched,
         accumulate_grad=accumulate_grad,
-        fixed_point=config.fixed_point,
-        truncated_bptt_steps=config.truncated_bptt_steps,
     )
     eval_logits = logits
     if not was_batched:
@@ -431,12 +343,16 @@ def rollout_solve(
     config: RolloutConfig | None = None,
 ) -> torch.Tensor:
     config = config or RolloutConfig(train_init="clues")
+    clues_b, was_batched = _ensure_batched(clues)
     logits, _ = _run_rollout(
         model,
-        clues,
+        clues_b,
         config=config,
     )
-    return predict_grid(logits, clues)
+    pred = predict_grid(logits, clues_b)
+    if not was_batched:
+        pred = pred.squeeze(0)
+    return pred
 
 
 @torch.inference_mode()
