@@ -103,18 +103,19 @@ def _empty_noisy_ground_truth_initial(
     answer: torch.Tensor,
     clues: torch.Tensor,
 ) -> torch.Tensor:
-    """Zero non-clue cells with p_empty~U[0,1]; flip remaining non-clue cells with p_noise~U[0,1]."""
+    """Corrupt non-clue cells with p_corrupt~U[0,1]; corrupted cells become empty or noisy with p_empty~U[0,1]."""
     non_clue = clues == 0
+    p_corrupt = _noise_probability(answer)
     p_empty = _noise_probability(answer)
-    p_noise = _noise_probability(answer)
-    zero_out = (torch.rand_like(clues, dtype=torch.float32) < p_empty) & non_clue
-    digit_id = torch.where(zero_out, torch.zeros_like(answer), answer)
-    keep_gt = non_clue & ~zero_out
-    flip_cell = (torch.rand_like(clues, dtype=torch.float32) < p_noise) & keep_gt
+    corrupt = (torch.rand_like(clues, dtype=torch.float32) < p_corrupt) & non_clue
+    empty = (torch.rand_like(clues, dtype=torch.float32) < p_empty) & corrupt
+    noisy = corrupt & ~empty
     offset = torch.randint(1, 10, answer.shape, device=answer.device)
     flipped = (answer + offset) % 10
-    corrupted = torch.where(flip_cell, flipped, digit_id)
-    return _pin_clue_digits(corrupted, _ClueContext.from_rollout_clues(clues))
+    digit_id = answer.clone()
+    digit_id = torch.where(empty, torch.zeros_like(answer), digit_id)
+    digit_id = torch.where(noisy, flipped, digit_id)
+    return _pin_clue_digits(digit_id, _ClueContext.from_rollout_clues(clues))
 
 
 def _training_rollout_inputs(

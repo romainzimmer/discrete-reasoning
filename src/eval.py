@@ -100,7 +100,11 @@ def main() -> None:
         raise ValueError("No test puzzles after filters")
 
     use_cuda = device.type == "cuda"
-    batch_size = int(run_args.get("batch_size", 1))
+    batch_size = int(
+        run_args.get("val_batch_size")
+        or run_args.get("train_batch_size")
+        or run_args.get("batch_size", 1)
+    )
     test_loader = DataLoader(
         PuzzleDataset(rows=test_rows),
         batch_size=batch_size,

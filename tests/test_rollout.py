@@ -451,10 +451,10 @@ def test_empty_noisy_gt_pins_clues():
     assert initial[0, 0] == 5
 
 
-def test_empty_noisy_gt_zeros_all_non_clue_when_p_empty_one():
+def test_empty_noisy_gt_zeros_corrupt_when_p_corrupt_and_p_empty_one():
     clues, answer = _simple_clue_answer()
     with (
-        patch("rollout.torch.rand", side_effect=[torch.tensor(1.0), torch.tensor(0.0)]),
+        patch("rollout.torch.rand", side_effect=[torch.tensor(1.0), torch.tensor(1.0)]),
         patch(
             "rollout.torch.rand_like",
             return_value=torch.full_like(clues, 0.5, dtype=torch.float32),
@@ -465,10 +465,10 @@ def test_empty_noisy_gt_zeros_all_non_clue_when_p_empty_one():
     assert torch.all(initial[non_clue] == 0)
 
 
-def test_empty_noisy_gt_noises_remaining_when_p_noise_one():
+def test_empty_noisy_gt_noises_corrupt_when_p_corrupt_one_p_empty_zero():
     clues, answer = _simple_clue_answer()
     with (
-        patch("rollout.torch.rand", side_effect=[torch.tensor(0.0), torch.tensor(1.0)]),
+        patch("rollout.torch.rand", side_effect=[torch.tensor(1.0), torch.tensor(0.0)]),
         patch(
             "rollout.torch.rand_like",
             return_value=torch.full_like(clues, 0.5, dtype=torch.float32),
@@ -479,9 +479,9 @@ def test_empty_noisy_gt_noises_remaining_when_p_noise_one():
     assert torch.all(initial[non_clue] != answer[non_clue])
 
 
-def test_empty_noisy_gt_keeps_answer_when_both_p_zero():
+def test_empty_noisy_gt_keeps_answer_when_p_corrupt_zero():
     clues, answer = _simple_clue_answer()
-    with patch("rollout.torch.rand", side_effect=[torch.tensor(0.0), torch.tensor(0.0)]):
+    with patch("rollout.torch.rand", side_effect=[torch.tensor(0.0), torch.tensor(1.0)]):
         initial = _empty_noisy_ground_truth_initial(answer, clues)
     assert torch.equal(initial, answer)
 

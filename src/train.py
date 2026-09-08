@@ -441,7 +441,13 @@ def main() -> None:
         default=DEFAULT_OUTER_ITERS,
         help="Argmax commits per puzzle during val/viz/test",
     )
-    parser.add_argument("--batch-size", type=int, default=8, help="Training batch size")
+    parser.add_argument("--train-batch-size", type=int, default=8, help="Training batch size")
+    parser.add_argument(
+        "--val-batch-size",
+        type=int,
+        default=None,
+        help="Validation batch size (default: training batch size)",
+    )
     parser.add_argument(
         "--num-workers",
         type=int,
@@ -457,13 +463,13 @@ def main() -> None:
         "--viz-batch-size",
         type=int,
         default=None,
-        help="Batch size for viz trajectory rollouts (default: training batch size)",
+        help="Batch size for viz trajectory rollouts (default: train batch size)",
     )
     parser.add_argument(
         "--train-init",
         choices=["clues", "noisy-gt", "zero-gt", "empty-noisy-gt"],
         default="empty-noisy-gt",
-        help="clues: clues only; noisy-gt: flip non-clue cells (p~U[0,1]); zero-gt: zero non-clue cells (p~U[0,1]); empty-noisy-gt: zero then noise on remaining non-clue cells (p_empty,p_noise~U[0,1])",
+        help="clues: clues only; noisy-gt: flip non-clue cells (p~U[0,1]); zero-gt: zero non-clue cells (p~U[0,1]); empty-noisy-gt: corrupt non-clue cells (p_corrupt~U[0,1]), then empty vs noisy among corrupt (p_empty~U[0,1])",
     )
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -513,8 +519,9 @@ def main() -> None:
         "pin_memory": use_cuda,
         "num_workers": args.num_workers,
     }
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **loader_kwargs)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, **loader_kwargs)
+    train_loader = DataLoader(train_ds, batch_size=args.train_batch_size, shuffle=True, **loader_kwargs)
+    val_batch_size = args.val_batch_size or args.train_batch_size
+    val_loader = DataLoader(val_ds, batch_size=val_batch_size, **loader_kwargs)
 
     args.model = "mixer-looped"
     model = MixerNextStateModel(dim=args.dim, num_blocks=args.num_blocks).to(device)
@@ -566,7 +573,7 @@ def main() -> None:
             epoch=epoch,
             epochs=args.epochs,
             rollout_config=rollout_config,
-            batch_size=args.batch_size,
+            batch_size=args.train_batch_size,
             use_cuda=use_cuda,
         )
         val = measure_split(
@@ -593,7 +600,7 @@ def main() -> None:
                 run_dir=run_dir,
                 device=device,
                 rollout_config=eval_rollout_config,
-                batch_size=args.viz_batch_size or args.batch_size,
+                batch_size=args.viz_batch_size or args.train_batch_size,
             )
             update_manifest_split(manifest, split, epoch, puzzle_indices)
         save_manifest(run_dir, manifest)

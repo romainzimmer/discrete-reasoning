@@ -19,7 +19,7 @@ Training uses a **mixer-looped** model: embed the grid → looped MLP-Mixer upda
 
 Runs save `args.model: mixer-looped` in `history.json`. **Old checkpoints from before this migration cannot be loaded by `eval`.**
 
-The mixer keeps a recurrent `cell_embed` per batch; it uses more GPU memory than the old flat model. If you hit OOM, lower `--batch-size` (512 may need tuning on Jetson).
+The mixer keeps a recurrent `cell_embed` per batch; it uses more GPU memory than the old flat model. If you hit OOM, lower `--train-batch-size` (512 may need tuning on Jetson).
 
 ## Build
 
@@ -55,10 +55,10 @@ Writes `data/train.csv` and `data/test.csv` (~798 MB).
 
 ## Train
 
-Main run (mixer-looped; reduce `--batch-size` if OOM):
+Main run (mixer-looped; reduce `--train-batch-size` if OOM):
 
 ```bash
-docker compose run --rm train   --epochs 150   --dim 256   --num-blocks 2   --batch-size 128   --num-workers 3   --val-samples 1024   --train-init empty-noisy-gt  --max-samples 13824   --train-inner-iters 4   --train-outer-iters 1   --eval-inner-iters 4   --eval-outer-iters 30
+docker compose run --rm train   --epochs 150   --dim 256   --num-blocks 2   --train-batch-size 128   --num-workers 3   --val-samples 1024   --train-init empty-noisy-gt  --max-samples 13824   --train-inner-iters 4   --train-outer-iters 1   --eval-inner-iters 4   --eval-outer-iters 50
 ```
 
 Quick test (easy sudoku, ~1k train cap):
@@ -72,7 +72,7 @@ docker compose run --rm train \
   --train-outer-iters 1 \
   --eval-inner-iters 2 \
   --eval-outer-iters 3 \
-  --batch-size 64 \
+  --train-batch-size 64 \
   --num-workers 1 \
   --max-samples 6464 \
   --min-rating 0 \

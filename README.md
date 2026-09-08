@@ -36,7 +36,7 @@ uv run train \
   --dim 512 --num-blocks 2 \
   --train-inner-iters 5 --train-outer-iters 10 \
   --eval-inner-iters 5 --eval-outer-iters 10 \
-  --batch-size 8
+  --train-batch-size 8
 # Add --no-augment to disable on-the-fly training augmentations (ablation)
 uv run python -m http.server 8000
 ```
