@@ -60,7 +60,7 @@ def test_rollout_config_validation():
 
 
 def test_truncated_bptt_zero_detaches_inner_prefix():
-    model = MixerNextStateModel(width=32, num_blocks=1)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     clues, answer = _tiny_batch()
     state = _init_rollout_state(clues)
@@ -79,7 +79,7 @@ def test_truncated_bptt_zero_detaches_inner_prefix():
 
 
 def test_truncated_bptt_full_matches_default_inner_loop():
-    model = MixerNextStateModel(width=32, num_blocks=1)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, _ = _tiny_batch()
     state = _init_rollout_state(clues)
@@ -101,7 +101,7 @@ def test_truncated_bptt_full_matches_default_inner_loop():
 
 
 def test_fixed_point_changes_eval_loss():
-    model = MixerNextStateModel(width=32, num_blocks=1)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _tiny_batch()
     base_config = RolloutConfig(train_init="clues", inner_iters=3, outer_iters=1, fixed_point=False)
@@ -117,7 +117,7 @@ def test_fixed_point_changes_eval_loss():
 
 
 def test_fixed_point_with_truncated_bptt_trains():
-    model = MixerNextStateModel(width=32, num_blocks=1)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     clues, answer = _tiny_batch()
     config = RolloutConfig(
@@ -141,7 +141,7 @@ def test_fixed_point_with_truncated_bptt_trains():
 
 
 def test_rollout_fixed_steps_and_clues_pinned():
-    model = MixerNextStateModel(width=32, num_blocks=1)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _tiny_batch()
     config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=4)
@@ -157,7 +157,7 @@ def test_rollout_fixed_steps_and_clues_pinned():
 
 
 def test_inner_bptt_grad():
-    model = MixerNextStateModel(width=32, num_blocks=1)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     clues, answer = _tiny_batch()
     config = RolloutConfig(train_init="clues", inner_iters=3, outer_iters=1)
@@ -175,7 +175,7 @@ def test_inner_bptt_grad():
 
 
 def test_outer_detach_isolates_blocks():
-    model = MixerNextStateModel(width=32, num_blocks=1)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     clues, answer = _tiny_batch()
     ctx = _ClueContext.from_rollout_clues(clues)
@@ -201,7 +201,7 @@ def test_outer_detach_isolates_blocks():
 
 
 def test_per_outer_backward_matches_stacked_mean():
-    model = MixerNextStateModel(width=32, num_blocks=1)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     clues, answer = _tiny_batch()
     config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=3)
@@ -299,7 +299,7 @@ def test_curriculum_excludes_revealed_from_loss_mask():
 
 
 def test_reproducible_eval():
-    model = MixerNextStateModel(width=32, num_blocks=1)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _tiny_batch()
     config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=3)
@@ -311,7 +311,7 @@ def test_reproducible_eval():
 
 
 def test_rollout_trace_frame_count():
-    model = MixerNextStateModel(width=32, num_blocks=1)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, _ = _tiny_batch()
     outer_iters = 3
@@ -321,7 +321,7 @@ def test_rollout_trace_frame_count():
 
 
 def test_rollout_trace_batch_matches_single():
-    model = MixerNextStateModel(width=32, num_blocks=1)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, _ = _tiny_batch()
     clues2 = clues.clone()
@@ -344,7 +344,7 @@ def test_rollout_trace_batch_matches_single():
 
 
 def test_inner_one_outer_n_commits():
-    model = MixerNextStateModel(width=32, num_blocks=1)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _tiny_batch()
     ctx = _ClueContext.from_rollout_clues(clues)
@@ -384,7 +384,7 @@ def test_outer_commit_matches_full_decode():
 
 
 def test_curriculum_training_rollout():
-    model = MixerNextStateModel(width=32, num_blocks=1)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     clues = torch.tensor(
         [
@@ -416,7 +416,7 @@ def test_curriculum_training_rollout():
 
 
 def test_accumulate_grad_required_in_training():
-    model = MixerNextStateModel(width=32, num_blocks=1)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     clues, answer = _tiny_batch()
     with pytest.raises(ValueError, match="accumulate_grad"):

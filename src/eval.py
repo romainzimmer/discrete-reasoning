@@ -110,7 +110,7 @@ def main() -> None:
     )
 
     model = MixerNextStateModel(
-        width=run_args["width"],
+        dim=run_args["dim"],
         num_blocks=run_args["num_blocks"],
     ).to(device)
     model.load_state_dict(ckpt["model"])

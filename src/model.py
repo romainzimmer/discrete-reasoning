@@ -8,10 +8,16 @@ from torch import nn
 
 from encoding import GRID_SIZE, NUM_VOCAB, SEQ_LEN
 
+SWIGLU_EXPANSION = 4
 
-def _ffn_intermediate_dim(width: int) -> int:
-    hidden = int(2 * (4 * width) / 3)
-    return ((hidden + 7) // 8) * 8
+
+def _round_up_multiple(value: int, multiple: int) -> int:
+    return (-(value // -multiple)) * multiple
+
+
+def _swiglu_hidden_dim(dim: int, *, expansion: float = SWIGLU_EXPANSION, multiple: int = 256) -> int:
+    """TRM/HRM-style SwiGLU width: round(expansion * dim * 2/3) to a hardware multiple."""
+    return _round_up_multiple(round(expansion * dim * 2 / 3), multiple)
 
 
 class RMSNorm(nn.Module):
@@ -26,10 +32,10 @@ class RMSNorm(nn.Module):
 
 
 class StateEncoder(nn.Module):
-    def __init__(self, width: int):
+    def __init__(self, dim: int):
         super().__init__()
-        self.digit_embed = nn.Embedding(NUM_VOCAB, width)
-        self.clue_cell_embed = nn.Parameter(torch.empty(width))
+        self.digit_embed = nn.Embedding(NUM_VOCAB, dim)
+        self.clue_cell_embed = nn.Parameter(torch.empty(dim))
         nn.init.normal_(self.clue_cell_embed, std=0.02)
 
     def encode_input(self, digit_id: torch.Tensor, clue_pin: torch.Tensor) -> torch.Tensor:
@@ -42,15 +48,15 @@ class StateEncoder(nn.Module):
 class MixerBlock(nn.Module):
     """Pre-norm RMSNorm + token-mix Linear(81, 81) + channel-mix SwiGLU."""
 
-    def __init__(self, seq_len: int, width: int):
+    def __init__(self, seq_len: int, dim: int):
         super().__init__()
-        hidden = _ffn_intermediate_dim(width)
-        self.norm1 = RMSNorm(width)
+        hidden = _swiglu_hidden_dim(dim)
+        self.norm1 = RMSNorm(dim)
         self.token_mix = nn.Linear(seq_len, seq_len, bias=False)
-        self.norm2 = RMSNorm(width)
-        self.gate = nn.Linear(width, hidden, bias=False)
-        self.up = nn.Linear(width, hidden, bias=False)
-        self.down = nn.Linear(hidden, width, bias=False)
+        self.norm2 = RMSNorm(dim)
+        self.gate = nn.Linear(dim, hidden, bias=False)
+        self.up = nn.Linear(dim, hidden, bias=False)
+        self.down = nn.Linear(hidden, dim, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         t = self.norm1(x)
@@ -61,10 +67,10 @@ class MixerBlock(nn.Module):
 
 
 class UnembedHead(nn.Module):
-    def __init__(self, width: int):
+    def __init__(self, dim: int):
         super().__init__()
-        self.norm = RMSNorm(width)
-        self.proj = nn.Linear(width, NUM_VOCAB, bias=False)
+        self.norm = RMSNorm(dim)
+        self.proj = nn.Linear(dim, NUM_VOCAB, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.proj(self.norm(x))
@@ -79,17 +85,17 @@ class ModelOutput:
 class MixerNextStateModel(nn.Module):
     """Looped MLP-Mixer: h_{t+1} = M(h_t + P), logits from h."""
 
-    def __init__(self, *, width: int = 512, num_blocks: int = 2):
+    def __init__(self, *, dim: int = 512, num_blocks: int = 2):
         super().__init__()
-        if width <= 0:
-            raise ValueError("width must be positive")
+        if dim <= 0:
+            raise ValueError("dim must be positive")
         if num_blocks <= 0:
             raise ValueError("num_blocks must be positive")
 
-        self.encoder = StateEncoder(width)
-        self.blocks = nn.ModuleList(MixerBlock(SEQ_LEN, width) for _ in range(num_blocks))
-        self.unembed = UnembedHead(width)
-        self.width = width
+        self.encoder = StateEncoder(dim)
+        self.blocks = nn.ModuleList(MixerBlock(SEQ_LEN, dim) for _ in range(num_blocks))
+        self.unembed = UnembedHead(dim)
+        self.dim = dim
         self.num_blocks = num_blocks
 
     def encode_input(self, digit_id: torch.Tensor, clue_pin: torch.Tensor) -> torch.Tensor:
@@ -102,9 +108,9 @@ class MixerNextStateModel(nn.Module):
         cell_embed: torch.Tensor | None = None,
     ) -> ModelOutput:
         b = input_embed.size(0)
-        h = cell_embed.reshape(b, SEQ_LEN, self.width) if cell_embed is not None else 0
+        h = cell_embed.reshape(b, SEQ_LEN, self.dim) if cell_embed is not None else 0
         x = h + input_embed
         for block in self.blocks:
             x = block(x)
         logits = self.unembed(x).view(b, GRID_SIZE, GRID_SIZE, NUM_VOCAB)
-        return ModelOutput(cell_embed=x.view(b, GRID_SIZE, GRID_SIZE, self.width), logits=logits)
+        return ModelOutput(cell_embed=x.view(b, GRID_SIZE, GRID_SIZE, self.dim), logits=logits)

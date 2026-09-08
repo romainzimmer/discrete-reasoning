@@ -34,7 +34,7 @@ DEFAULT_RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
 
 REQUIRED_RUN_ARGS = (
     "model",
-    "width",
+    "dim",
     "num_blocks",
     "train_inner_iters",
     "train_outer_iters",
@@ -380,7 +380,7 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-2, help="L2 regularization on weights only (not bias)")
     parser.add_argument("--max-grad-norm", type=float, default=0.0, help="Clip gradient global norm (0 disables)")
-    parser.add_argument("--width", type=int, default=512, help="Embedding / mixer channel width (D)")
+    parser.add_argument("--dim", type=int, default=512, help="Embedding / mixer hidden dimension D")
     parser.add_argument("--num-blocks", type=int, default=2, help="Mixer blocks per inner step (layers in M)")
     parser.add_argument(
         "--train-inner-iters",
@@ -493,7 +493,7 @@ def main() -> None:
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, **loader_kwargs)
 
     args.model = "mixer-looped"
-    model = MixerNextStateModel(width=args.width, num_blocks=args.num_blocks).to(device)
+    model = MixerNextStateModel(dim=args.dim, num_blocks=args.num_blocks).to(device)
     decay_params, no_decay_params = [], []
     for name, param in model.named_parameters():
         if not param.requires_grad:

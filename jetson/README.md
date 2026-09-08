@@ -12,7 +12,7 @@ cd jetson
 
 Training uses a **mixer-looped** model: embed the grid → looped MLP-Mixer updates `h_{t+1} = M(h_t + P)` → unembed to 10-way logits.
 
-- **`--width`**: embedding / mixer channel size (D)
+- **`--dim`**: embedding / mixer hidden dimension (D); SwiGLU channel-mix width `H = round(4·D·2/3)` rounded to 256 (TRM)
 - **`--num-blocks`**: mixer layers inside each inner step (depth of M)
 - **`--train-inner-iters` / `--eval-inner-iters`**: looped `h + P` steps per outer argmax commit
 - **`--train-outer-iters` / `--eval-outer-iters`**: outer argmax commits per puzzle
@@ -60,13 +60,13 @@ Main run (mixer-looped; reduce `--batch-size` if OOM):
 ```bash
 docker compose run --rm train \
   --epochs 150 \
-  --width 512 \
+  --dim 512 \
   --num-blocks 1 \
-  --batch-size 256 \
+  --batch-size 128 \
   --num-workers 3 \
   --val-samples 1024 \
   --train-init noisy-gt \
-  --max-samples 52224 \
+  --max-samples 13824 \
   --train-inner-iters 10 \
   --train-outer-iters 1 \
   --eval-inner-iters 10 \
@@ -79,7 +79,7 @@ Quick test (easy sudoku, ~1k train cap):
 ```bash
 docker compose run --rm train \
   --epochs 5 \
-  --width 512 \
+  --dim 512 \
   --num-blocks 1 \
   --train-inner-iters 2 \
   --train-outer-iters 1 \

@@ -6,7 +6,7 @@ Experiments on [sapientinc/sudoku-extreme](https://huggingface.co/datasets/sapie
 
 **Mixer-looped** sudoku solver: embed grid digits → looped MLP-Mixer (`h_{t+1} = M(h_t + P)`) → unembed to logits.
 
-- **`--width`**: embedding / mixer dimension (D)
+- **`--dim`**: embedding / mixer hidden dimension (D); channel-mix uses SwiGLU with `H = round(4·D·2/3)` aligned to 256 (TRM default)
 - **`--num-blocks`**: mixer layers per inner step (not a flat FFN stack)
 - **`--train-inner-iters`**: looped inner steps per outer commit during training
 - **`--train-outer-iters`**: argmax commits per puzzle during training
@@ -33,7 +33,7 @@ Writes `data/train.csv` and `data/test.csv` (~798 MB).
 uv run train \
   --min-rating 0 --max-rating 0 \
   --max-samples 100 --epochs 30 \
-  --width 512 --num-blocks 1 \
+  --dim 512 --num-blocks 1 \
   --train-inner-iters 5 --train-outer-iters 10 \
   --eval-inner-iters 5 --eval-outer-iters 10 \
   --batch-size 8

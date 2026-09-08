@@ -395,8 +395,8 @@
     }
 
     function formatHiddenSizes(args) {
-      if (args.width != null && args.num_blocks != null) {
-        return `${args.width} x${args.num_blocks}`;
+      if (args.dim != null && args.num_blocks != null) {
+        return `${args.dim} x${args.num_blocks}`;
       }
       return "—";
     }
