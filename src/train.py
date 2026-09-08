@@ -13,14 +13,17 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from augment import AugmentConfig
-from dataset import PuzzleDataset, collate_puzzles, filter_rows
+from dataset import PuzzleDataset, PuzzleTensorCache, collate_puzzles, filter_rows
 from model import MixerNextStateModel
 from rollout import (
     DEFAULT_INNER_ITERS,
-    DEFAULT_OUTER_ITERS,
+    DEFAULT_MAX_OUTER_ITERS,
+    BatchSlotState,
     RolloutConfig,
     RolloutResult,
-    rollout_train_batch,
+    refill_done_slots,
+    rollout_eval_batch,
+    rollout_train_step,
 )
 from viz_data import (
     load_manifest,
@@ -35,10 +38,12 @@ REQUIRED_RUN_ARGS = (
     "model",
     "dim",
     "num_blocks",
-    "train_inner_iters",
-    "train_outer_iters",
-    "eval_inner_iters",
-    "eval_outer_iters",
+    "inner_iters",
+    "train_max_outer_iters",
+    "eval_max_outer_iters",
+    "train_batch_size",
+    "batches_per_epoch",
+    "halt_loss_weight",
     "num_workers",
     "min_rating",
     "max_rating",
@@ -47,14 +52,14 @@ REQUIRED_RUN_ARGS = (
 
 def build_rollout_config(
     *,
-    train_init: str,
     inner_iters: int,
-    outer_iters: int,
+    max_outer_iters: int,
+    halt_threshold: float = 0.5,
 ) -> RolloutConfig:
     return RolloutConfig(
-        train_init=train_init,
         inner_iters=inner_iters,
-        outer_iters=outer_iters,
+        max_outer_iters=max_outer_iters,
+        halt_threshold=halt_threshold,
     )
 
 
@@ -67,6 +72,11 @@ class TrainEpochStats:
     loss: float
     cell_acc: float = 0.0
     puzzle_acc: float = 0.0
+    halt_acc: float = 0.0
+    avg_outer_iters: float = 0.0
+    halt_rate: float = 0.0
+    refills_per_step: float = 0.0
+    completions_per_epoch: int = 0
 
 
 @dataclass
@@ -74,6 +84,9 @@ class EpochStats:
     loss: float
     cell_acc: float = 0.0
     puzzle_acc: float = 0.0
+    halt_acc: float = 0.0
+    avg_outer_iters: float = 0.0
+    halt_rate: float = 0.0
 
 
 def make_run_dir(runs_dir: Path) -> Path:
@@ -187,30 +200,109 @@ def save_checkpoint(
     torch.save(payload, path)
 
 
-def _accumulate_loss(
+def _accumulate_step_metrics(
     result: RolloutResult,
-    answer: torch.Tensor,
+    state: BatchSlotState,
     *,
     total_loss: float,
-    n: int,
-) -> tuple[float, int]:
-    batch_size = answer.size(0) if answer.dim() == 3 else 1
-    total_loss += result.loss.item() * batch_size
-    n += batch_size
-    return total_loss, n
+    halt_correct: int,
+    halt_total: int,
+    correct_cells: int,
+    total_cells: int,
+    correct_puzzles_done: int,
+    puzzles_done: int,
+    outer_iters_done: float,
+    halted_done: int,
+    refills: int,
+    n_steps: int,
+) -> tuple[float, int, int, int, int, int, int, float, int, int, int]:
+    b = state.digit_id.size(0)
+    total_loss += result.loss.item()
+    n_steps += 1
+    refills += int(result.done.sum().item())
+
+    assert result.pred is not None
+    assert result.halt_target is not None
+    assert result.halted is not None
+    assert result.done is not None
+
+    predict_halt = result.halted
+    halt_correct += int((predict_halt == (result.halt_target > 0.5)).sum().item())
+    halt_total += b
+
+    mask = state.clues == 0
+    correct_cells += int((result.pred[mask] == state.answer[mask]).sum().item())
+    total_cells += int(mask.sum().item())
+
+    if result.done.any():
+        done = result.done
+        correct_puzzles_done += int((result.pred[done] == state.answer[done]).all(dim=(-2, -1)).sum().item())
+        puzzles_done += int(done.sum().item())
+        outer_iters_done += float(state.outer_count[done].sum().item())
+        halted_done += int((result.halted[done]).sum().item())
+
+    return (
+        total_loss,
+        halt_correct,
+        halt_total,
+        correct_cells,
+        total_cells,
+        correct_puzzles_done,
+        puzzles_done,
+        outer_iters_done,
+        halted_done,
+        refills,
+        n_steps,
+    )
 
 
-def _accumulate_pred_stats(
-    result: RolloutResult,
+def _train_stats_from_accumulators(
+    *,
+    total_loss: float,
+    n_steps: int,
+    halt_correct: int,
+    halt_total: int,
+    correct_cells: int,
+    total_cells: int,
+    correct_puzzles_done: int,
+    puzzles_done: int,
+    outer_iters_done: float,
+    halted_done: int,
+    refills: int,
+) -> TrainEpochStats:
+    if n_steps == 0:
+        return TrainEpochStats(loss=0.0)
+    return TrainEpochStats(
+        loss=total_loss / n_steps,
+        cell_acc=correct_cells / total_cells if total_cells else 0.0,
+        puzzle_acc=correct_puzzles_done / puzzles_done if puzzles_done else 0.0,
+        halt_acc=halt_correct / halt_total if halt_total else 0.0,
+        avg_outer_iters=outer_iters_done / puzzles_done if puzzles_done else 0.0,
+        halt_rate=halted_done / puzzles_done if puzzles_done else 0.0,
+        refills_per_step=refills / n_steps,
+        completions_per_epoch=puzzles_done,
+    )
+
+
+def _accumulate_eval_stats(
+    result,
     answer: torch.Tensor,
     clues: torch.Tensor,
     *,
+    total_loss: float,
+    halt_correct: int,
+    halt_total: int,
     correct_cells: int,
     total_cells: int,
     correct_puzzles: int,
-) -> tuple[int, int, int]:
-    if result.pred is None:
-        return correct_cells, total_cells, correct_puzzles
+    outer_iters_sum: float,
+    halted_count: int,
+    n: int,
+) -> tuple[float, int, int, int, int, int, float, int, int]:
+    batch_size = answer.size(0) if answer.dim() == 3 else 1
+    total_loss += result.loss.item() * batch_size
+    n += batch_size
+
     preds = result.pred.unsqueeze(0) if result.pred.dim() == 2 else result.pred
     answers = answer.unsqueeze(0) if answer.dim() == 2 else answer
     clue_rows = clues.unsqueeze(0) if clues.dim() == 2 else clues
@@ -218,57 +310,38 @@ def _accumulate_pred_stats(
     correct_cells += int((preds[mask] == answers[mask]).sum().item())
     total_cells += int(mask.sum().item())
     correct_puzzles += int((preds == answers).all(dim=(-2, -1)).sum().item())
-    return correct_cells, total_cells, correct_puzzles
 
+    halt_correct += result.halt_correct_rounds
+    halt_total += result.halt_total_rounds
 
-def _accumulate_eval_stats(
-    result: RolloutResult,
-    answer: torch.Tensor,
-    clues: torch.Tensor,
-    *,
-    total_loss: float,
-    correct_cells: int,
-    total_cells: int,
-    correct_puzzles: int,
-    n: int,
-) -> tuple[float, int, int, int, int]:
-    batch_size = answer.size(0) if answer.dim() == 3 else 1
-    total_loss += result.loss.item() * batch_size
-    n += batch_size
-    correct_cells, total_cells, correct_puzzles = _accumulate_pred_stats(
-        result,
-        answer,
-        clues,
-        correct_cells=correct_cells,
-        total_cells=total_cells,
-        correct_puzzles=correct_puzzles,
-    )
-    return total_loss, correct_cells, total_cells, correct_puzzles, n
+    outer_steps = result.outer_steps.unsqueeze(0) if result.outer_steps.dim() == 0 else result.outer_steps
+    outer_iters_sum += float(outer_steps.sum().item())
+    halted = result.halted.unsqueeze(0) if result.halted.dim() == 0 else result.halted
+    halted_count += int(halted.sum().item())
 
-
-def _train_stats_from_accumulators(
-    *,
-    total_loss: float,
-    n: int,
-    correct_cells: int = 0,
-    total_cells: int = 0,
-    correct_puzzles: int = 0,
-) -> TrainEpochStats:
-    if n == 0:
-        return TrainEpochStats(loss=0.0)
-    return TrainEpochStats(
-        loss=total_loss / n,
-        cell_acc=correct_cells / total_cells if total_cells else 0.0,
-        puzzle_acc=correct_puzzles / n,
+    return (
+        total_loss,
+        halt_correct,
+        halt_total,
+        correct_cells,
+        total_cells,
+        correct_puzzles,
+        outer_iters_sum,
+        halted_count,
+        n,
     )
 
 
 def _stats_from_accumulators(
     *,
     total_loss: float,
+    halt_correct: int,
+    halt_total: int,
     correct_cells: int,
     total_cells: int,
     correct_puzzles: int,
+    outer_iters_sum: float,
+    halted_count: int,
     n: int,
 ) -> EpochStats:
     if n == 0:
@@ -277,70 +350,101 @@ def _stats_from_accumulators(
         loss=total_loss / n,
         cell_acc=correct_cells / total_cells if total_cells else 0.0,
         puzzle_acc=correct_puzzles / n,
+        halt_acc=halt_correct / halt_total if halt_total else 0.0,
+        avg_outer_iters=outer_iters_sum / n,
+        halt_rate=halted_count / n,
     )
 
 
 def train_epoch(
     model: MixerNextStateModel,
-    loader: DataLoader,
+    state: BatchSlotState,
+    cache: PuzzleTensorCache,
     optimizer: torch.optim.Optimizer,
-    device: torch.device,
     *,
     epoch: int,
     epochs: int,
     rollout_config: RolloutConfig,
-    batch_size: int,
-    use_cuda: bool,
+    batches_per_epoch: int,
+    halt_loss_weight: float,
+    refill_generator: torch.Generator,
 ) -> TrainEpochStats:
     model.train()
     total_loss = 0.0
+    halt_correct = 0
+    halt_total = 0
     correct_cells = 0
     total_cells = 0
-    correct_puzzles = 0
-    n = 0
+    correct_puzzles_done = 0
+    puzzles_done = 0
+    outer_iters_done = 0.0
+    halted_done = 0
+    refills = 0
+    n_steps = 0
+
     progress = tqdm(
-        loader,
+        range(batches_per_epoch),
         desc=_epoch_desc(epoch, epochs, "train"),
         leave=False,
-        unit="batch" if batch_size > 1 else "puzzle",
+        unit="step",
     )
-    for batch in progress:
-        batch = {k: v.to(device, non_blocking=use_cuda) for k, v in batch.items()}
+    for _ in progress:
         optimizer.zero_grad(set_to_none=True)
-        result = rollout_train_batch(
+        result = rollout_train_step(
             model,
-            batch["clues"],
-            batch["answer"],
-            config=rollout_config,
-            compute_pred=True,
-            accumulate_grad=True,
+            state,
+            rollout_config,
+            halt_loss_weight=halt_loss_weight,
         )
         optimizer.step()
-        total_loss, n = _accumulate_loss(
+        (
+            total_loss,
+            halt_correct,
+            halt_total,
+            correct_cells,
+            total_cells,
+            correct_puzzles_done,
+            puzzles_done,
+            outer_iters_done,
+            halted_done,
+            refills,
+            n_steps,
+        ) = _accumulate_step_metrics(
             result,
-            batch["answer"],
+            state,
             total_loss=total_loss,
-            n=n,
-        )
-        correct_cells, total_cells, correct_puzzles = _accumulate_pred_stats(
-            result,
-            batch["answer"],
-            batch["clues"],
+            halt_correct=halt_correct,
+            halt_total=halt_total,
             correct_cells=correct_cells,
             total_cells=total_cells,
-            correct_puzzles=correct_puzzles,
+            correct_puzzles_done=correct_puzzles_done,
+            puzzles_done=puzzles_done,
+            outer_iters_done=outer_iters_done,
+            halted_done=halted_done,
+            refills=refills,
+            n_steps=n_steps,
         )
-        postfix = {"loss": f"{total_loss / n:.4f}"}
+        assert result.done is not None
+        refill_done_slots(state, result.done, cache, generator=refill_generator)
+        postfix = {"loss": f"{total_loss / n_steps:.4f}"}
+        if halt_total:
+            postfix["halt_acc"] = f"{halt_correct / halt_total:.4f}"
         if total_cells:
             postfix["cell_acc"] = f"{correct_cells / total_cells:.4f}"
         progress.set_postfix(**postfix, refresh=False)
     progress.close()
     return _train_stats_from_accumulators(
         total_loss=total_loss,
-        n=n,
+        n_steps=n_steps,
+        halt_correct=halt_correct,
+        halt_total=halt_total,
         correct_cells=correct_cells,
         total_cells=total_cells,
-        correct_puzzles=correct_puzzles,
+        correct_puzzles_done=correct_puzzles_done,
+        puzzles_done=puzzles_done,
+        outer_iters_done=outer_iters_done,
+        halted_done=halted_done,
+        refills=refills,
     )
 
 
@@ -360,6 +464,7 @@ def measure_split(
     epochs: int,
     phase: str,
     rollout_config: RolloutConfig,
+    halt_loss_weight: float,
     use_cuda: bool,
     seed: int | None = None,
 ) -> EpochStats:
@@ -367,9 +472,13 @@ def measure_split(
         _seed_all(seed)
     model.eval()
     total_loss = 0.0
+    halt_correct = 0
+    halt_total = 0
     correct_cells = 0
     total_cells = 0
     correct_puzzles = 0
+    outer_iters_sum = 0.0
+    halted_count = 0
     n = 0
     progress = tqdm(
         loader,
@@ -379,20 +488,35 @@ def measure_split(
     )
     for batch in progress:
         batch = {k: v.to(device, non_blocking=use_cuda) for k, v in batch.items()}
-        result = rollout_train_batch(
+        result = rollout_eval_batch(
             model,
             batch["clues"],
             batch["answer"],
             config=rollout_config,
+            halt_loss_weight=halt_loss_weight,
         )
-        total_loss, correct_cells, total_cells, correct_puzzles, n = _accumulate_eval_stats(
+        (
+            total_loss,
+            halt_correct,
+            halt_total,
+            correct_cells,
+            total_cells,
+            correct_puzzles,
+            outer_iters_sum,
+            halted_count,
+            n,
+        ) = _accumulate_eval_stats(
             result,
             batch["answer"],
             batch["clues"],
             total_loss=total_loss,
+            halt_correct=halt_correct,
+            halt_total=halt_total,
             correct_cells=correct_cells,
             total_cells=total_cells,
             correct_puzzles=correct_puzzles,
+            outer_iters_sum=outer_iters_sum,
+            halted_count=halted_count,
             n=n,
         )
         progress.set_postfix(
@@ -403,9 +527,13 @@ def measure_split(
     progress.close()
     return _stats_from_accumulators(
         total_loss=total_loss,
+        halt_correct=halt_correct,
+        halt_total=halt_total,
         correct_cells=correct_cells,
         total_cells=total_cells,
         correct_puzzles=correct_puzzles,
+        outer_iters_sum=outer_iters_sum,
+        halted_count=halted_count,
         n=n,
     )
 
@@ -418,30 +546,36 @@ def main() -> None:
     parser.add_argument("--dim", type=int, default=512, help="Embedding / mixer hidden dimension D")
     parser.add_argument("--num-blocks", type=int, default=2, help="Mixer blocks per inner step (layers in M)")
     parser.add_argument(
-        "--train-inner-iters",
+        "--inner-iters",
         type=int,
         default=DEFAULT_INNER_ITERS,
-        help="Inner steps per outer loop during training (full BPTT; loss on every outer loop)",
+        help="Looped inner steps per outer round (train, val, test, viz)",
     )
     parser.add_argument(
-        "--train-outer-iters",
+        "--train-max-outer-iters",
         type=int,
-        default=DEFAULT_OUTER_ITERS,
-        help="Argmax commits per puzzle during training",
+        default=DEFAULT_MAX_OUTER_ITERS,
+        help="Max outer commits per puzzle before refill (training)",
     )
     parser.add_argument(
-        "--eval-inner-iters",
+        "--eval-max-outer-iters",
         type=int,
-        default=DEFAULT_INNER_ITERS,
-        help="Inner steps per outer loop during val/viz/test",
+        default=DEFAULT_MAX_OUTER_ITERS,
+        help="Max outer commits per puzzle during val/viz/test",
+    )
+    parser.add_argument("--train-batch-size", type=int, default=8, help="Parallel GPU slots (B)")
+    parser.add_argument(
+        "--batches-per-epoch",
+        type=int,
+        default=100,
+        help="Optimizer steps (= outer rounds) per epoch",
     )
     parser.add_argument(
-        "--eval-outer-iters",
-        type=int,
-        default=DEFAULT_OUTER_ITERS,
-        help="Argmax commits per puzzle during val/viz/test",
+        "--halt-loss-weight",
+        type=float,
+        default=1.0,
+        help="Weight for halt BCE loss",
     )
-    parser.add_argument("--train-batch-size", type=int, default=8, help="Training batch size")
     parser.add_argument(
         "--val-batch-size",
         type=int,
@@ -464,12 +598,6 @@ def main() -> None:
         type=int,
         default=None,
         help="Batch size for viz trajectory rollouts (default: train batch size)",
-    )
-    parser.add_argument(
-        "--train-init",
-        choices=["clues", "noisy-gt", "zero-gt", "empty-noisy-gt"],
-        default="empty-noisy-gt",
-        help="clues: clues only; noisy-gt: flip non-clue cells (p~U[0,1]); zero-gt: zero non-clue cells (p~U[0,1]); empty-noisy-gt: corrupt non-clue cells (p_corrupt~U[0,1]), then empty vs noisy among corrupt (p_empty~U[0,1])",
     )
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -519,7 +647,6 @@ def main() -> None:
         "pin_memory": use_cuda,
         "num_workers": args.num_workers,
     }
-    train_loader = DataLoader(train_ds, batch_size=args.train_batch_size, shuffle=True, **loader_kwargs)
     val_batch_size = args.val_batch_size or args.train_batch_size
     val_loader = DataLoader(val_ds, batch_size=val_batch_size, **loader_kwargs)
 
@@ -540,22 +667,15 @@ def main() -> None:
         ],
         lr=args.lr,
     )
-    train_init = {
-        "clues": "clues",
-        "noisy-gt": "noisy_gt",
-        "zero-gt": "zero_gt",
-        "empty-noisy-gt": "empty_noisy_gt",
-    }[args.train_init]
     rollout_config = build_rollout_config(
-        train_init=train_init,
-        inner_iters=args.train_inner_iters,
-        outer_iters=args.train_outer_iters,
+        inner_iters=args.inner_iters,
+        max_outer_iters=args.train_max_outer_iters,
     )
     eval_rollout_config = build_rollout_config(
-        train_init="clues",
-        inner_iters=args.eval_inner_iters,
-        outer_iters=args.eval_outer_iters,
+        inner_iters=args.inner_iters,
+        max_outer_iters=args.eval_max_outer_iters,
     )
+    refill_generator = torch.Generator(device="cpu").manual_seed(args.seed)
     best_val_cell_acc = -1.0
     manifest = load_manifest(run_dir)
     viz_rows = {
@@ -563,18 +683,30 @@ def main() -> None:
         "validation": val_ds.rows[: args.viz_samples],
     }
 
+    state: BatchSlotState | None = None
+
     for epoch in range(1, args.epochs + 1):
         train_ds.set_epoch(epoch)
+        cache = PuzzleTensorCache.build(train_ds, pin_memory=use_cuda)
+        if state is None:
+            state = BatchSlotState.seed(
+                cache,
+                args.train_batch_size,
+                device,
+                generator=refill_generator,
+            )
+
         train = train_epoch(
             model,
-            train_loader,
+            state,
+            cache,
             optimizer,
-            device,
             epoch=epoch,
             epochs=args.epochs,
             rollout_config=rollout_config,
-            batch_size=args.train_batch_size,
-            use_cuda=use_cuda,
+            batches_per_epoch=args.batches_per_epoch,
+            halt_loss_weight=args.halt_loss_weight,
+            refill_generator=refill_generator,
         )
         val = measure_split(
             model,
@@ -584,6 +716,7 @@ def main() -> None:
             epochs=args.epochs,
             phase="val",
             rollout_config=eval_rollout_config,
+            halt_loss_weight=args.halt_loss_weight,
             use_cuda=use_cuda,
             seed=args.seed,
         )
@@ -624,13 +757,15 @@ def main() -> None:
             args=args,
         )
         train_msg = (
-            f"train_loss={train.loss:.4f} "
-            f"train_cell_acc={train.cell_acc:.4f} train_puzzle_acc={train.puzzle_acc:.4f}"
+            f"train_loss={train.loss:.4f} train_halt_acc={train.halt_acc:.4f} "
+            f"train_cell_acc={train.cell_acc:.4f} train_puzzle_acc={train.puzzle_acc:.4f} "
+            f"train_halt_rate={train.halt_rate:.4f} train_refills={train.refills_per_step:.2f}"
         )
         print(
             f"epoch {epoch}/{args.epochs}: "
             f"{train_msg} val_loss={val.loss:.4f} "
-            f"val_cell_acc={val.cell_acc:.4f} val_puzzle_acc={val.puzzle_acc:.4f}",
+            f"val_cell_acc={val.cell_acc:.4f} val_puzzle_acc={val.puzzle_acc:.4f} "
+            f"val_halt_rate={val.halt_rate:.4f}",
             flush=True,
         )
 

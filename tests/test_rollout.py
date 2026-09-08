@@ -5,28 +5,24 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from dataset import PuzzleDataset, PuzzleTensorCache
 from model import MixerNextStateModel
 from rollout import (
     DEFAULT_INNER_ITERS,
-    DEFAULT_OUTER_ITERS,
+    DEFAULT_MAX_OUTER_ITERS,
+    BatchSlotState,
     RolloutConfig,
-    RolloutState,
     _ClueContext,
-    _compute_rollout_loss_batch_mean,
-    _empty_noisy_ground_truth_initial,
-    _discard_rollout_graph,
-    _inner_loop,
-    _init_rollout_state,
-    _noisy_ground_truth_initial,
+    _halt_target,
     _outer_commit,
-    _rollout_loop,
-    _training_rollout_inputs,
-    _zeroed_ground_truth_initial,
+    _predict_halt,
     predict_grid,
-    rollout_train_batch,
+    refill_done_slots,
+    rollout_eval_batch,
     rollout_solve,
     rollout_trace,
     rollout_trace_batch,
+    rollout_train_step,
 )
 
 
@@ -54,232 +50,228 @@ def _tiny_batch():
     return clues, answer
 
 
+def _make_state(clues: torch.Tensor, answer: torch.Tensor) -> BatchSlotState:
+    clue_pin = clues > 0
+    return BatchSlotState(
+        digit_id=clues.clone(),
+        clues=clues,
+        answer=answer,
+        clue_pin=clue_pin,
+        outer_count=torch.zeros(clues.size(0), dtype=torch.long),
+    )
+
+
+def _tiny_cache() -> PuzzleTensorCache:
+    clues, answer = _tiny_batch()
+    clues2 = clues.clone()
+    clues2[0, 0, 2] = 4
+    return PuzzleTensorCache(clues=torch.cat([clues, clues2]), answers=torch.cat([answer, answer]))
+
+
 def test_rollout_config_validation():
     with pytest.raises(ValueError):
         RolloutConfig(inner_iters=0)
     with pytest.raises(ValueError):
-        RolloutConfig(outer_iters=0)
+        RolloutConfig(max_outer_iters=0)
 
 
-def test_rollout_fixed_steps_and_clues_pinned():
+def test_defaults():
+    config = RolloutConfig()
+    assert config.inner_iters == DEFAULT_INNER_ITERS
+    assert config.max_outer_iters == DEFAULT_MAX_OUTER_ITERS
+
+
+def test_one_outer_per_step():
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    clues, answer = _tiny_batch()
+    state = _make_state(clues, answer)
+    config = RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    count_before = state.outer_count.item()
+    rollout_train_step(model, state, config)
+    assert state.outer_count.item() == count_before + 1
+
+
+def test_state_persists_across_steps():
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    clues, answer = _tiny_batch()
+    state = _make_state(clues, answer)
+    config = RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    digit_before = state.digit_id.clone()
+    rollout_train_step(model, state, config)
+    assert not torch.equal(state.digit_id, digit_before)
+    assert state.outer_count.item() == 1
+
+
+def test_state_persists_across_epochs():
+    cache = _tiny_cache()
+    gen = torch.Generator().manual_seed(0)
+    state = BatchSlotState.seed(cache, batch_size=1, device=torch.device("cpu"), generator=gen)
+    config = RolloutConfig(inner_iters=2, max_outer_iters=100, halt_threshold=1.1)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    rollout_train_step(model, state, config)
+    assert state.outer_count.item() == 1
+    digit_after_step = state.digit_id.clone()
+    # epoch boundary: new cache object, no re-seed
+    PuzzleTensorCache(clues=cache.clues, answers=cache.answers)
+    rollout_train_step(model, state, config)
+    assert state.outer_count.item() == 2
+    assert not torch.equal(state.digit_id, digit_after_step)
+
+
+def test_always_clues_init():
+    cache = _tiny_cache()
+    gen = torch.Generator().manual_seed(0)
+    state = BatchSlotState.seed(cache, batch_size=2, device=torch.device("cpu"), generator=gen)
+    assert torch.equal(state.digit_id, state.clues)
+
+
+def test_halt_target_matches_grid():
+    clues, answer = _tiny_batch()
+    logits = torch.zeros(1, 9, 9, 10)
+    pre_commit = predict_grid(logits, clues)
+    target = _halt_target(pre_commit, answer)
+    assert target.item() == float((pre_commit == answer).all())
+
+
+def test_oracle_halt_model_continues():
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    clues, answer = _tiny_batch()
+    state = _make_state(clues, answer)
+    config = RolloutConfig(inner_iters=2, max_outer_iters=10)
+    with patch("rollout._predict_halt", return_value=torch.zeros(1, dtype=torch.bool)):
+        with patch("rollout._halt_target", return_value=torch.ones(1)):
+            result = rollout_train_step(model, state, config)
+            assert result.done is not None
+            assert not result.done.any()
+
+
+def test_refill_after_done():
+    cache = _tiny_cache()
+    gen = torch.Generator().manual_seed(0)
+    state = BatchSlotState.seed(cache, batch_size=1, device=torch.device("cpu"), generator=gen)
+    original_clues = state.clues.clone()
+    done = torch.tensor([True])
+    refill_done_slots(state, done, cache, generator=gen)
+    assert not torch.equal(state.clues, original_clues)
+    assert state.outer_count.item() == 0
+    assert torch.equal(state.digit_id, state.clues)
+
+
+def test_max_outer_forces_refill():
+    cache = _tiny_cache()
+    gen = torch.Generator().manual_seed(0)
+    state = BatchSlotState.seed(cache, batch_size=1, device=torch.device("cpu"), generator=gen)
+    state.outer_count[0] = 9
+    config = RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    result = rollout_train_step(model, state, config)
+    assert result.done is not None
+    assert result.done.all()
+    original_clues = state.clues.clone()
+    refill_done_slots(state, result.done, cache, generator=gen)
+    assert not torch.equal(state.clues, original_clues)
+
+
+def test_halt_stops_eval_early():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _tiny_batch()
-    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=4)
-    with torch.inference_mode():
-        result = rollout_train_batch(
-            model,
-            clues[0],
-            answer[0],
-            config=config,
-        )
-    assert result.pred is not None
-    assert torch.all(result.pred[clues[0] > 0] == clues[0][clues[0] > 0])
+    config = RolloutConfig(inner_iters=2, max_outer_iters=100, halt_threshold=0.5)
+    with patch("rollout._predict_halt", side_effect=[torch.tensor([False]), torch.tensor([True])]):
+        result = rollout_eval_batch(model, clues, answer, config=config)
+    assert result.outer_steps.item() == 2
+
+
+def test_eval_compact_scatter():
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.eval()
+    clues, answer = _tiny_batch()
+    clues2 = clues.clone()
+    clues2[0, 0, 2] = 4
+    clues_b = torch.cat([clues, clues2], dim=0)
+    answer_b = torch.cat([answer, answer], dim=0)
+    config = RolloutConfig(inner_iters=2, max_outer_iters=3)
+    result = rollout_eval_batch(model, clues_b, answer_b, config=config)
+    assert result.pred.shape == (2, 9, 9)
+    assert result.outer_steps.shape == (2,)
+
+
+def test_no_grad_across_steps():
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    clues, answer = _tiny_batch()
+    state = _make_state(clues, answer)
+    config = RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    rollout_train_step(model, state, config)
+    assert not state.digit_id.requires_grad
+
+
+def test_cell_embed_not_persisted():
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    clues, answer = _tiny_batch()
+    state = _make_state(clues, answer)
+    config = RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    rollout_train_step(model, state, config)
+    # state has no cell_embed field — fresh encode each step
+    assert not hasattr(state, "cell_embed")
+
+
+def test_seeded_refill():
+    cache = _tiny_cache()
+    gen1 = torch.Generator().manual_seed(42)
+    gen2 = torch.Generator().manual_seed(42)
+    state1 = BatchSlotState.seed(cache, batch_size=1, device=torch.device("cpu"), generator=gen1)
+    state2 = BatchSlotState.seed(cache, batch_size=1, device=torch.device("cpu"), generator=gen2)
+    done = torch.tensor([True])
+    refill_done_slots(state1, done, cache, generator=gen1)
+    refill_done_slots(state2, done, cache, generator=gen2)
+    assert torch.equal(state1.clues, state2.clues)
+
+
+def test_eval_pred_matches_rollout_solve():
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.eval()
+    clues, answer = _tiny_batch()
+    config = RolloutConfig(inner_iters=2, max_outer_iters=3)
+    result = rollout_eval_batch(model, clues, answer, config=config)
+    for idx in range(clues.size(0)):
+        assert torch.equal(result.pred[idx], rollout_solve(model, clues[idx], config=config))
 
 
 def test_inner_loop_grad():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     clues, answer = _tiny_batch()
-    config = RolloutConfig(train_init="clues", inner_iters=3, outer_iters=1)
-    result = rollout_train_batch(
-        model,
-        clues,
-        answer,
-        config=config,
-        compute_pred=False,
-        accumulate_grad=True,
-    )
+    state = _make_state(clues, answer)
+    config = RolloutConfig(inner_iters=3, max_outer_iters=10, halt_threshold=1.1)
+    result = rollout_train_step(model, state, config)
     assert result.loss.item() > 0
     assert _first_param(model).grad is not None
     assert _first_param(model).grad.abs().sum().item() > 0
 
 
-def test_outer_detach_isolates_blocks():
+def test_rollout_fixed_steps_and_clues_pinned():
     model = MixerNextStateModel(dim=32, num_blocks=1)
-    model.train()
+    model.eval()
     clues, answer = _tiny_batch()
-    ctx = _ClueContext.from_rollout_clues(clues)
-    state = _init_rollout_state(clues)
-    state.input_embed = model.encode_input(state.digit_id, state.clue_pin)
-
-    logits_o1 = _inner_loop(model, state, inner_iters=2)
-    digit_o1 = _outer_commit(logits_o1, ctx)
-    assert not digit_o1.requires_grad
-
-    state_o2 = RolloutState(
-        digit_id=digit_o1,
-        clue_pin=state.clue_pin,
-        input_embed=model.encode_input(digit_o1, state.clue_pin),
-        cell_embed=None,
-    )
-    cell_leaf = state_o2.input_embed.detach().requires_grad_(True)
-    state_o2.cell_embed = cell_leaf
-    logits_o2 = _inner_loop(model, state_o2, inner_iters=2, with_grad=True)
-    logits_o2.sum().backward()
-    assert cell_leaf.grad is not None
-    assert state.input_embed.grad is None
-
-
-def test_per_outer_backward_matches_rollout_train_batch():
-    model = MixerNextStateModel(dim=32, num_blocks=1)
-    model.train()
-    clues, answer = _tiny_batch()
-    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=3)
-    ctx = _ClueContext.from_rollout_clues(clues)
-    state = _init_rollout_state(clues)
-
-    torch.manual_seed(0)
-    result_acc = rollout_train_batch(
-        model,
-        clues,
-        answer,
-        config=config,
-        compute_pred=False,
-        accumulate_grad=True,
-    )
-    grad_acc = _first_param(model).grad.clone()
-
-    model.zero_grad(set_to_none=True)
-    torch.manual_seed(0)
-    _, _, direct_loss = _rollout_loop(
-        model,
-        state,
-        clues,
-        ctx,
-        config.inner_iters,
-        config.outer_iters,
-        answer=answer,
-        accumulate_grad=True,
-    )
-    grad_direct = _first_param(model).grad
-
-    assert result_acc.loss.item() == pytest.approx(direct_loss.item())
-    assert torch.allclose(grad_acc, grad_direct, rtol=1e-5, atol=1e-5)
-
-
-def test_each_outer_backward_accumulates_param_grad():
-    model = MixerNextStateModel(dim=32, num_blocks=1)
-    model.train()
-    clues, answer = _tiny_batch()
-    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=3)
-    ctx = _ClueContext.from_rollout_clues(clues)
-
-    per_outer_grads: list[torch.Tensor] = []
-    state = _init_rollout_state(clues)
-    for _ in range(config.outer_iters):
-        model.zero_grad(set_to_none=True)
-        state.input_embed = model.encode_input(state.digit_id, state.clue_pin)
-        state.cell_embed = None
-        logits = _inner_loop(model, state, config.inner_iters, with_grad=True)
-        outer_loss = _compute_rollout_loss_batch_mean(
-            logits,
-            clue_pin=ctx.clue_pin,
-            answer=answer,
-        )
-        (outer_loss / config.outer_iters).backward()
-        per_outer_grads.append(_first_param(model).grad.clone())
-        logits = logits.detach()
-        _discard_rollout_graph(state)
-        state.digit_id = _outer_commit(logits, ctx)
-
-    model.zero_grad(set_to_none=True)
-    torch.manual_seed(0)
-    rollout_train_batch(
-        model,
-        clues,
-        answer,
-        config=config,
-        compute_pred=False,
-        accumulate_grad=True,
-    )
-    assert _first_param(model).grad is not None
-    expected = torch.zeros_like(_first_param(model))
-    for grad in per_outer_grads:
-        expected += grad
-    assert torch.allclose(_first_param(model).grad, expected, rtol=1e-5, atol=1e-5)
-
-
-def test_outer_commits_block_cross_outer_grad():
-    model = MixerNextStateModel(dim=32, num_blocks=1)
-    model.train()
-    clues, answer = _tiny_batch()
-    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=3)
-    ctx = _ClueContext.from_rollout_clues(clues)
-    state = _init_rollout_state(clues)
-    state.input_embed = model.encode_input(state.digit_id, state.clue_pin)
-
-    logits_o1 = _inner_loop(model, state, inner_iters=2, with_grad=True)
-    loss_o1 = _compute_rollout_loss_batch_mean(
-        logits_o1,
-        clue_pin=ctx.clue_pin,
-        answer=answer,
-    )
-    loss_o1.backward()
-    grad_after_o1 = _first_param(model).grad.clone()
-    assert grad_after_o1 is not None
-
-    model.zero_grad(set_to_none=True)
-    digit_o1 = _outer_commit(logits_o1, ctx)
-    state.digit_id = digit_o1
-    state.input_embed = model.encode_input(state.digit_id, state.clue_pin)
-    state.cell_embed = None
-
-    logits_o2 = _inner_loop(model, state, inner_iters=2, with_grad=True)
-    loss_o2 = _compute_rollout_loss_batch_mean(
-        logits_o2,
-        clue_pin=ctx.clue_pin,
-        answer=answer,
-    )
-    loss_o2.backward()
-    assert _first_param(model).grad is not None
-    assert not torch.allclose(_first_param(model).grad, grad_after_o1)
-
-
-def test_training_supervises_every_outer_loop():
-    model = MixerNextStateModel(dim=32, num_blocks=1)
-    model.train()
-    clues, answer = _tiny_batch()
-    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=3)
-    ctx = _ClueContext.from_rollout_clues(clues)
-    state = _init_rollout_state(clues)
-
-    per_outer_losses: list[float] = []
-    for _ in range(config.outer_iters):
-        state.input_embed = model.encode_input(state.digit_id, state.clue_pin)
-        state.cell_embed = None
-        logits = _inner_loop(model, state, config.inner_iters, with_grad=False)
-        per_outer_losses.append(
-            _compute_rollout_loss_batch_mean(
-                logits,
-                clue_pin=ctx.clue_pin,
-                answer=answer,
-            ).item()
-        )
-        state.digit_id = _outer_commit(logits, ctx)
-        state.cell_embed = None
-
-    torch.manual_seed(0)
-    result = rollout_train_batch(
-        model,
-        clues,
-        answer,
-        config=config,
-        compute_pred=False,
-        accumulate_grad=True,
-    )
-    assert result.loss.item() == pytest.approx(sum(per_outer_losses) / len(per_outer_losses))
-    assert len(per_outer_losses) == config.outer_iters
+    config = RolloutConfig(inner_iters=2, max_outer_iters=4)
+    result = rollout_eval_batch(model, clues, answer, config=config)
+    assert torch.all(result.pred[clues > 0] == clues[clues > 0])
 
 
 def test_reproducible_eval():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _tiny_batch()
-    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=3)
-
-    r1 = rollout_train_batch(model, clues, answer, config=config)
-    r2 = rollout_train_batch(model, clues, answer, config=config)
+    config = RolloutConfig(inner_iters=2, max_outer_iters=3)
+    r1 = rollout_eval_batch(model, clues, answer, config=config)
+    r2 = rollout_eval_batch(model, clues, answer, config=config)
     assert torch.equal(r1.pred, r2.pred)
     assert r1.loss.item() == r2.loss.item()
 
@@ -288,10 +280,10 @@ def test_rollout_trace_frame_count():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, _ = _tiny_batch()
-    outer_iters = 3
-    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=outer_iters)
+    max_outer_iters = 3
+    config = RolloutConfig(inner_iters=2, max_outer_iters=max_outer_iters)
     grids = rollout_trace(model, clues, config=config)
-    assert len(grids) == outer_iters + 1
+    assert 2 <= len(grids) <= max_outer_iters + 1
 
 
 def test_rollout_trace_batch_matches_single():
@@ -301,11 +293,7 @@ def test_rollout_trace_batch_matches_single():
     clues2 = clues.clone()
     clues2[0, 0, 2] = 4
     clues_b = torch.cat([clues, clues2], dim=0)
-    config = RolloutConfig(
-        train_init="clues",
-        inner_iters=2,
-        outer_iters=3,
-    )
+    config = RolloutConfig(inner_iters=2, max_outer_iters=3)
     torch.manual_seed(0)
     single_first = rollout_trace(model, clues, config=config)
     torch.manual_seed(0)
@@ -313,44 +301,15 @@ def test_rollout_trace_batch_matches_single():
     torch.manual_seed(0)
     batched = rollout_trace_batch(model, clues_b, config=config)
     assert len(batched) == 2
-    assert batched[0] == single_first
-    assert batched[1] == single_second
-
-
-def test_inner_one_outer_n_commits():
-    model = MixerNextStateModel(dim=32, num_blocks=1)
-    model.eval()
-    clues, answer = _tiny_batch()
-    ctx = _ClueContext.from_rollout_clues(clues)
-    state = _init_rollout_state(clues)
-    outer_iters = 4
-    _, state_grids, losses = _rollout_loop(
-        model,
-        state,
-        clues,
-        ctx,
-        inner_iters=1,
-        outer_iters=outer_iters,
-        answer=answer,
-        collect_state_grids=True,
-    )
-    assert state_grids is not None
-    assert len(state_grids) == outer_iters
-    assert losses.ndim == 0
-
-
-def test_defaults():
-    config = RolloutConfig()
-    assert config.inner_iters == DEFAULT_INNER_ITERS
-    assert config.outer_iters == DEFAULT_OUTER_ITERS
+    assert batched[0].states == single_first
+    assert batched[1].states == single_second
 
 
 def test_outer_commit_matches_full_decode():
     clues = torch.zeros(9, 9, dtype=torch.long)
-    ctx = _ClueContext.from_rollout_clues(clues.unsqueeze(0))
-    digit_id = clues.clone()
+    ctx = _ClueContext.from_clues(clues.unsqueeze(0))
     logits = torch.zeros(1, 9, 9, 10)
-    logits[0, 0, 0, 5] = 10.0  # predict digit 5
+    logits[0, 0, 0, 5] = 10.0
     committed = _outer_commit(logits, ctx)
     assert committed[0, 0, 0] == 5
 
@@ -369,258 +328,78 @@ def test_predict_grid_pins_clues():
     assert pred[2, 2] == 7
 
 
-def _simple_clue_answer():
-    clues = torch.zeros(9, 9, dtype=torch.long)
-    clues[0, 0] = 5
-    answer = torch.full((9, 9), 4)
-    answer[0, 0] = 5
-    return clues, answer
+def test_predict_halt_threshold():
+    halt_logit = torch.tensor([10.0, -10.0])
+    assert torch.equal(_predict_halt(halt_logit, halt_threshold=0.5), torch.tensor([True, False]))
 
 
-def test_noisy_gt_pins_clues_and_fills_non_clue():
-    clues, answer = _simple_clue_answer()
-    torch.manual_seed(0)
-    initial = _noisy_ground_truth_initial(answer, clues)
-    assert initial[0, 0] == 5
-    non_clue = clues == 0
-    assert torch.all((initial[non_clue] >= 0) & (initial[non_clue] <= 9))
-
-
-def test_noisy_gt_flip_can_sample_empty():
-    clues, answer = _simple_clue_answer()
-    with (
-        patch("rollout.torch.rand", return_value=torch.tensor(1.0)),
-        patch(
-            "rollout.torch.rand_like",
-            return_value=torch.full_like(clues, 0.5, dtype=torch.float32),
-        ),
-        patch("rollout.torch.randint", return_value=torch.full_like(answer, 6)),
-    ):
-        initial = _noisy_ground_truth_initial(answer, clues)
-    non_clue = clues == 0
-    assert torch.any(initial[non_clue] == 0)
-
-
-def test_noisy_gt_flips_change_digit_when_p_one():
-    clues, answer = _simple_clue_answer()
-    with (
-        patch("rollout.torch.rand", return_value=torch.tensor(1.0)),
-        patch(
-            "rollout.torch.rand_like",
-            return_value=torch.full_like(clues, 0.5, dtype=torch.float32),
-        ),
-    ):
-        initial = _noisy_ground_truth_initial(answer, clues)
-    non_clue = clues == 0
-    assert torch.all(initial[non_clue] != answer[non_clue])
-
-
-def test_noisy_gt_keeps_answer_when_p_zero():
-    clues, answer = _simple_clue_answer()
-    with patch("rollout.torch.rand", return_value=torch.tensor(0.0)):
-        initial = _noisy_ground_truth_initial(answer, clues)
-    assert torch.equal(initial, answer)
-
-
-def test_zero_gt_zeros_non_clue_when_p_one():
-    clues, answer = _simple_clue_answer()
-    with (
-        patch("rollout.torch.rand", return_value=torch.tensor(1.0)),
-        patch(
-            "rollout.torch.rand_like",
-            return_value=torch.full_like(clues, 0.5, dtype=torch.float32),
-        ),
-    ):
-        initial = _zeroed_ground_truth_initial(answer, clues)
-    assert initial[0, 0] == 5
-    non_clue = clues == 0
-    assert torch.all(initial[non_clue] == 0)
-
-
-def test_zero_gt_keeps_answer_when_p_zero():
-    clues, answer = _simple_clue_answer()
-    with patch("rollout.torch.rand", return_value=torch.tensor(0.0)):
-        initial = _zeroed_ground_truth_initial(answer, clues)
-    assert torch.equal(initial, answer)
-
-
-def test_empty_noisy_gt_pins_clues():
-    clues, answer = _simple_clue_answer()
-    torch.manual_seed(0)
-    initial = _empty_noisy_ground_truth_initial(answer, clues)
-    assert initial[0, 0] == 5
-
-
-def test_empty_noisy_gt_zeros_corrupt_when_p_corrupt_and_p_empty_one():
-    clues, answer = _simple_clue_answer()
-    with (
-        patch("rollout.torch.rand", side_effect=[torch.tensor(1.0), torch.tensor(1.0)]),
-        patch(
-            "rollout.torch.rand_like",
-            return_value=torch.full_like(clues, 0.5, dtype=torch.float32),
-        ),
-    ):
-        initial = _empty_noisy_ground_truth_initial(answer, clues)
-    non_clue = clues == 0
-    assert torch.all(initial[non_clue] == 0)
-
-
-def test_empty_noisy_gt_noises_corrupt_when_p_corrupt_one_p_empty_zero():
-    clues, answer = _simple_clue_answer()
-    with (
-        patch("rollout.torch.rand", side_effect=[torch.tensor(1.0), torch.tensor(0.0)]),
-        patch(
-            "rollout.torch.rand_like",
-            return_value=torch.full_like(clues, 0.5, dtype=torch.float32),
-        ),
-    ):
-        initial = _empty_noisy_ground_truth_initial(answer, clues)
-    non_clue = clues == 0
-    assert torch.all(initial[non_clue] != answer[non_clue])
-
-
-def test_empty_noisy_gt_keeps_answer_when_p_corrupt_zero():
-    clues, answer = _simple_clue_answer()
-    with patch("rollout.torch.rand", side_effect=[torch.tensor(0.0), torch.tensor(1.0)]):
-        initial = _empty_noisy_ground_truth_initial(answer, clues)
-    assert torch.equal(initial, answer)
-
-
-@pytest.mark.parametrize("train_init", ["clues", "noisy_gt", "zero_gt", "empty_noisy_gt"])
-def test_training_rollout_inputs_dispatch(train_init: str):
-    clues, answer = _simple_clue_answer()
-    config = RolloutConfig(train_init=train_init)
-    initial_digit_id, rollout_clues, clue_pin = _training_rollout_inputs(config, answer, clues)
-
-    if train_init == "clues":
-        assert initial_digit_id is None
-        assert torch.equal(rollout_clues, clues)
-        assert torch.equal(clue_pin, clues > 0)
-    elif train_init == "noisy_gt":
-        assert initial_digit_id is not None
-        assert torch.equal(rollout_clues, clues)
-        assert torch.equal(clue_pin, clues > 0)
-        assert torch.all(initial_digit_id[clues > 0] == clues[clues > 0])
-    elif train_init == "zero_gt":
-        assert initial_digit_id is not None
-        assert torch.equal(rollout_clues, clues)
-        assert torch.equal(clue_pin, clues > 0)
-    elif train_init == "empty_noisy_gt":
-        assert initial_digit_id is not None
-        assert torch.equal(rollout_clues, clues)
-        assert torch.equal(clue_pin, clues > 0)
-        assert torch.all(initial_digit_id[clues > 0] == clues[clues > 0])
-
-
-def test_eval_skips_train_init():
+def test_eval_halt_acc_counts_all_rounds():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _tiny_batch()
-    clues_config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=2)
-    noisy_config = RolloutConfig(train_init="noisy_gt", inner_iters=2, outer_iters=2)
-    torch.manual_seed(0)
-    clues_result = rollout_train_batch(model, clues, answer, config=clues_config)
-    torch.manual_seed(0)
-    noisy_result = rollout_train_batch(model, clues, answer, config=noisy_config)
-    assert clues_result.loss.item() == noisy_result.loss.item()
-    assert torch.equal(clues_result.pred, noisy_result.pred)
+    max_outer = 4
+    config = RolloutConfig(inner_iters=2, max_outer_iters=max_outer, halt_threshold=1.1)
+    result = rollout_eval_batch(model, clues, answer, config=config)
+    assert result.halt_total_rounds == max_outer
+    assert result.outer_steps.item() == max_outer
 
 
-@pytest.mark.parametrize("train_init", ["noisy_gt", "zero_gt", "empty_noisy_gt"])
-def test_train_init_training_rollout(train_init: str):
-    model = MixerNextStateModel(dim=32, num_blocks=1)
-    model.train()
-    clues, answer = _tiny_batch()
-    config = RolloutConfig(train_init=train_init, inner_iters=2, outer_iters=1)
-    torch.manual_seed(0)
-    result = rollout_train_batch(
-        model,
-        clues,
-        answer,
-        config=config,
-        compute_pred=False,
-        accumulate_grad=True,
-    )
-    assert result.loss.item() > 0
-    assert _first_param(model).grad is not None
-
-
-def test_noisy_gt_differs_from_clues_initial():
-    clues, answer = _simple_clue_answer()
-    with (
-        patch("rollout.torch.rand", return_value=torch.tensor(1.0)),
-        patch(
-            "rollout.torch.rand_like",
-            return_value=torch.full_like(clues, 0.5, dtype=torch.float32),
-        ),
-    ):
-        noisy_initial, _, _ = _training_rollout_inputs(
-            RolloutConfig(train_init="noisy_gt"),
-            answer,
-            clues,
-        )
-    clues_initial, _, _ = _training_rollout_inputs(
-        RolloutConfig(train_init="clues"),
-        answer,
-        clues,
-    )
-    assert clues_initial is None
-    assert noisy_initial is not None
-    assert not torch.equal(noisy_initial, clues)
-
-
-def test_accumulate_grad_required_in_training():
-    model = MixerNextStateModel(dim=32, num_blocks=1)
-    model.train()
-    clues, answer = _tiny_batch()
-    with pytest.raises(ValueError, match="accumulate_grad"):
-        rollout_train_batch(
-            model,
-            clues,
-            answer,
-            config=RolloutConfig(
-                train_init="clues",
-                inner_iters=2,
-                outer_iters=1,
-            ),
-        )
-
-
-@pytest.mark.parametrize("train_init", ["clues", "noisy_gt", "zero_gt", "empty_noisy_gt"])
-def test_all_train_inits_with_multiple_outer_iters(train_init: str):
-    model = MixerNextStateModel(dim=32, num_blocks=1)
-    model.train()
-    clues, answer = _tiny_batch()
-    config = RolloutConfig(train_init=train_init, inner_iters=2, outer_iters=3)
-    torch.manual_seed(0)
-    result = rollout_train_batch(
-        model,
-        clues,
-        answer,
-        config=config,
-        compute_pred=False,
-        accumulate_grad=True,
-    )
-    assert result.loss.item() > 0
-    assert _first_param(model).grad is not None
-
-
-@pytest.mark.parametrize("outer_iters", [1, 3])
-def test_eval_pred_matches_rollout_solve(outer_iters: int):
+def test_trace_includes_halt_metadata():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
-    clues, answer = _tiny_batch()
-    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=outer_iters)
-    result = rollout_train_batch(model, clues, answer, config=config)
-    assert result.pred is not None
-    for idx in range(clues.size(0)):
-        assert torch.equal(result.pred[idx], rollout_solve(model, clues[idx], config=config))
+    clues, _ = _tiny_batch()
+    config = RolloutConfig(inner_iters=2, max_outer_iters=3)
+    trace = rollout_trace_batch(model, clues, config=config)[0]
+    assert len(trace.states) == trace.outer_steps + 1
+    assert isinstance(trace.halted, bool)
+    halt_logit = torch.tensor([10.0, -10.0])
+    assert torch.equal(_predict_halt(halt_logit, halt_threshold=0.5), torch.tensor([True, False]))
 
 
 def test_build_rollout_config():
     from train import build_rollout_config
 
-    config = build_rollout_config(train_init="noisy_gt", inner_iters=2, outer_iters=3)
-    assert config.train_init == "noisy_gt"
+    config = build_rollout_config(inner_iters=2, max_outer_iters=3)
     assert config.inner_iters == 2
-    assert config.outer_iters == 3
+    assert config.max_outer_iters == 3
+
+
+def test_train_metrics_done_only_puzzle_acc():
+    from train import _accumulate_step_metrics
+
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    clues, answer = _tiny_batch()
+    state = _make_state(clues, answer)
+    result = rollout_train_step(
+        model,
+        state,
+        RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1),
+    )
+    result.done = torch.tensor([False])
+    (
+        _,
+        _,
+        _,
+        _,
+        _,
+        correct_puzzles_done,
+        puzzles_done,
+        *_,
+    ) = _accumulate_step_metrics(
+        result,
+        state,
+        total_loss=0.0,
+        halt_correct=0,
+        halt_total=0,
+        correct_cells=0,
+        total_cells=0,
+        correct_puzzles_done=0,
+        puzzles_done=0,
+        outer_iters_done=0.0,
+        halted_done=0,
+        refills=0,
+        n_steps=0,
+    )
+    assert puzzles_done == 0
+    assert correct_puzzles_done == 0

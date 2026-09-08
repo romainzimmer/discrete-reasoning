@@ -271,6 +271,46 @@
         <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
       </div>
     </div>
+    <div class="chart">
+      <div class="chart-title">Halt accuracy</div>
+      <canvas id="haltAccChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend" id="haltAccLegend">
+        <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
+      </div>
+    </div>
+    <div class="chart">
+      <div class="chart-title">Halt rate</div>
+      <canvas id="haltRateChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend" id="haltRateLegend">
+        <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
+      </div>
+    </div>
+    <div class="chart">
+      <div class="chart-title">Avg outer iters</div>
+      <canvas id="avgOuterItersChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend" id="avgOuterItersLegend">
+        <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
+      </div>
+    </div>
+    <div class="chart">
+      <div class="chart-title">Refills per step (train)</div>
+      <canvas id="refillsChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend" id="refillsLegend">
+        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
+      </div>
+    </div>
+    <div class="chart">
+      <div class="chart-title">Completions per epoch (train)</div>
+      <canvas id="completionsChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend" id="completionsLegend">
+        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
+      </div>
+    </div>
     </div>
   </div>
 
@@ -410,14 +450,17 @@
         { label: "Learning rate", value: args.lr },
         { label: "Weight decay", value: args.weight_decay ?? 0 },
         { label: "Mixer (D × blocks)", value: formatHiddenSizes(args) },
+        { label: "Inner iters", value: args.inner_iters ?? "?" },
         {
-          label: "Train inner / outer iters",
-          value: `${args.train_inner_iters ?? "?"} / ${args.train_outer_iters ?? "?"}`,
+          label: "Train max outer iters",
+          value: args.train_max_outer_iters ?? "?",
         },
         {
-          label: "Eval inner / outer iters",
-          value: `${args.eval_inner_iters ?? "?"} / ${args.eval_outer_iters ?? "?"}`,
+          label: "Eval max outer iters",
+          value: args.eval_max_outer_iters ?? "?",
         },
+        { label: "Batch size / steps per epoch", value: `${args.train_batch_size ?? "?"} / ${args.batches_per_epoch ?? "?"}` },
+        { label: "Halt loss weight", value: args.halt_loss_weight ?? "—" },
         { label: "Epochs", value: args.epochs },
       ];
       const totalSeconds = totalRunSeconds(history);
@@ -620,6 +663,33 @@
       el.innerHTML = items.join("");
     }
 
+    function trainOnlySeries(epochs, metricKey) {
+      const trainKey = `train_${metricKey}`;
+      if (!epochs.some(e => e[trainKey] != null)) return [];
+      return [{ color: "#2563eb", values: epochs.map(e => e[trainKey] ?? null) }];
+    }
+
+    function renderTrainOnlyLegend(elementId, epochs, metricKey) {
+      const el = document.getElementById(elementId);
+      const trainKey = `train_${metricKey}`;
+      if (!epochs.some(e => e[trainKey] != null)) {
+        el.innerHTML = "";
+        return;
+      }
+      el.innerHTML = '<div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>';
+    }
+
+    function renderPctChart(canvasId, legendId, epochs, metricKey) {
+      const pct = v => `${(Number(v) * 100).toFixed(0)}%`;
+      drawSeries(document.getElementById(canvasId), accMetricSeries(epochs, metricKey), {
+        yMin: 0,
+        yMax: 1,
+        xLabels: epochs.map(e => e.epoch),
+        formatY: pct,
+      });
+      renderAccLegend(legendId, epochs, metricKey);
+    }
+
     function renderTestSummary() {
       const gridEl = document.getElementById("testSummary");
       const noteEl = document.getElementById("testSectionNote");
@@ -644,9 +714,12 @@
         { label: "Loss", value: test.loss, format: v => Number(v).toFixed(4) },
         { label: "Cell accuracy", value: test.cell_acc, format: pct },
         { label: "Puzzle accuracy", value: test.puzzle_acc, format: pct },
+        { label: "Halt accuracy", value: test.halt_acc, format: pct },
+        { label: "Halt rate", value: test.halt_rate, format: pct },
+        { label: "Avg outer iters", value: test.avg_outer_iters, format: v => Number(v).toFixed(2) },
         {
-          label: "Inner / outer iters",
-          value: `${test.inner_iters ?? "?"}/${test.outer_iters ?? "?"}`,
+          label: "Inner / max outer iters",
+          value: `${test.inner_iters ?? "?"}/${test.max_outer_iters ?? "?"}`,
         },
       ]
         .filter(stat => stat.value != null)
@@ -679,6 +752,26 @@
         xLabels,
         formatY: pct,
       });
+      renderPctChart("haltAccChart", "haltAccLegend", epochs, "halt_acc");
+      renderPctChart("haltRateChart", "haltRateLegend", epochs, "halt_rate");
+      drawSeries(document.getElementById("avgOuterItersChart"), accMetricSeries(epochs, "avg_outer_iters"), {
+        yMin: 0,
+        xLabels,
+        formatY: v => Number(v).toFixed(1),
+      });
+      renderAccLegend("avgOuterItersLegend", epochs, "avg_outer_iters");
+      drawSeries(document.getElementById("refillsChart"), trainOnlySeries(epochs, "refills_per_step"), {
+        yMin: 0,
+        xLabels,
+        formatY: v => Number(v).toFixed(2),
+      });
+      renderTrainOnlyLegend("refillsLegend", epochs, "refills_per_step");
+      drawSeries(document.getElementById("completionsChart"), trainOnlySeries(epochs, "completions_per_epoch"), {
+        yMin: 0,
+        xLabels,
+        formatY: v => Number(v).toFixed(0),
+      });
+      renderTrainOnlyLegend("completionsLegend", epochs, "completions_per_epoch");
       renderAccLegend("cellAccLegend", epochs, "cell_acc");
       renderAccLegend("puzzleAccLegend", epochs, "puzzle_acc");
       renderTestSummary();
@@ -717,16 +810,21 @@
       const answer = parseGrid(trajectory.answer);
       const grid = parseGrid(trajectory.states[stepIdx]);
       const meta = trajectory.meta || {};
+      const outerSteps = meta.outer_steps ?? Math.max(0, trajectory.states.length - 1);
+      const maxOuter = meta.max_outer_iters ?? metrics?.args?.eval_max_outer_iters ?? "?";
+      const stopLabel = meta.halted === true ? "halt" : meta.halted === false ? "max" : null;
 
       metaEl.textContent = [
         meta.rating !== undefined ? `rating ${meta.rating}` : null,
         meta.source ? `source ${meta.source}` : null,
-        `rollout steps ${trajectory.states.length - 1}`,
+        stopLabel
+          ? `outer steps ${outerSteps} / ${maxOuter} (${stopLabel})`
+          : `outer steps ${outerSteps} / ${maxOuter}`,
       ].filter(Boolean).join(" · ");
 
       slider.max = trajectory.states.length - 1;
       slider.value = stepIdx;
-      stepIndexEl.textContent = `step ${stepIdx} / ${trajectory.states.length - 1}`;
+      stepIndexEl.textContent = `step ${stepIdx} / ${outerSteps}`;
 
       document.getElementById("stepFirst").disabled = stepIdx === 0;
       document.getElementById("stepPrev").disabled = stepIdx === 0;

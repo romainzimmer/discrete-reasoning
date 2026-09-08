@@ -80,6 +80,7 @@ class UnembedHead(nn.Module):
 class ModelOutput:
     cell_embed: torch.Tensor
     logits: torch.Tensor
+    halt_logit: torch.Tensor  # (B,)
 
 
 class MixerNextStateModel(nn.Module):
@@ -95,6 +96,7 @@ class MixerNextStateModel(nn.Module):
         self.encoder = StateEncoder(dim)
         self.blocks = nn.ModuleList(MixerBlock(SEQ_LEN, dim) for _ in range(num_blocks))
         self.unembed = UnembedHead(dim)
+        self.halt_head = nn.Linear(dim, 1, bias=True)
         self.dim = dim
 
     def encode_input(self, digit_id: torch.Tensor, clue_pin: torch.Tensor) -> torch.Tensor:
@@ -111,5 +113,7 @@ class MixerNextStateModel(nn.Module):
         x = h + input_embed
         for block in self.blocks:
             x = block(x)
+        cell_embed = x.view(b, GRID_SIZE, GRID_SIZE, self.dim)
         logits = self.unembed(x).view(b, GRID_SIZE, GRID_SIZE, NUM_VOCAB)
-        return ModelOutput(cell_embed=x.view(b, GRID_SIZE, GRID_SIZE, self.dim), logits=logits)
+        halt_logit = self.halt_head(x.mean(dim=1)).squeeze(-1)
+        return ModelOutput(cell_embed=cell_embed, logits=logits, halt_logit=halt_logit)

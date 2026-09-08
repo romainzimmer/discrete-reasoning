@@ -46,22 +46,26 @@ def save_trajectory(run_dir: Path, split: str, epoch: int, puzzle_index: int, pa
 
 def _trajectory_payload(
     row: dict,
-    states: list[str],
+    trace,
     *,
     split: str,
     epoch: int,
     puzzle_index: int,
+    max_outer_iters: int,
 ) -> dict:
     return {
         "question": row["question"],
         "answer": row["answer"],
-        "states": states,
+        "states": trace.states,
         "meta": {
             "split": split,
             "epoch": epoch,
             "puzzle_index": puzzle_index,
             "source": row["source"],
             "rating": row["rating"],
+            "outer_steps": trace.outer_steps,
+            "max_outer_iters": max_outer_iters,
+            "halted": trace.halted,
         },
     }
 
@@ -92,7 +96,7 @@ def save_epoch_trajectories(
             clues,
             config=rollout_config,
         )
-        for offset, (row, states) in enumerate(zip(chunk, trajectories)):
+        for offset, (row, trace) in enumerate(zip(chunk, trajectories)):
             puzzle_index = start + offset
             save_trajectory(
                 run_dir,
@@ -101,10 +105,11 @@ def save_epoch_trajectories(
                 puzzle_index,
                 _trajectory_payload(
                     row,
-                    states,
+                    trace,
                     split=split,
                     epoch=epoch,
                     puzzle_index=puzzle_index,
+                    max_outer_iters=rollout_config.max_outer_iters,
                 ),
             )
             puzzle_indices.append(puzzle_index)

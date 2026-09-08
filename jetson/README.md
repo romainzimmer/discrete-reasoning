@@ -14,12 +14,13 @@ Training uses a **mixer-looped** model: embed the grid → looped MLP-Mixer upda
 
 - **`--dim`**: embedding / mixer hidden dimension (D); SwiGLU channel-mix width `H = round(4·D·2/3)` rounded to 256 (TRM)
 - **`--num-blocks`**: mixer layers inside each inner step (depth of M)
-- **`--train-inner-iters` / `--eval-inner-iters`**: looped `h + P` steps per outer argmax commit
-- **`--train-outer-iters` / `--eval-outer-iters`**: outer argmax commits per puzzle
+- **`--inner-iters`**: looped `h + P` steps per outer argmax commit (train, val, test, viz)
+- **`--train-max-outer-iters` / `--eval-max-outer-iters`**: max outer commits per puzzle (halt or cap)
+- **`--batches-per-epoch`**: optimizer steps per epoch (one outer round per step)
 
 Runs save `args.model: mixer-looped` in `history.json`. **Old checkpoints from before this migration cannot be loaded by `eval`.**
 
-The mixer keeps a recurrent `cell_embed` per batch; it uses more GPU memory than the old flat model. If you hit OOM, lower `--train-batch-size` (512 may need tuning on Jetson).
+Training keeps a persistent grid state per batch slot (`digit_id`, `outer_count`); `cell_embed` is re-encoded each step. If you hit OOM, lower `--train-batch-size` (512 may need tuning on Jetson).
 
 ## Build
 
@@ -58,7 +59,7 @@ Writes `data/train.csv` and `data/test.csv` (~798 MB).
 Main run (mixer-looped; reduce `--train-batch-size` if OOM):
 
 ```bash
-docker compose run --rm train   --epochs 150   --dim 256   --num-blocks 2   --train-batch-size 128 --val-batch-size 256   --num-workers 3   --val-samples 1024   --train-init empty-noisy-gt  --max-samples 13824   --train-inner-iters 3   --train-outer-iters 1   --eval-inner-iters 3   --eval-outer-iters 30 --weight-decay 1
+docker compose run --rm train   --epochs 150   --dim 256   --num-blocks 2   --train-batch-size 128 --val-batch-size 256   --num-workers 3   --val-samples 1024   --max-samples 13824   --inner-iters 3   --train-max-outer-iters 30   --eval-max-outer-iters 30 --weight-decay 1 --batches-per-epoch 100
 ```
 
 Quick test (easy sudoku, ~1k train cap):
@@ -68,17 +69,16 @@ docker compose run --rm train \
   --epochs 5 \
   --dim 512 \
   --num-blocks 2 \
-  --train-inner-iters 2 \
-  --train-outer-iters 1 \
-  --eval-inner-iters 2 \
-  --eval-outer-iters 3 \
+  --inner-iters 2 \
+  --train-max-outer-iters 3 \
+  --eval-max-outer-iters 3 \
   --train-batch-size 64 \
+  --batches-per-epoch 50 \
   --num-workers 1 \
   --max-samples 6464 \
   --min-rating 0 \
   --max-rating 0 \
-  --val-samples 64 \
-  --train-init empty-noisy-gt
+  --val-samples 64
 ```
 
 Checkpoints and trajectories are written to `runs/`. Trajectory JSON is unchanged: one frame per **outer** commit in `states[]`.

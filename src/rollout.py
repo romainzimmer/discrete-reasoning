@@ -1,33 +1,30 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Literal
 
 import torch
 import torch.nn.functional as F
 
 from data import tensor_to_string
+from dataset import PuzzleTensorCache
 from encoding import decode_logits, target_mask
 from model import MixerNextStateModel
 
-TrainInitMode = Literal["clues", "noisy_gt", "zero_gt", "empty_noisy_gt"]
-
 DEFAULT_INNER_ITERS = 5
-DEFAULT_OUTER_ITERS = 10
+DEFAULT_MAX_OUTER_ITERS = 10
 
 
 @dataclass(frozen=True)
 class RolloutConfig:
-    train_init: TrainInitMode = "empty_noisy_gt"
     inner_iters: int = DEFAULT_INNER_ITERS
-    outer_iters: int = DEFAULT_OUTER_ITERS
+    max_outer_iters: int = DEFAULT_MAX_OUTER_ITERS
+    halt_threshold: float = 0.5
 
     def __post_init__(self) -> None:
         if self.inner_iters < 1:
             raise ValueError("inner_iters must be >= 1")
-        if self.outer_iters < 1:
-            raise ValueError("outer_iters must be >= 1")
+        if self.max_outer_iters < 1:
+            raise ValueError("max_outer_iters must be >= 1")
 
 
 @dataclass(frozen=True)
@@ -36,103 +33,68 @@ class _ClueContext:
     clue_pin: torch.Tensor
 
     @classmethod
-    def from_rollout_clues(cls, rollout_clues: torch.Tensor) -> _ClueContext:
-        clue_pin = rollout_clues > 0
-        return cls(clue_digit_ids=rollout_clues, clue_pin=clue_pin)
+    def from_clues(cls, clues: torch.Tensor) -> _ClueContext:
+        clue_pin = clues > 0
+        return cls(clue_digit_ids=clues, clue_pin=clue_pin)
 
 
 @dataclass
-class RolloutState:
+class BatchSlotState:
     digit_id: torch.Tensor
+    clues: torch.Tensor
+    answer: torch.Tensor
     clue_pin: torch.Tensor
-    input_embed: torch.Tensor | None = None
-    cell_embed: torch.Tensor | None = None
+    outer_count: torch.Tensor
+
+    @classmethod
+    def seed(
+        cls,
+        cache: PuzzleTensorCache,
+        batch_size: int,
+        device: torch.device,
+        *,
+        generator: torch.Generator,
+    ) -> BatchSlotState:
+        idx = torch.randint(cache.clues.size(0), (batch_size,), generator=generator)
+        clues = cache.clues[idx].to(device, non_blocking=True)
+        answers = cache.answers[idx].to(device, non_blocking=True)
+        clue_pin = clues > 0
+        return cls(
+            digit_id=clues.clone(),
+            clues=clues,
+            answer=answers,
+            clue_pin=clue_pin,
+            outer_count=torch.zeros(batch_size, dtype=torch.long, device=device),
+        )
 
 
 @dataclass
 class RolloutResult:
     loss: torch.Tensor
     pred: torch.Tensor | None = None
+    done: torch.Tensor | None = None
+    halted: torch.Tensor | None = None
+    halt_target: torch.Tensor | None = None
+    halt_logit: torch.Tensor | None = None
 
 
-def _pin_clue_digits(digit_id: torch.Tensor, ctx: _ClueContext) -> torch.Tensor:
-    return torch.where(ctx.clue_pin, ctx.clue_digit_ids, digit_id)
+@dataclass
+class EvalRolloutResult:
+    pred: torch.Tensor
+    outer_steps: torch.Tensor
+    halted: torch.Tensor
+    loss: torch.Tensor
+    halt_target: torch.Tensor
+    halt_logit: torch.Tensor
+    halt_correct_rounds: int
+    halt_total_rounds: int
 
 
-def _noise_probability(answer: torch.Tensor) -> torch.Tensor:
-    if answer.dim() == 2:
-        return torch.rand((), device=answer.device)
-    return torch.rand(answer.size(0), 1, 1, device=answer.device)
-
-
-def _random_zero_non_clue_grid(
-    answer: torch.Tensor,
-    clues: torch.Tensor,
-) -> torch.Tensor:
-    """Zero each non-clue cell with prob p~U[0,1]; keep clue cells unchanged."""
-    non_clue = clues == 0
-    p = _noise_probability(answer)
-    zero_out = (torch.rand_like(clues, dtype=torch.float32) < p) & non_clue
-    return torch.where(zero_out, torch.zeros_like(answer), answer)
-
-
-def _noisy_ground_truth_initial(
-    answer: torch.Tensor,
-    clues: torch.Tensor,
-) -> torch.Tensor:
-    """Start from ground truth; flip non-clue cells to another digit in 0-9 with prob p~U[0,1]."""
-    non_clue = clues == 0
-    p = _noise_probability(answer)
-    flip_cell = (torch.rand_like(clues, dtype=torch.float32) < p) & non_clue
-    offset = torch.randint(1, 10, answer.shape, device=answer.device)
-    flipped = (answer + offset) % 10
-    corrupted = torch.where(flip_cell, flipped, answer)
-    return _pin_clue_digits(corrupted, _ClueContext.from_rollout_clues(clues))
-
-
-def _zeroed_ground_truth_initial(
-    answer: torch.Tensor,
-    clues: torch.Tensor,
-) -> torch.Tensor:
-    """Start from ground truth; zero each non-clue cell with prob p~U[0,1]."""
-    zeroed = _random_zero_non_clue_grid(answer, clues)
-    return _pin_clue_digits(zeroed, _ClueContext.from_rollout_clues(clues))
-
-
-def _empty_noisy_ground_truth_initial(
-    answer: torch.Tensor,
-    clues: torch.Tensor,
-) -> torch.Tensor:
-    """Corrupt non-clue cells with p_corrupt~U[0,1]; corrupted cells become empty or noisy with p_empty~U[0,1]."""
-    non_clue = clues == 0
-    p_corrupt = _noise_probability(answer)
-    p_empty = _noise_probability(answer)
-    corrupt = (torch.rand_like(clues, dtype=torch.float32) < p_corrupt) & non_clue
-    empty = (torch.rand_like(clues, dtype=torch.float32) < p_empty) & corrupt
-    noisy = corrupt & ~empty
-    offset = torch.randint(1, 10, answer.shape, device=answer.device)
-    flipped = (answer + offset) % 10
-    digit_id = answer.clone()
-    digit_id = torch.where(empty, torch.zeros_like(answer), digit_id)
-    digit_id = torch.where(noisy, flipped, digit_id)
-    return _pin_clue_digits(digit_id, _ClueContext.from_rollout_clues(clues))
-
-
-def _training_rollout_inputs(
-    config: RolloutConfig,
-    answer: torch.Tensor,
-    clues: torch.Tensor,
-) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
-    initial_digit_id = None
-    rollout_clues = clues
-    clue_pin = clues > 0
-    if config.train_init == "noisy_gt":
-        initial_digit_id = _noisy_ground_truth_initial(answer, clues)
-    elif config.train_init == "zero_gt":
-        initial_digit_id = _zeroed_ground_truth_initial(answer, clues)
-    elif config.train_init == "empty_noisy_gt":
-        initial_digit_id = _empty_noisy_ground_truth_initial(answer, clues)
-    return initial_digit_id, rollout_clues, clue_pin
+@dataclass
+class PuzzleTrace:
+    states: list[str]
+    halted: bool
+    outer_steps: int
 
 
 def predict_grid(logits: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
@@ -147,13 +109,20 @@ def _ensure_batched(grid: torch.Tensor) -> tuple[torch.Tensor, bool]:
     return grid, True
 
 
-def _compute_rollout_loss_batch_mean(
+def _halt_target(pre_commit: torch.Tensor, answer: torch.Tensor) -> torch.Tensor:
+    return (pre_commit == answer).view(pre_commit.size(0), -1).all(dim=1).float()
+
+
+def _predict_halt(halt_logit: torch.Tensor, *, halt_threshold: float) -> torch.Tensor:
+    return torch.sigmoid(halt_logit) > halt_threshold
+
+
+def _compute_cell_loss(
     logits: torch.Tensor,
     *,
     clue_pin: torch.Tensor,
     answer: torch.Tensor,
 ) -> torch.Tensor:
-    """Mean of per-puzzle masked CE (equal weight per puzzle)."""
     mask = target_mask(answer, clue_pin)
     flat_logits = logits.flatten(1, 2)
     flat_targets = answer.flatten(1, 2)
@@ -168,6 +137,24 @@ def _compute_rollout_loss_batch_mean(
     return per_puzzle.mean()
 
 
+def _compute_halt_loss(halt_logit: torch.Tensor, halt_target: torch.Tensor) -> torch.Tensor:
+    return F.binary_cross_entropy_with_logits(halt_logit, halt_target)
+
+
+def _compute_total_loss(
+    logits: torch.Tensor,
+    halt_logit: torch.Tensor,
+    *,
+    clue_pin: torch.Tensor,
+    answer: torch.Tensor,
+    halt_target: torch.Tensor,
+    halt_loss_weight: float,
+) -> torch.Tensor:
+    cell_loss = _compute_cell_loss(logits, clue_pin=clue_pin, answer=answer)
+    halt_loss = _compute_halt_loss(halt_logit, halt_target)
+    return cell_loss + halt_loss_weight * halt_loss
+
+
 def _outer_commit(logits: torch.Tensor, ctx: _ClueContext) -> torch.Tensor:
     decoded = decode_logits(logits).detach()
     return torch.where(ctx.clue_pin, ctx.clue_digit_ids, decoded)
@@ -175,175 +162,197 @@ def _outer_commit(logits: torch.Tensor, ctx: _ClueContext) -> torch.Tensor:
 
 def _inner_loop(
     model: MixerNextStateModel,
-    state: RolloutState,
+    input_embed: torch.Tensor,
     inner_iters: int,
     *,
     with_grad: bool = False,
-) -> torch.Tensor:
-    assert state.input_embed is not None
-    cell_embed = state.cell_embed
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    cell_embed: torch.Tensor | None = None
     logits: torch.Tensor | None = None
+    halt_logit: torch.Tensor | None = None
     for _ in range(inner_iters):
-        with nullcontext() if with_grad else torch.no_grad():
-            out = model(input_embed=state.input_embed, cell_embed=cell_embed)
-            logits = out.logits
-            cell_embed = out.cell_embed
-    if with_grad:
-        state.cell_embed = cell_embed
-    else:
-        state.cell_embed = None
+        if with_grad:
+            out = model(input_embed=input_embed, cell_embed=cell_embed)
+        else:
+            with torch.no_grad():
+                out = model(input_embed=input_embed, cell_embed=cell_embed)
+        logits = out.logits
+        halt_logit = out.halt_logit
+        cell_embed = out.cell_embed
     assert logits is not None
-    return logits
+    assert halt_logit is not None
+    return logits, halt_logit, cell_embed
 
 
-def _discard_rollout_graph(state: RolloutState) -> None:
-    state.input_embed = None
-    state.cell_embed = None
-
-
-def _rollout_loop(
+def rollout_train_step(
     model: MixerNextStateModel,
-    state: RolloutState,
-    rollout_clues: torch.Tensor,
-    ctx: _ClueContext,
-    inner_iters: int,
-    outer_iters: int,
-    *,
-    answer: torch.Tensor | None = None,
-    collect_state_grids: bool = False,
-    accumulate_grad: bool = False,
-) -> tuple[torch.Tensor, list[torch.Tensor] | None, torch.Tensor]:
-    state_grids: list[torch.Tensor] | None = [] if collect_state_grids else None
-    outer_losses: list[torch.Tensor] = []
-    total_loss: torch.Tensor | None = None
-    logits = state.digit_id.new_zeros((rollout_clues.size(0), 9, 9, 10), dtype=torch.float32)
-
-    for outer_idx in range(outer_iters):
-        is_last_outer = outer_idx == outer_iters - 1
-        state.input_embed = model.encode_input(state.digit_id, state.clue_pin)
-        state.cell_embed = None
-        logits = _inner_loop(
-            model,
-            state,
-            inner_iters,
-            with_grad=accumulate_grad,
-        )
-        if answer is not None and (accumulate_grad or is_last_outer):
-            outer_loss = _compute_rollout_loss_batch_mean(
-                logits,
-                clue_pin=ctx.clue_pin,
-                answer=answer,
-            )
-            if accumulate_grad:
-                (outer_loss / outer_iters).backward()
-                outer_losses.append(outer_loss.detach())
-                logits = logits.detach()
-                _discard_rollout_graph(state)
-            else:
-                total_loss = outer_loss
-        state.digit_id = _outer_commit(logits, ctx)
-        if not accumulate_grad:
-            _discard_rollout_graph(state)
-        if state_grids is not None:
-            state_grids.append(state.digit_id.clone())
-
-    if outer_losses:
-        total_loss = torch.stack(outer_losses).mean()
-    elif total_loss is None:
-        total_loss = logits.new_zeros(())
-    return logits, state_grids, total_loss
-
-
-def _init_rollout_state(
-    clues: torch.Tensor,
-    *,
-    initial_digit_id: torch.Tensor | None = None,
-    clue_pin: torch.Tensor | None = None,
-) -> RolloutState:
-    if initial_digit_id is None:
-        digit_id = clues.clone()
-    else:
-        digit_id = initial_digit_id
-    if clue_pin is None:
-        clue_pin = clues > 0
-    return RolloutState(digit_id=digit_id, clue_pin=clue_pin)
-
-
-def _run_rollout(
-    model: MixerNextStateModel,
-    clues: torch.Tensor,
-    *,
+    state: BatchSlotState,
     config: RolloutConfig,
-    collect_state_grids: bool = False,
-) -> tuple[torch.Tensor, list[torch.Tensor] | None]:
-    clues, _ = _ensure_batched(clues)
-    state = _init_rollout_state(clues)
-    ctx = _ClueContext.from_rollout_clues(clues)
-
-    logits, state_grids, _ = _rollout_loop(
+    *,
+    halt_loss_weight: float = 1.0,
+) -> RolloutResult:
+    if not model.training:
+        raise ValueError("rollout_train_step requires model.training")
+    ctx = _ClueContext.from_clues(state.clues)
+    input_embed = model.encode_input(state.digit_id, state.clue_pin)
+    logits, halt_logit, _ = _inner_loop(
         model,
-        state,
-        clues,
-        ctx,
+        input_embed,
         config.inner_iters,
-        config.outer_iters,
-        collect_state_grids=collect_state_grids,
+        with_grad=True,
     )
-    return logits, state_grids
+    pre_commit = predict_grid(logits, state.clues)
+    halt_target = _halt_target(pre_commit, state.answer)
+    predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
+    loss = _compute_total_loss(
+        logits,
+        halt_logit,
+        clue_pin=ctx.clue_pin,
+        answer=state.answer,
+        halt_target=halt_target,
+        halt_loss_weight=halt_loss_weight,
+    )
+    loss.backward()
+    state.digit_id = _outer_commit(logits, ctx)
+    state.outer_count = state.outer_count + 1
+    done = predict_halt | (state.outer_count >= config.max_outer_iters)
+    return RolloutResult(
+        loss=loss.detach(),
+        pred=pre_commit.detach(),
+        done=done,
+        halted=predict_halt,
+        halt_target=halt_target.detach(),
+        halt_logit=halt_logit.detach(),
+    )
 
 
-def rollout_train_batch(
+def refill_done_slots(
+    state: BatchSlotState,
+    done: torch.Tensor,
+    cache: PuzzleTensorCache,
+    *,
+    generator: torch.Generator,
+) -> None:
+    k = int(done.sum().item())
+    if k == 0:
+        return
+    device = state.digit_id.device
+    idx = torch.randint(cache.clues.size(0), (k,), generator=generator)
+    clues = cache.clues[idx].to(device, non_blocking=True)
+    answers = cache.answers[idx].to(device, non_blocking=True)
+    clue_pin = clues > 0
+    state.digit_id[done] = clues
+    state.clues[done] = clues
+    state.answer[done] = answers
+    state.clue_pin[done] = clue_pin
+    state.outer_count[done] = 0
+
+
+@torch.inference_mode()
+def rollout_eval_batch(
     model: MixerNextStateModel,
     clues: torch.Tensor,
     answer: torch.Tensor,
     *,
     config: RolloutConfig | None = None,
-    compute_pred: bool = True,
-    accumulate_grad: bool = False,
-) -> RolloutResult:
-    """Rollout loss on each training outer loop with per-outer backward (grad accumulates, graph freed)."""
-    if model.training and not accumulate_grad:
-        raise ValueError("accumulate_grad must be True when model.training")
+    halt_loss_weight: float = 1.0,
+) -> EvalRolloutResult:
     config = config or RolloutConfig()
-    rollout_clues = clues
-    clue_pin = clues > 0
-    initial_digit_id = None
-    if model.training:
-        initial_digit_id, rollout_clues, clue_pin = _training_rollout_inputs(
-            config,
-            answer,
-            clues,
+    clues_b, was_batched = _ensure_batched(clues)
+    answer_b, _ = _ensure_batched(answer)
+    b = clues_b.size(0)
+    device = clues_b.device
+
+    digit_id = clues_b.clone()
+    clue_pin = clues_b > 0
+    ctx = _ClueContext.from_clues(clues_b)
+    outer_count = torch.zeros(b, dtype=torch.long, device=device)
+
+    out_pred = digit_id.clone()
+    out_steps = torch.zeros(b, dtype=torch.long, device=device)
+    out_halted = torch.zeros(b, dtype=torch.bool, device=device)
+    final_logits = digit_id.new_zeros((b, 9, 9, 10), dtype=torch.float32)
+    final_halt_logit = digit_id.new_zeros((b,), dtype=torch.float32)
+
+    slot_idx = torch.arange(b, device=device)
+    active_digit_id = digit_id
+    active_clues = clues_b
+    active_answer = answer_b
+    active_clue_pin = clue_pin
+    active_outer_count = outer_count
+    active_ctx = ctx
+    halt_correct_rounds = 0
+    halt_total_rounds = 0
+
+    while slot_idx.numel() > 0:
+        input_embed = model.encode_input(active_digit_id, active_clue_pin)
+        logits, halt_logit, _ = _inner_loop(
+            model,
+            input_embed,
+            config.inner_iters,
+            with_grad=False,
         )
+        pre_commit = predict_grid(logits, active_clues)
+        halt_target_round = _halt_target(pre_commit, active_answer)
+        predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
+        halt_correct_rounds += int((predict_halt == (halt_target_round > 0.5)).sum().item())
+        halt_total_rounds += pre_commit.size(0)
+        committed = _outer_commit(logits, active_ctx)
+        active_outer_count = active_outer_count + 1
+        done = predict_halt | (active_outer_count >= config.max_outer_iters)
 
-    clues_batched, was_batched = _ensure_batched(rollout_clues)
-    answer_batched, _ = _ensure_batched(answer)
-    initial_batched = initial_digit_id
-    if initial_batched is not None:
-        initial_batched, _ = _ensure_batched(initial_batched)
-    clue_pin_batched, _ = _ensure_batched(clue_pin)
+        final_logits[slot_idx] = logits
+        final_halt_logit[slot_idx] = halt_logit
 
-    ctx = _ClueContext.from_rollout_clues(clues_batched)
-    state = _init_rollout_state(
-        clues_batched,
-        initial_digit_id=initial_batched,
-        clue_pin=clue_pin_batched,
+        if done.any():
+            done_idx = slot_idx[done]
+            out_pred[done_idx] = pre_commit[done]
+            out_steps[done_idx] = active_outer_count[done]
+            out_halted[done_idx] = predict_halt[done]
+
+        keep = ~done
+        if not keep.any():
+            break
+        slot_idx = slot_idx[keep]
+        active_digit_id = committed[keep]
+        active_clues = active_clues[keep]
+        active_answer = active_answer[keep]
+        active_clue_pin = active_clue_pin[keep]
+        active_outer_count = active_outer_count[keep]
+        active_ctx = _ClueContext.from_clues(active_clues)
+
+    pre_commit_final = predict_grid(final_logits, clues_b)
+    halt_target = _halt_target(pre_commit_final, answer_b)
+    loss = _compute_total_loss(
+        final_logits,
+        final_halt_logit,
+        clue_pin=ctx.clue_pin,
+        answer=answer_b,
+        halt_target=halt_target,
+        halt_loss_weight=halt_loss_weight,
     )
 
-    logits, _, total_loss = _rollout_loop(
-        model,
-        state,
-        clues_batched,
-        ctx,
-        config.inner_iters,
-        config.outer_iters,
-        answer=answer_batched,
-        accumulate_grad=accumulate_grad,
-    )
-    eval_logits = logits
     if not was_batched:
-        eval_logits = eval_logits.squeeze(0)
-    pred = predict_grid(eval_logits.detach(), clues) if compute_pred else None
-    return RolloutResult(loss=total_loss, pred=pred)
+        return EvalRolloutResult(
+            pred=out_pred.squeeze(0),
+            outer_steps=out_steps.squeeze(0),
+            halted=out_halted.squeeze(0),
+            loss=loss,
+            halt_target=halt_target.squeeze(0),
+            halt_logit=final_halt_logit.squeeze(0),
+            halt_correct_rounds=halt_correct_rounds,
+            halt_total_rounds=halt_total_rounds,
+        )
+    return EvalRolloutResult(
+        pred=out_pred,
+        outer_steps=out_steps,
+        halted=out_halted,
+        loss=loss,
+        halt_target=halt_target,
+        halt_logit=final_halt_logit,
+        halt_correct_rounds=halt_correct_rounds,
+        halt_total_rounds=halt_total_rounds,
+    )
 
 
 @torch.inference_mode()
@@ -353,14 +362,11 @@ def rollout_solve(
     *,
     config: RolloutConfig | None = None,
 ) -> torch.Tensor:
-    config = config or RolloutConfig(train_init="clues")
+    config = config or RolloutConfig()
     clues_b, was_batched = _ensure_batched(clues)
-    logits, _ = _run_rollout(
-        model,
-        clues_b,
-        config=config,
-    )
-    pred = predict_grid(logits, clues_b)
+    answer = clues_b.clone()
+    result = rollout_eval_batch(model, clues_b, answer, config=config)
+    pred = result.pred
     if not was_batched:
         pred = pred.squeeze(0)
     return pred
@@ -372,24 +378,67 @@ def rollout_trace_batch(
     clues: torch.Tensor,
     *,
     config: RolloutConfig | None = None,
-) -> list[list[str]]:
+) -> list[PuzzleTrace]:
     """Rollout for viz; one frame per outer argmax commit, per puzzle."""
-    config = config or RolloutConfig(train_init="clues")
+    config = config or RolloutConfig()
     clues, _ = _ensure_batched(clues)
-    _, state_grids = _run_rollout(
-        model,
-        clues,
-        config=config,
-        collect_state_grids=True,
-    )
-    assert state_grids is not None
-    trajectories: list[list[str]] = []
-    for batch_idx in range(clues.size(0)):
-        grids = [tensor_to_string(clues[batch_idx])]
-        for grid in state_grids:
-            grids.append(tensor_to_string(grid[batch_idx]))
-        trajectories.append(grids)
-    return trajectories
+    b = clues.size(0)
+    device = clues.device
+
+    digit_id = clues.clone()
+    clue_pin = clues > 0
+    ctx = _ClueContext.from_clues(clues)
+    outer_count = torch.zeros(b, dtype=torch.long, device=device)
+    trajectories: list[list[str]] = [[tensor_to_string(clues[i])] for i in range(b)]
+    out_halted = torch.zeros(b, dtype=torch.bool, device=device)
+    out_steps = torch.zeros(b, dtype=torch.long, device=device)
+
+    slot_idx = torch.arange(b, device=device)
+    active_digit_id = digit_id
+    active_clues = clues
+    active_clue_pin = clue_pin
+    active_outer_count = outer_count
+    active_ctx = ctx
+
+    while slot_idx.numel() > 0:
+        input_embed = model.encode_input(active_digit_id, active_clue_pin)
+        logits, halt_logit, _ = _inner_loop(
+            model,
+            input_embed,
+            config.inner_iters,
+            with_grad=False,
+        )
+        committed = _outer_commit(logits, active_ctx)
+        predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
+        active_outer_count = active_outer_count + 1
+        done = predict_halt | (active_outer_count >= config.max_outer_iters)
+
+        for local_i, global_i in enumerate(slot_idx.tolist()):
+            trajectories[global_i].append(tensor_to_string(committed[local_i]))
+
+        if done.any():
+            done_idx = slot_idx[done]
+            out_halted[done_idx] = predict_halt[done]
+            out_steps[done_idx] = active_outer_count[done]
+
+        keep = ~done
+        if not keep.any():
+            break
+        slot_idx = slot_idx[keep]
+        active_digit_id = committed[keep]
+        active_clues = active_clues[keep]
+        active_clue_pin = active_clue_pin[keep]
+        active_outer_count = active_outer_count[keep]
+        active_ctx = _ClueContext.from_clues(active_clues)
+
+    return [
+        PuzzleTrace(
+            states=trajectories[i],
+            halted=bool(out_halted[i].item()),
+            outer_steps=int(out_steps[i].item()),
+        )
+        for i in range(b)
+    ]
 
 
 @torch.inference_mode()
@@ -399,10 +448,5 @@ def rollout_trace(
     *,
     config: RolloutConfig | None = None,
 ) -> list[str]:
-    """Rollout for viz; one frame per outer argmax commit."""
     clues_b, _ = _ensure_batched(clues)
-    return rollout_trace_batch(
-        model,
-        clues_b,
-        config=config,
-    )[0]
+    return rollout_trace_batch(model, clues_b, config=config)[0].states

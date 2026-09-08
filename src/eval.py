@@ -22,7 +22,7 @@ def save_test_metrics(
     min_rating: int | None,
     max_rating: int | None,
     inner_iters: int,
-    outer_iters: int,
+    max_outer_iters: int,
 ) -> None:
     history_path = run_dir / "history.json"
     if history_path.exists():
@@ -35,7 +35,7 @@ def save_test_metrics(
         "min_rating": min_rating,
         "max_rating": max_rating,
         "inner_iters": inner_iters,
-        "outer_iters": outer_iters,
+        "max_outer_iters": max_outer_iters,
         **asdict(test),
     }
     history_path.write_text(json.dumps(history, indent=2))
@@ -73,13 +73,13 @@ def main() -> None:
         "--inner-iters",
         type=int,
         default=None,
-        help="Inner steps per outer loop (default: from checkpoint)",
+        help="Inner steps per outer round (default: from checkpoint)",
     )
     parser.add_argument(
-        "--outer-iters",
+        "--max-outer-iters",
         type=int,
         default=None,
-        help="Outer argmax commits (default: from checkpoint)",
+        help="Max outer commits per puzzle (default: from checkpoint)",
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducible test metrics")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -119,12 +119,14 @@ def main() -> None:
     ).to(device)
     model.load_state_dict(ckpt["model"])
 
-    inner_iters = args.inner_iters if args.inner_iters is not None else int(run_args["eval_inner_iters"])
-    outer_iters = args.outer_iters if args.outer_iters is not None else int(run_args["eval_outer_iters"])
+    inner_iters = args.inner_iters if args.inner_iters is not None else int(run_args["inner_iters"])
+    max_outer_iters = (
+        args.max_outer_iters if args.max_outer_iters is not None else int(run_args["eval_max_outer_iters"])
+    )
+    halt_loss_weight = float(run_args.get("halt_loss_weight", 1.0))
     rollout_config = build_rollout_config(
-        train_init="clues",
         inner_iters=inner_iters,
-        outer_iters=outer_iters,
+        max_outer_iters=max_outer_iters,
     )
 
     epoch = int(ckpt["epoch"])
@@ -136,6 +138,7 @@ def main() -> None:
         epochs=epoch,
         phase="test",
         rollout_config=rollout_config,
+        halt_loss_weight=halt_loss_weight,
         use_cuda=use_cuda,
         seed=args.seed,
     )
@@ -147,12 +150,12 @@ def main() -> None:
         min_rating=args.min_rating,
         max_rating=args.max_rating,
         inner_iters=inner_iters,
-        outer_iters=outer_iters,
+        max_outer_iters=max_outer_iters,
     )
     print(
-        f"test (epoch {epoch}, n={len(test_rows)}, inner={inner_iters}, outer={outer_iters}): "
+        f"test (epoch {epoch}, n={len(test_rows)}, inner={inner_iters}, max_outer={max_outer_iters}): "
         f"loss={test.loss:.4f} cell_acc={test.cell_acc:.4f} "
-        f"puzzle_acc={test.puzzle_acc:.4f}",
+        f"puzzle_acc={test.puzzle_acc:.4f} halt_rate={test.halt_rate:.4f}",
         flush=True,
     )
 

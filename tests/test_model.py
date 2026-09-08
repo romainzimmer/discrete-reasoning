@@ -25,6 +25,7 @@ def test_h_plus_p_forward():
     out0 = model(input_embed=p, cell_embed=None)
     out1 = model(input_embed=p, cell_embed=out0.cell_embed)
     assert out0.logits.shape == (1, 9, 9, NUM_VOCAB)
+    assert out0.halt_logit.shape == (1,)
     assert not torch.allclose(out0.logits, out1.logits)
 
 

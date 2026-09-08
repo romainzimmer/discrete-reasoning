@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 from torch.utils.data import Dataset
 
@@ -88,4 +90,25 @@ def collate_puzzles(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Ten
         "clues": torch.stack([item["clues"] for item in batch]),
         "answer": torch.stack([item["answer"] for item in batch]),
     }
+
+
+@dataclass
+class PuzzleTensorCache:
+    clues: torch.Tensor
+    answers: torch.Tensor
+
+    @classmethod
+    def build(cls, dataset: PuzzleDataset, *, pin_memory: bool = False) -> PuzzleTensorCache:
+        clues_list: list[torch.Tensor] = []
+        answers_list: list[torch.Tensor] = []
+        for idx in range(len(dataset)):
+            item = dataset[idx]
+            clues_list.append(item["clues"])
+            answers_list.append(item["answer"])
+        clues = torch.stack(clues_list)
+        answers = torch.stack(answers_list)
+        if pin_memory:
+            clues = clues.pin_memory()
+            answers = answers.pin_memory()
+        return cls(clues=clues, answers=answers)
 

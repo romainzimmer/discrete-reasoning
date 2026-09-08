@@ -4,12 +4,15 @@ Experiments on [sapientinc/sudoku-extreme](https://huggingface.co/datasets/sapie
 
 ## Model
 
-**Mixer-looped** sudoku solver: embed grid digits → looped MLP-Mixer (`h_{t+1} = M(h_t + P)`) → unembed to logits.
+**Mixer-looped** sudoku solver: embed grid digits → looped MLP-Mixer (`h_{t+1} = M(h_t + P)`) → unembed to logits, plus a halt head.
 
 - **`--dim`**: embedding / mixer hidden dimension (D); channel-mix uses SwiGLU with `H = round(4·D·2/3)` aligned to 256 (TRM default)
 - **`--num-blocks`**: mixer layers per inner step (not a flat FFN stack)
-- **`--train-inner-iters`**: looped inner steps per outer commit during training
-- **`--train-outer-iters`**: argmax commits per puzzle during training
+- **`--inner-iters`**: looped inner steps per outer round (train, val, test, viz)
+- **`--train-max-outer-iters`**: max outer commits per puzzle before refill (training)
+- **`--eval-max-outer-iters`**: max outer commits per puzzle during val/test
+- **`--batches-per-epoch`**: optimizer steps per epoch (one outer round per step)
+- **`--halt-loss-weight`**: weight for halt BCE loss
 
 Runs save `args.model: mixer-looped`. Old checkpoints from before this migration cannot be loaded by `eval`.
 
@@ -34,16 +37,16 @@ uv run train \
   --min-rating 0 --max-rating 0 \
   --max-samples 100 --epochs 30 \
   --dim 512 --num-blocks 2 \
-  --train-inner-iters 5 --train-outer-iters 10 \
-  --eval-inner-iters 5 --eval-outer-iters 10 \
-  --train-batch-size 8
+  --inner-iters 5 --train-max-outer-iters 10 \
+  --eval-max-outer-iters 10 \
+  --train-batch-size 8 --batches-per-epoch 100
 # Add --no-augment to disable on-the-fly training augmentations (ablation)
 uv run python -m http.server 8000
 ```
 
 Open http://localhost:8000/viz/
 
-Training uses **train** / **validation** / **test** splits: validation is held out from `train.csv`, test comes from `test.csv`. Charts show train vs validation; test metrics are reported separately. Trajectory viz shows one grid per **outer** rollout commit.
+Training uses **train** / **validation** / **test** splits: validation is held out from `train.csv`, test comes from `test.csv`. Charts show train vs validation; test metrics are reported separately. Trajectory viz shows one grid per **outer** rollout commit until model halt or max outer iters.
 
 ## Python usage
 
