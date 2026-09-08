@@ -9,6 +9,7 @@ from rollout import (
     DEFAULT_INNER_ITERS,
     DEFAULT_OUTER_COMMIT_PROB,
     DEFAULT_OUTER_ITERS,
+    DEFAULT_TRUNCATED_BPTT_STEPS,
     RolloutConfig,
     _ClueContext,
     _curriculum_initial,
@@ -53,6 +54,96 @@ def test_rollout_config_validation():
         RolloutConfig(outer_commit_prob=1.5)
     with pytest.raises(ValueError):
         RolloutConfig(outer_commit_prob=0.0)
+    with pytest.raises(ValueError):
+        RolloutConfig(inner_iters=3, truncated_bptt_steps=4)
+    with pytest.raises(ValueError):
+        RolloutConfig(inner_iters=1, fixed_point=True)
+
+
+def test_truncated_bptt_zero_detaches_inner_prefix():
+    model = NextStateModel(width=32, num_blocks=1)
+    model.train()
+    clues, clues_onehot, answer = _tiny_batch()
+    clues_b = clues
+    clues_onehot_b = clues_onehot
+    ctx = _ClueContext.from_clues(clues_b, clues_onehot_b)
+    state = attach_clue_mask(clues_onehot_b, clues_b, clue_mask_channel=ctx.clue_mask_channel)
+    state_leaf = state.detach().requires_grad_(True)
+
+    logits, _ = _inner_loop(
+        model,
+        state_leaf,
+        ctx,
+        clues_b,
+        inner_iters=3,
+        truncated_bptt_steps=0,
+        use_truncated_bptt=True,
+    )
+    logits.sum().backward()
+    assert state_leaf.grad is None
+
+
+def test_truncated_bptt_full_matches_default_inner_loop():
+    model = NextStateModel(width=32, num_blocks=1)
+    model.eval()
+    clues, clues_onehot, _ = _tiny_batch()
+    ctx = _ClueContext.from_clues(clues, clues_onehot)
+    state = attach_clue_mask(clues_onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
+
+    torch.manual_seed(0)
+    default_logits, _ = _inner_loop(model, state, ctx, clues, inner_iters=3)
+    torch.manual_seed(0)
+    full_bptt_logits, _ = _inner_loop(
+        model,
+        state,
+        ctx,
+        clues,
+        inner_iters=3,
+        truncated_bptt_steps=3,
+        use_truncated_bptt=True,
+    )
+    assert torch.allclose(default_logits, full_bptt_logits)
+
+
+def test_fixed_point_changes_eval_loss():
+    model = NextStateModel(width=32, num_blocks=1)
+    model.eval()
+    clues, clues_onehot, answer = _tiny_batch()
+    base_config = RolloutConfig(train_init="clues", inner_iters=3, outer_iters=1, fixed_point=False)
+    fixed_config = RolloutConfig(
+        train_init="clues",
+        inner_iters=3,
+        outer_iters=1,
+        fixed_point=True,
+    )
+    base = rollout_train_batch(model, clues, clues_onehot, answer, config=base_config)
+    fixed = rollout_train_batch(model, clues, clues_onehot, answer, config=fixed_config)
+    assert fixed.loss.item() != base.loss.item()
+
+
+def test_fixed_point_with_truncated_bptt_trains():
+    model = NextStateModel(width=32, num_blocks=1)
+    model.train()
+    clues, clues_onehot, answer = _tiny_batch()
+    config = RolloutConfig(
+        train_init="clues",
+        inner_iters=4,
+        outer_iters=1,
+        fixed_point=True,
+        truncated_bptt_steps=2,
+    )
+    result = rollout_train_batch(
+        model,
+        clues,
+        clues_onehot,
+        answer,
+        config=config,
+        compute_pred=False,
+        accumulate_grad=True,
+    )
+    assert result.loss.item() > 0
+    assert model.net[0].weight.grad is not None
+    assert model.net[0].weight.grad.abs().sum().item() > 0
 
 
 def test_rollout_fixed_steps_and_clues_pinned():
@@ -100,12 +191,12 @@ def test_outer_detach_isolates_blocks():
     ctx = _ClueContext.from_clues(clues_b, clues_onehot_b)
     state = attach_clue_mask(clues_onehot_b, clues_b, clue_mask_channel=ctx.clue_mask_channel)
 
-    logits_o1 = _inner_loop(model, state, ctx, clues_b, inner_iters=2)
+    logits_o1, _ = _inner_loop(model, state, ctx, clues_b, inner_iters=2)
     state_o1 = logits_to_argmax_state(logits_o1, ctx, clues_b, state=state, outer_commit_prob=1.0)
     assert not state_o1.requires_grad
 
     state_o1_leaf = state_o1.detach().requires_grad_(True)
-    logits_o2 = _inner_loop(model, state_o1_leaf, ctx, clues_b, inner_iters=2)
+    logits_o2, _ = _inner_loop(model, state_o1_leaf, ctx, clues_b, inner_iters=2)
     logits_o2.sum().backward()
     assert state_o1_leaf.grad is not None
     assert state.grad is None
@@ -272,6 +363,8 @@ def test_defaults():
     assert config.inner_iters == DEFAULT_INNER_ITERS
     assert config.outer_iters == DEFAULT_OUTER_ITERS
     assert config.outer_commit_prob == DEFAULT_OUTER_COMMIT_PROB
+    assert config.fixed_point is True
+    assert config.truncated_bptt_steps == DEFAULT_TRUNCATED_BPTT_STEPS
 
 
 def test_outer_commit_prob_one_matches_full_decode():

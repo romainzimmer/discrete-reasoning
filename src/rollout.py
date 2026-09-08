@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Literal
 
@@ -15,6 +16,7 @@ TrainInitMode = Literal["clues", "noisy_gt", "zero_gt", "curriculum"]
 DEFAULT_INNER_ITERS = 5
 DEFAULT_OUTER_ITERS = 10
 DEFAULT_OUTER_COMMIT_PROB = 0.5
+DEFAULT_TRUNCATED_BPTT_STEPS = 2
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,8 @@ class RolloutConfig:
     inner_iters: int = DEFAULT_INNER_ITERS
     outer_iters: int = DEFAULT_OUTER_ITERS
     outer_commit_prob: float = DEFAULT_OUTER_COMMIT_PROB
+    fixed_point: bool = True
+    truncated_bptt_steps: int = DEFAULT_TRUNCATED_BPTT_STEPS
 
     def __post_init__(self) -> None:
         if self.inner_iters < 1:
@@ -31,6 +35,10 @@ class RolloutConfig:
             raise ValueError("outer_iters must be >= 1")
         if not 0.0 < self.outer_commit_prob <= 1.0:
             raise ValueError("outer_commit_prob must be in (0, 1]")
+        if not 0 <= self.truncated_bptt_steps <= self.inner_iters:
+            raise ValueError("truncated_bptt_steps must be in [0, inner_iters]")
+        if self.fixed_point and self.inner_iters < 2:
+            raise ValueError("fixed_point requires inner_iters >= 2")
 
 
 @dataclass(frozen=True)
@@ -182,6 +190,28 @@ def _compute_rollout_loss_batch_mean(
     return per_puzzle.mean()
 
 
+def _compute_inner_loop_loss(
+    final_logits: torch.Tensor,
+    penultimate_logits: torch.Tensor | None,
+    *,
+    clues: torch.Tensor,
+    answer: torch.Tensor,
+) -> torch.Tensor:
+    final_loss = _compute_rollout_loss_batch_mean(
+        final_logits,
+        clues=clues,
+        answer=answer,
+    )
+    if penultimate_logits is None:
+        return final_loss
+    penultimate_loss = _compute_rollout_loss_batch_mean(
+        penultimate_logits,
+        clues=clues,
+        answer=answer,
+    )
+    return (final_loss + penultimate_loss) / 2
+
+
 def logits_to_softmax_state(
     logits: torch.Tensor,
     ctx: _ClueContext,
@@ -211,17 +241,69 @@ def logits_to_argmax_state(
     return attach_clue_mask(digits, rollout_clues, clue_mask_channel=ctx.clue_mask_channel)
 
 
+def _no_grad_inner_steps(
+    model: NextStateModel,
+    state: torch.Tensor,
+    ctx: _ClueContext,
+    rollout_clues: torch.Tensor,
+    *,
+    inner_iters: int,
+    fixed_point: bool,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    penultimate_logits: torch.Tensor | None = None
+    for step in range(inner_iters):
+        logits = model(state)
+        if fixed_point and step == inner_iters - 2:
+            penultimate_logits = logits
+        if step == inner_iters - 1:
+            return logits, penultimate_logits
+        state = logits_to_softmax_state(logits, ctx, rollout_clues)
+    raise RuntimeError("unreachable")
+
+
 def _inner_loop(
     model: NextStateModel,
     state: torch.Tensor,
     ctx: _ClueContext,
     rollout_clues: torch.Tensor,
     inner_iters: int,
-) -> torch.Tensor:
-    for _ in range(inner_iters - 1):
-        logits = model(state)
-        state = logits_to_softmax_state(logits, ctx, rollout_clues)
-    return model(state)
+    *,
+    truncated_bptt_steps: int | None = None,
+    fixed_point: bool = True,
+    use_truncated_bptt: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    if not use_truncated_bptt:
+        return _no_grad_inner_steps(
+            model,
+            state,
+            ctx,
+            rollout_clues,
+            inner_iters=inner_iters,
+            fixed_point=fixed_point,
+        )
+
+    if truncated_bptt_steps is None:
+        truncated_bptt_steps = DEFAULT_TRUNCATED_BPTT_STEPS
+    no_grad_steps = inner_iters - 1 if truncated_bptt_steps == 0 else inner_iters - truncated_bptt_steps
+
+    penultimate_logits: torch.Tensor | None = None
+    final_logits: torch.Tensor | None = None
+
+    for step in range(inner_iters):
+        use_no_grad = step < no_grad_steps
+        with torch.no_grad() if use_no_grad else nullcontext():
+            logits = model(state)
+            if fixed_point and step == inner_iters - 2:
+                penultimate_logits = logits
+            if step == inner_iters - 1:
+                final_logits = logits
+            elif step < inner_iters - 1:
+                state = logits_to_softmax_state(logits, ctx, rollout_clues)
+        if use_no_grad and step == no_grad_steps - 1:
+            state = state.detach()
+
+    assert final_logits is not None
+    return final_logits, penultimate_logits if fixed_point else None
 
 
 def _rollout_loop(
@@ -236,16 +318,28 @@ def _rollout_loop(
     answer: torch.Tensor | None = None,
     collect_state_grids: bool = False,
     accumulate_grad: bool = False,
+    fixed_point: bool = True,
+    truncated_bptt_steps: int | None = DEFAULT_TRUNCATED_BPTT_STEPS,
 ) -> tuple[torch.Tensor, list[torch.Tensor] | None, torch.Tensor]:
     state_grids: list[torch.Tensor] | None = [] if collect_state_grids else None
     outer_losses: list[torch.Tensor] = []
     logits = state.new_zeros((rollout_clues.size(0), 9, 9, 9))
 
     for _ in range(outer_iters):
-        logits = _inner_loop(model, state, ctx, rollout_clues, inner_iters)
+        logits, penultimate_logits = _inner_loop(
+            model,
+            state,
+            ctx,
+            rollout_clues,
+            inner_iters,
+            truncated_bptt_steps=truncated_bptt_steps,
+            fixed_point=fixed_point,
+            use_truncated_bptt=accumulate_grad,
+        )
         if answer is not None:
-            outer_loss = _compute_rollout_loss_batch_mean(
+            outer_loss = _compute_inner_loop_loss(
                 logits,
+                penultimate_logits,
                 clues=rollout_clues,
                 answer=answer,
             )
@@ -350,6 +444,8 @@ def rollout_train_batch(
         outer_commit_prob=config.outer_commit_prob,
         answer=answer_batched,
         accumulate_grad=accumulate_grad,
+        fixed_point=config.fixed_point,
+        truncated_bptt_steps=config.truncated_bptt_steps,
     )
     eval_logits = logits
     if not was_batched:

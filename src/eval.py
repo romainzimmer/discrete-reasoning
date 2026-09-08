@@ -132,6 +132,7 @@ def main() -> None:
         inner_iters=inner_iters,
         outer_iters=outer_iters,
         outer_commit_prob=float(run_args.get("outer_commit_prob", DEFAULT_OUTER_COMMIT_PROB)),
+        fixed_point=bool(run_args.get("fixed_point", True)),
     )
 
     epoch = int(ckpt["epoch"])

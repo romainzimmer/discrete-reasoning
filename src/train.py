@@ -19,6 +19,7 @@ from rollout import (
     DEFAULT_INNER_ITERS,
     DEFAULT_OUTER_COMMIT_PROB,
     DEFAULT_OUTER_ITERS,
+    DEFAULT_TRUNCATED_BPTT_STEPS,
     RolloutConfig,
     RolloutResult,
     rollout_train_batch,
@@ -51,12 +52,16 @@ def build_rollout_config(
     inner_iters: int,
     outer_iters: int,
     outer_commit_prob: float = DEFAULT_OUTER_COMMIT_PROB,
+    fixed_point: bool = True,
+    truncated_bptt_steps: int = DEFAULT_TRUNCATED_BPTT_STEPS,
 ) -> RolloutConfig:
     return RolloutConfig(
         train_init=train_init,
         inner_iters=inner_iters,
         outer_iters=outer_iters,
         outer_commit_prob=outer_commit_prob,
+        fixed_point=fixed_point,
+        truncated_bptt_steps=truncated_bptt_steps,
     )
 
 
@@ -384,7 +389,7 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-2, help="L2 regularization on weights only (not bias)")
-    parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Clip gradient global norm (0 disables)")
+    parser.add_argument("--max-grad-norm", type=float, default=0.0, help="Clip gradient global norm (0 disables)")
     parser.add_argument("--width", type=int, default=512, help="FFN block width")
     parser.add_argument("--num-blocks", type=int, default=2, help="Number of FFN blocks")
     parser.add_argument(
@@ -416,6 +421,17 @@ def main() -> None:
         type=float,
         default=DEFAULT_OUTER_COMMIT_PROB,
         help="Per-cell probability of updating rollout state from decoded logits each outer step",
+    )
+    parser.add_argument(
+        "--no-fixed-point",
+        action="store_true",
+        help="Only supervise the final inner-loop logits (disable fixed-point training)",
+    )
+    parser.add_argument(
+        "--truncated-bptt-steps",
+        type=int,
+        default=DEFAULT_TRUNCATED_BPTT_STEPS,
+        help="Inner steps with BPTT during training (0: last logit only on detached state)",
     )
     parser.add_argument("--batch-size", type=int, default=8, help="Training batch size")
     parser.add_argument(
@@ -513,12 +529,15 @@ def main() -> None:
         inner_iters=args.train_inner_iters,
         outer_iters=args.train_outer_iters,
         outer_commit_prob=args.outer_commit_prob,
+        fixed_point=not args.no_fixed_point,
+        truncated_bptt_steps=args.truncated_bptt_steps,
     )
     eval_rollout_config = build_rollout_config(
         train_init="clues",
         inner_iters=args.eval_inner_iters,
         outer_iters=args.eval_outer_iters,
         outer_commit_prob=args.outer_commit_prob,
+        fixed_point=not args.no_fixed_point,
     )
     best_val_cell_acc = -1.0
     manifest = load_manifest(run_dir)
