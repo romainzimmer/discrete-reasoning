@@ -191,9 +191,17 @@ def _inner_loop(
             out = model(input_embed=state.input_embed, cell_embed=cell_embed)
             logits = out.logits
             cell_embed = out.cell_embed
-    state.cell_embed = cell_embed
+    if with_grad:
+        state.cell_embed = cell_embed
+    else:
+        state.cell_embed = None
     assert logits is not None
     return logits
+
+
+def _discard_rollout_graph(state: RolloutState) -> None:
+    state.input_embed = None
+    state.cell_embed = None
 
 
 def _rollout_loop(
@@ -209,6 +217,7 @@ def _rollout_loop(
     accumulate_grad: bool = False,
 ) -> tuple[torch.Tensor, list[torch.Tensor] | None, torch.Tensor]:
     state_grids: list[torch.Tensor] | None = [] if collect_state_grids else None
+    outer_losses: list[torch.Tensor] = []
     total_loss: torch.Tensor | None = None
     logits = state.digit_id.new_zeros((rollout_clues.size(0), 9, 9, 10), dtype=torch.float32)
 
@@ -220,23 +229,30 @@ def _rollout_loop(
             model,
             state,
             inner_iters,
-            with_grad=accumulate_grad and is_last_outer,
+            with_grad=accumulate_grad,
         )
-        if answer is not None and is_last_outer:
-            total_loss = _compute_rollout_loss_batch_mean(
+        if answer is not None and (accumulate_grad or is_last_outer):
+            outer_loss = _compute_rollout_loss_batch_mean(
                 logits,
                 clue_pin=ctx.clue_pin,
                 answer=answer,
             )
             if accumulate_grad:
-                total_loss.backward()
-                total_loss = total_loss.detach()
+                (outer_loss / outer_iters).backward()
+                outer_losses.append(outer_loss.detach())
+                logits = logits.detach()
+                _discard_rollout_graph(state)
+            else:
+                total_loss = outer_loss
         state.digit_id = _outer_commit(logits, ctx)
-        state.cell_embed = None
+        if not accumulate_grad:
+            _discard_rollout_graph(state)
         if state_grids is not None:
             state_grids.append(state.digit_id.clone())
 
-    if total_loss is None:
+    if outer_losses:
+        total_loss = torch.stack(outer_losses).mean()
+    elif total_loss is None:
         total_loss = logits.new_zeros(())
     return logits, state_grids, total_loss
 
@@ -294,7 +310,7 @@ def rollout_train_batch(
     compute_pred: bool = True,
     accumulate_grad: bool = False,
 ) -> RolloutResult:
-    """Rollout loss on the final outer loop; earlier outer loops run without grad."""
+    """Rollout loss on each training outer loop with per-outer backward (grad accumulates, graph freed)."""
     if model.training and not accumulate_grad:
         raise ValueError("accumulate_grad must be True when model.training")
     config = config or RolloutConfig()

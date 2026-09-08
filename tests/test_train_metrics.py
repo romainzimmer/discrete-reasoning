@@ -4,7 +4,48 @@ import json
 from argparse import Namespace
 from pathlib import Path
 
-from train import EpochStats, TrainEpochStats, save_epoch_metrics
+import torch
+
+from rollout import RolloutResult
+from train import (
+    EpochStats,
+    TrainEpochStats,
+    _accumulate_pred_stats,
+    save_epoch_metrics,
+)
+
+
+def test_accumulate_pred_stats_from_training_logits() -> None:
+    result = RolloutResult(
+        loss=torch.tensor(1.0),
+        pred=torch.tensor(
+            [
+                [5, 3, 0, 0, 7, 0, 0, 0, 0],
+                [6, 0, 0, 1, 9, 5, 0, 0, 0],
+                [0, 9, 8, 0, 0, 0, 0, 6, 0],
+                [8, 0, 0, 0, 6, 0, 0, 0, 3],
+                [4, 0, 0, 8, 0, 3, 0, 0, 1],
+                [7, 0, 0, 0, 2, 0, 0, 0, 6],
+                [0, 6, 0, 0, 0, 0, 2, 8, 0],
+                [0, 0, 0, 4, 1, 9, 0, 0, 5],
+                [0, 0, 0, 0, 8, 0, 0, 7, 9],
+            ]
+        ),
+    )
+    answer = torch.full((9, 9), 4)
+    clues = torch.zeros(9, 9, dtype=torch.long)
+    clues[0, 0] = 5
+    correct_cells, total_cells, correct_puzzles = _accumulate_pred_stats(
+        result,
+        answer,
+        clues,
+        correct_cells=0,
+        total_cells=0,
+        correct_puzzles=0,
+    )
+    assert total_cells == 81 - 1
+    assert correct_cells == int((result.pred[clues == 0] == answer[clues == 0]).sum())
+    assert correct_puzzles == int((result.pred == answer).all())
 
 
 def test_save_epoch_metrics_omits_missing_train_acc(tmp_path: Path) -> None:

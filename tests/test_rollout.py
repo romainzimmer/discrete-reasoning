@@ -15,6 +15,7 @@ from rollout import (
     _ClueContext,
     _compute_rollout_loss_batch_mean,
     _curriculum_initial,
+    _discard_rollout_graph,
     _inner_loop,
     _init_rollout_state,
     _noisy_ground_truth_initial,
@@ -121,7 +122,7 @@ def test_outer_detach_isolates_blocks():
     assert state.input_embed.grad is None
 
 
-def test_last_outer_backward_matches_rollout_train_batch():
+def test_per_outer_backward_matches_rollout_train_batch():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     clues, answer = _tiny_batch()
@@ -158,7 +159,49 @@ def test_last_outer_backward_matches_rollout_train_batch():
     assert torch.allclose(grad_acc, grad_direct, rtol=1e-5, atol=1e-5)
 
 
-def test_earlier_outer_loops_do_not_backprop():
+def test_each_outer_backward_accumulates_param_grad():
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    clues, answer = _tiny_batch()
+    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=3)
+    ctx = _ClueContext.from_rollout_clues(clues)
+
+    per_outer_grads: list[torch.Tensor] = []
+    state = _init_rollout_state(clues)
+    for _ in range(config.outer_iters):
+        model.zero_grad(set_to_none=True)
+        state.input_embed = model.encode_input(state.digit_id, state.clue_pin)
+        state.cell_embed = None
+        logits = _inner_loop(model, state, config.inner_iters, with_grad=True)
+        outer_loss = _compute_rollout_loss_batch_mean(
+            logits,
+            clue_pin=ctx.clue_pin,
+            answer=answer,
+        )
+        (outer_loss / config.outer_iters).backward()
+        per_outer_grads.append(_first_param(model).grad.clone())
+        logits = logits.detach()
+        _discard_rollout_graph(state)
+        state.digit_id = _outer_commit(logits, ctx)
+
+    model.zero_grad(set_to_none=True)
+    torch.manual_seed(0)
+    rollout_train_batch(
+        model,
+        clues,
+        answer,
+        config=config,
+        compute_pred=False,
+        accumulate_grad=True,
+    )
+    assert _first_param(model).grad is not None
+    expected = torch.zeros_like(_first_param(model))
+    for grad in per_outer_grads:
+        expected += grad
+    assert torch.allclose(_first_param(model).grad, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_outer_commits_block_cross_outer_grad():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     clues, answer = _tiny_batch()
@@ -167,29 +210,67 @@ def test_earlier_outer_loops_do_not_backprop():
     state = _init_rollout_state(clues)
     state.input_embed = model.encode_input(state.digit_id, state.clue_pin)
 
-    with torch.no_grad():
-        logits_o1 = _inner_loop(model, state, inner_iters=2)
-        digit_o1 = _outer_commit(logits_o1, ctx)
+    logits_o1 = _inner_loop(model, state, inner_iters=2, with_grad=True)
+    loss_o1 = _compute_rollout_loss_batch_mean(
+        logits_o1,
+        clue_pin=ctx.clue_pin,
+        answer=answer,
+    )
+    loss_o1.backward()
+    grad_after_o1 = _first_param(model).grad.clone()
+    assert grad_after_o1 is not None
+
+    model.zero_grad(set_to_none=True)
+    digit_o1 = _outer_commit(logits_o1, ctx)
     state.digit_id = digit_o1
     state.input_embed = model.encode_input(state.digit_id, state.clue_pin)
     state.cell_embed = None
 
-    with torch.no_grad():
-        logits_o2 = _inner_loop(model, state, inner_iters=2)
-        digit_o2 = _outer_commit(logits_o2, ctx)
-    state.digit_id = digit_o2
-    state.input_embed = model.encode_input(state.digit_id, state.clue_pin)
-    state.cell_embed = None
-
-    logits_o3 = _inner_loop(model, state, inner_iters=2, with_grad=True)
-    loss = _compute_rollout_loss_batch_mean(
-        logits_o3,
+    logits_o2 = _inner_loop(model, state, inner_iters=2, with_grad=True)
+    loss_o2 = _compute_rollout_loss_batch_mean(
+        logits_o2,
         clue_pin=ctx.clue_pin,
         answer=answer,
     )
-    loss.backward()
+    loss_o2.backward()
     assert _first_param(model).grad is not None
-    assert state.input_embed.grad is None
+    assert not torch.allclose(_first_param(model).grad, grad_after_o1)
+
+
+def test_training_supervises_every_outer_loop():
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    clues, answer = _tiny_batch()
+    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=3)
+    ctx = _ClueContext.from_rollout_clues(clues)
+    state = _init_rollout_state(clues)
+
+    per_outer_losses: list[float] = []
+    for _ in range(config.outer_iters):
+        state.input_embed = model.encode_input(state.digit_id, state.clue_pin)
+        state.cell_embed = None
+        logits = _inner_loop(model, state, config.inner_iters, with_grad=False)
+        per_outer_losses.append(
+            _compute_rollout_loss_batch_mean(
+                logits,
+                clue_pin=ctx.clue_pin,
+                answer=answer,
+            ).item()
+        )
+        state.digit_id = _outer_commit(logits, ctx)
+        state.cell_embed = None
+
+    torch.manual_seed(0)
+    result = rollout_train_batch(
+        model,
+        clues,
+        answer,
+        config=config,
+        compute_pred=False,
+        accumulate_grad=True,
+    )
+    assert result.loss.item() == pytest.approx(sum(per_outer_losses) / len(per_outer_losses))
+    assert len(per_outer_losses) == config.outer_iters
 
 
 def test_curriculum_init():

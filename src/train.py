@@ -200,6 +200,27 @@ def _accumulate_loss(
     return total_loss, n
 
 
+def _accumulate_pred_stats(
+    result: RolloutResult,
+    answer: torch.Tensor,
+    clues: torch.Tensor,
+    *,
+    correct_cells: int,
+    total_cells: int,
+    correct_puzzles: int,
+) -> tuple[int, int, int]:
+    if result.pred is None:
+        return correct_cells, total_cells, correct_puzzles
+    preds = result.pred.unsqueeze(0) if result.pred.dim() == 2 else result.pred
+    answers = answer.unsqueeze(0) if answer.dim() == 2 else answer
+    clue_rows = clues.unsqueeze(0) if clues.dim() == 2 else clues
+    mask = clue_rows == 0
+    correct_cells += int((preds[mask] == answers[mask]).sum().item())
+    total_cells += int(mask.sum().item())
+    correct_puzzles += int((preds == answers).all(dim=(-2, -1)).sum().item())
+    return correct_cells, total_cells, correct_puzzles
+
+
 def _accumulate_eval_stats(
     result: RolloutResult,
     answer: torch.Tensor,
@@ -214,14 +235,14 @@ def _accumulate_eval_stats(
     batch_size = answer.size(0) if answer.dim() == 3 else 1
     total_loss += result.loss.item() * batch_size
     n += batch_size
-    if result.pred is not None:
-        preds = result.pred.unsqueeze(0) if result.pred.dim() == 2 else result.pred
-        answers = answer.unsqueeze(0) if answer.dim() == 2 else answer
-        clue_rows = clues.unsqueeze(0) if clues.dim() == 2 else clues
-        mask = clue_rows == 0
-        correct_cells += int((preds[mask] == answers[mask]).sum().item())
-        total_cells += int(mask.sum().item())
-        correct_puzzles += int((preds == answers).all(dim=(-2, -1)).sum().item())
+    correct_cells, total_cells, correct_puzzles = _accumulate_pred_stats(
+        result,
+        answer,
+        clues,
+        correct_cells=correct_cells,
+        total_cells=total_cells,
+        correct_puzzles=correct_puzzles,
+    )
     return total_loss, correct_cells, total_cells, correct_puzzles, n
 
 
@@ -229,10 +250,20 @@ def _train_stats_from_accumulators(
     *,
     total_loss: float,
     n: int,
+    correct_cells: int = 0,
+    total_cells: int = 0,
+    correct_puzzles: int = 0,
+    compute_train_acc: bool = False,
 ) -> TrainEpochStats:
     if n == 0:
         return TrainEpochStats(loss=0.0)
-    return TrainEpochStats(loss=total_loss / n)
+    if not compute_train_acc:
+        return TrainEpochStats(loss=total_loss / n)
+    return TrainEpochStats(
+        loss=total_loss / n,
+        cell_acc=correct_cells / total_cells if total_cells else 0.0,
+        puzzle_acc=correct_puzzles / n,
+    )
 
 
 def _stats_from_accumulators(
@@ -264,9 +295,13 @@ def train_epoch(
     batch_size: int,
     use_cuda: bool,
     max_grad_norm: float,
+    compute_train_acc: bool = False,
 ) -> TrainEpochStats:
     model.train()
     total_loss = 0.0
+    correct_cells = 0
+    total_cells = 0
+    correct_puzzles = 0
     n = 0
     progress = tqdm(
         loader,
@@ -282,7 +317,7 @@ def train_epoch(
             batch["clues"],
             batch["answer"],
             config=rollout_config,
-            compute_pred=False,
+            compute_pred=compute_train_acc,
             accumulate_grad=True,
         )
         if max_grad_norm > 0:
@@ -294,14 +329,27 @@ def train_epoch(
             total_loss=total_loss,
             n=n,
         )
-        progress.set_postfix(
-            loss=f"{total_loss / n:.4f}",
-            refresh=False,
-        )
+        if compute_train_acc:
+            correct_cells, total_cells, correct_puzzles = _accumulate_pred_stats(
+                result,
+                batch["answer"],
+                batch["clues"],
+                correct_cells=correct_cells,
+                total_cells=total_cells,
+                correct_puzzles=correct_puzzles,
+            )
+        postfix = {"loss": f"{total_loss / n:.4f}"}
+        if compute_train_acc and total_cells:
+            postfix["cell_acc"] = f"{correct_cells / total_cells:.4f}"
+        progress.set_postfix(**postfix, refresh=False)
     progress.close()
     return _train_stats_from_accumulators(
         total_loss=total_loss,
         n=n,
+        correct_cells=correct_cells,
+        total_cells=total_cells,
+        correct_puzzles=correct_puzzles,
+        compute_train_acc=compute_train_acc,
     )
 
 
@@ -383,7 +431,7 @@ def main() -> None:
         "--train-inner-iters",
         type=int,
         default=DEFAULT_INNER_ITERS,
-        help="Inner steps per outer loop during training (grad only on the last outer loop)",
+        help="Inner steps per outer loop during training (full BPTT; loss on every outer loop)",
     )
     parser.add_argument(
         "--train-outer-iters",
@@ -434,7 +482,7 @@ def main() -> None:
     parser.add_argument(
         "--compute-train-acc",
         action="store_true",
-        help="After each epoch, run eval-style rollouts on the train split for train cell/puzzle accuracy",
+        help="Track train cell/puzzle accuracy from the final training logits each batch",
     )
     parser.add_argument("--aug-digit-proba", type=float, default=0.5)
     parser.add_argument("--aug-rot-proba", type=float, default=0.5)
@@ -482,15 +530,6 @@ def main() -> None:
     }
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **loader_kwargs)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, **loader_kwargs)
-    train_acc_loader: DataLoader | None = None
-    if args.compute_train_acc:
-        train_acc_ds = PuzzleDataset(rows=train_rows, augment=False)
-        train_acc_loader = DataLoader(
-            train_acc_ds,
-            batch_size=args.batch_size,
-            shuffle=False,
-            **loader_kwargs,
-        )
 
     args.model = "mixer-looped"
     model = MixerNextStateModel(dim=args.dim, num_blocks=args.num_blocks).to(device)
@@ -545,25 +584,8 @@ def main() -> None:
             batch_size=args.batch_size,
             use_cuda=use_cuda,
             max_grad_norm=args.max_grad_norm,
+            compute_train_acc=args.compute_train_acc,
         )
-        if args.compute_train_acc:
-            assert train_acc_loader is not None
-            train_acc = measure_split(
-                model,
-                train_acc_loader,
-                device,
-                epoch=epoch,
-                epochs=args.epochs,
-                phase="train acc",
-                rollout_config=eval_rollout_config,
-                use_cuda=use_cuda,
-                seed=args.seed,
-            )
-            train = TrainEpochStats(
-                loss=train.loss,
-                cell_acc=train_acc.cell_acc,
-                puzzle_acc=train_acc.puzzle_acc,
-            )
         val = measure_split(
             model,
             val_loader,
