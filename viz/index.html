@@ -398,8 +398,6 @@
       if (args.width != null && args.num_blocks != null) {
         return `${args.width} x${args.num_blocks}`;
       }
-      if (args.hidden_sizes?.length) return args.hidden_sizes.join(" → ");
-      if (args.hidden != null) return String(args.hidden);
       return "—";
     }
 
@@ -408,9 +406,10 @@
       const valN = args.val_samples_count ?? args.val_samples;
       const testN = args.test_samples_count ?? args.test_samples ?? args.max_samples;
       const stats = [
+        { label: "Model", value: args.model ?? "—" },
         { label: "Learning rate", value: args.lr },
         { label: "Weight decay", value: args.weight_decay ?? 0 },
-        { label: "Hidden layers", value: formatHiddenSizes(args) },
+        { label: "Mixer (D × blocks)", value: formatHiddenSizes(args) },
         {
           label: "Train inner / outer iters",
           value: `${args.train_inner_iters ?? "?"} / ${args.train_outer_iters ?? "?"}`,
@@ -462,6 +461,21 @@
       if (count <= 1) return [min];
       const range = max - min || 1;
       return Array.from({ length: count }, (_, i) => min + (range * i) / (count - 1));
+    }
+
+    function xTickIndices(n, plotW, minLabelPx = 48) {
+      if (n <= 0) return [];
+      if (n === 1) return [0];
+      const minGap = Math.max(1, Math.ceil((minLabelPx * (n - 1)) / plotW));
+      const indices = [0];
+      let i = 0;
+      while (i + minGap < n - 1) {
+        i += minGap;
+        indices.push(i);
+      }
+      if (n - 1 - indices.at(-1) < minGap) indices.pop();
+      if (indices.at(-1) !== n - 1) indices.push(n - 1);
+      return indices;
     }
 
     const CHART_HEIGHT = 180;
@@ -537,7 +551,8 @@
       ctx.lineTo(width - padRight, padTop + plotH);
       ctx.stroke();
 
-      for (let i = 0; i < n; i++) {
+      const xIndices = xTickIndices(n, plotW);
+      for (const i of xIndices) {
         const x = xAt(i);
         ctx.beginPath();
         ctx.moveTo(x, padTop + plotH);
@@ -587,7 +602,7 @@
       const gridEl = document.getElementById("testSummary");
       const noteEl = document.getElementById("testSectionNote");
       const panelEl = document.getElementById("testPanel");
-      const test = metrics?.test ?? legacyTestMetrics(metrics);
+      const test = metrics?.test;
       if (!test) {
         gridEl.innerHTML = "";
         noteEl.textContent = "";
@@ -609,7 +624,7 @@
         { label: "Puzzle accuracy", value: test.puzzle_acc, format: pct },
         {
           label: "Inner / outer iters",
-          value: `${test.inner_iters ?? "?"}/${test.outer_iters ?? test.rollout_iters ?? "?"}`,
+          value: `${test.inner_iters ?? "?"}/${test.outer_iters ?? "?"}`,
         },
       ]
         .filter(stat => stat.value != null)
@@ -618,19 +633,6 @@
           value: stat.format ? stat.format(stat.value) : stat.value,
         }));
       gridEl.innerHTML = renderStatGrid(stats);
-    }
-
-    function legacyTestMetrics(metrics) {
-      const last = metrics?.epochs?.at(-1);
-      if (!last) return null;
-      const loss = last.test_loss ?? last.eval_loss;
-      if (loss == null) return null;
-      return {
-        best_epoch: last.epoch,
-        loss,
-        cell_acc: last.test_cell_acc ?? last.eval_cell_acc,
-        puzzle_acc: last.test_puzzle_acc ?? last.eval_puzzle_acc,
-      };
     }
 
     function renderCharts() {

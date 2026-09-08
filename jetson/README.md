@@ -8,6 +8,19 @@ All commands run from `jetson/`:
 cd jetson
 ```
 
+## Model
+
+Training uses a **mixer-looped** model: embed the grid → looped MLP-Mixer updates `h_{t+1} = M(h_t + P)` → unembed to 10-way logits.
+
+- **`--width`**: embedding / mixer channel size (D)
+- **`--num-blocks`**: mixer layers inside each inner step (depth of M)
+- **`--train-inner-iters` / `--eval-inner-iters`**: looped `h + P` steps per outer argmax commit
+- **`--train-outer-iters` / `--eval-outer-iters`**: outer argmax commits per puzzle
+
+Runs save `args.model: mixer-looped` in `history.json`. **Old checkpoints from before this migration cannot be loaded by `eval`.**
+
+The mixer keeps a recurrent `cell_embed` per batch; it uses more GPU memory than the old flat model. If you hit OOM, lower `--batch-size` (512 may need tuning on Jetson).
+
 ## Build
 
 Only needed once (or when dependencies change). Source code is bind-mounted from `../src`, so Python changes do not require a rebuild.
@@ -42,36 +55,65 @@ Writes `data/train.csv` and `data/test.csv` (~798 MB).
 
 ## Train
 
-```bash
-docker compose run --rm train --epochs 150 --width 512 --num-blocks 1 --batch-size 512 --num-workers 3 --val-samples 1024 --train-init noisy-gt --max-samples 52224 --train-inner-iters 10 --train-outer-iters 1 --eval-inner-iters 10 --eval-outer-iters 10 --truncated-bptt-steps 4 --outer-commit-prob 1
-```
-
-Quick test (easy sudoku, 1k train cap):
+Main run (mixer-looped; reduce `--batch-size` if OOM):
 
 ```bash
-docker compose run --rm train --epochs 5 --width 512 --num-blocks 1 --train-inner-iters 2 --train-outer-iters 1 --eval-inner-iters 2 --eval-outer-iters 3 --batch-size 64 --num-workers 1 --max-samples 6464 --min-rating 0 --max-rating 0 --val-samples 64 --train-init noisy-gt
+docker compose run --rm train \
+  --epochs 150 \
+  --width 512 \
+  --num-blocks 1 \
+  --batch-size 256 \
+  --num-workers 3 \
+  --val-samples 1024 \
+  --train-init noisy-gt \
+  --max-samples 52224 \
+  --train-inner-iters 10 \
+  --train-outer-iters 1 \
+  --eval-inner-iters 10 \
+  --eval-outer-iters 10 \
+  --truncated-bptt-steps 4
 ```
 
-Checkpoints and trajectories are written to `runs/`.
+Quick test (easy sudoku, ~1k train cap):
+
+```bash
+docker compose run --rm train \
+  --epochs 5 \
+  --width 512 \
+  --num-blocks 1 \
+  --train-inner-iters 2 \
+  --train-outer-iters 1 \
+  --eval-inner-iters 2 \
+  --eval-outer-iters 3 \
+  --batch-size 64 \
+  --num-workers 1 \
+  --max-samples 6464 \
+  --min-rating 0 \
+  --max-rating 0 \
+  --val-samples 64 \
+  --train-init noisy-gt
+```
+
+Checkpoints and trajectories are written to `runs/`. Trajectory JSON is unchanged: one frame per **outer** commit in `states[]`.
 
 ## Test
 
-Evaluate `best.pt` from a run (reuses model and rollout settings from the checkpoint; test rating filters are independent of training):
+Evaluate `best.pt` from a run trained after the mixer migration (`args.model: mixer-looped` in `history.json`). Reuses model and rollout settings from the checkpoint; test rating filters are independent of training:
 
 ```bash
-docker compose run --rm eval runs/20260906-145132-bda4748d
+docker compose run --rm eval runs/<run-id>
 ```
 
 Cap test puzzles:
 
 ```bash
-docker compose run --rm eval runs/20260906-145132-bda4748d --max-test-samples 1000
+docker compose run --rm eval runs/<run-id> --max-test-samples 1000
 ```
 
 Filter test by rating (omit both flags to evaluate all ratings):
 
 ```bash
-docker compose run --rm eval runs/20260906-145132-bda4748d --min-rating 5 --max-rating 9
+docker compose run --rm eval runs/<run-id> --min-rating 5 --max-rating 9
 ```
 
 ## Visualize
@@ -89,3 +131,8 @@ ssh -L 8000:localhost:8000 jetson
 ```
 
 Then open http://localhost:8000/viz/
+
+## References
+
+- [Less is More: Recursive Reasoning with Tiny Networks (TRM)](https://arxiv.org/html/2510.04871v1) — MLP-Mixer blocks
+- [Looped Transformers are Better at Learning Learning Algorithms](https://arxiv.org/pdf/2311.12424) — looped update `Y_{t+1} = M(Y_t + P)`

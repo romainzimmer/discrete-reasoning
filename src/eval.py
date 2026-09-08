@@ -9,17 +9,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
-from model import NextStateModel
-from rollout import DEFAULT_INNER_ITERS, DEFAULT_OUTER_COMMIT_PROB, DEFAULT_OUTER_ITERS, RolloutConfig
+from model import MixerNextStateModel
 from train import EpochStats, build_rollout_config, measure_split, require_run_args
-
-
-def eval_rollout_iters_from_run_args(run_args: dict) -> tuple[int, int]:
-    if "eval_inner_iters" in run_args and "eval_outer_iters" in run_args:
-        return int(run_args["eval_inner_iters"]), int(run_args["eval_outer_iters"])
-    if "eval_rollout_iter" in run_args:
-        return 1, int(run_args["eval_rollout_iter"])
-    return DEFAULT_INNER_ITERS, DEFAULT_OUTER_ITERS
 
 
 def save_test_metrics(
@@ -118,20 +109,18 @@ def main() -> None:
         num_workers=run_args["num_workers"],
     )
 
-    model = NextStateModel(
+    model = MixerNextStateModel(
         width=run_args["width"],
         num_blocks=run_args["num_blocks"],
     ).to(device)
     model.load_state_dict(ckpt["model"])
 
-    default_inner, default_outer = eval_rollout_iters_from_run_args(run_args)
-    inner_iters = args.inner_iters if args.inner_iters is not None else default_inner
-    outer_iters = args.outer_iters if args.outer_iters is not None else default_outer
+    inner_iters = args.inner_iters if args.inner_iters is not None else int(run_args["eval_inner_iters"])
+    outer_iters = args.outer_iters if args.outer_iters is not None else int(run_args["eval_outer_iters"])
     rollout_config = build_rollout_config(
         train_init="clues",
         inner_iters=inner_iters,
         outer_iters=outer_iters,
-        outer_commit_prob=float(run_args.get("outer_commit_prob", DEFAULT_OUTER_COMMIT_PROB)),
         fixed_point=bool(run_args.get("fixed_point", True)),
     )
 

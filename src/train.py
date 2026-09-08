@@ -14,10 +14,9 @@ from tqdm import tqdm
 
 from augment import AugmentConfig
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
-from model import NextStateModel
+from model import MixerNextStateModel
 from rollout import (
     DEFAULT_INNER_ITERS,
-    DEFAULT_OUTER_COMMIT_PROB,
     DEFAULT_OUTER_ITERS,
     DEFAULT_TRUNCATED_BPTT_STEPS,
     RolloutConfig,
@@ -34,6 +33,7 @@ from viz_data import (
 DEFAULT_RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
 
 REQUIRED_RUN_ARGS = (
+    "model",
     "width",
     "num_blocks",
     "train_inner_iters",
@@ -51,7 +51,6 @@ def build_rollout_config(
     train_init: str,
     inner_iters: int,
     outer_iters: int,
-    outer_commit_prob: float = DEFAULT_OUTER_COMMIT_PROB,
     fixed_point: bool = True,
     truncated_bptt_steps: int = DEFAULT_TRUNCATED_BPTT_STEPS,
 ) -> RolloutConfig:
@@ -59,7 +58,6 @@ def build_rollout_config(
         train_init=train_init,
         inner_iters=inner_iters,
         outer_iters=outer_iters,
-        outer_commit_prob=outer_commit_prob,
         fixed_point=fixed_point,
         truncated_bptt_steps=truncated_bptt_steps,
     )
@@ -103,12 +101,6 @@ def require_run_args(raw: dict, *, source: str) -> dict:
     args = raw.get("args")
     if args is None:
         raise KeyError(f"{source} has no 'args'")
-    if "train_inner_iters" not in args and "train_rollout_iter" in args:
-        args.setdefault("train_inner_iters", 1)
-        args.setdefault("train_outer_iters", args["train_rollout_iter"])
-    if "eval_inner_iters" not in args and "eval_rollout_iter" in args:
-        args.setdefault("eval_inner_iters", 1)
-        args.setdefault("eval_outer_iters", args["eval_rollout_iter"])
     missing = [key for key in REQUIRED_RUN_ARGS if key not in args]
     if missing:
         raise KeyError(
@@ -169,7 +161,7 @@ def save_epoch_metrics(
     history_path.write_text(json.dumps(history, indent=2))
 
 
-def save_epoch_checkpoint(run_dir: Path, epoch: int, model: NextStateModel) -> None:
+def save_epoch_checkpoint(run_dir: Path, epoch: int, model: MixerNextStateModel) -> None:
     epoch_dir = run_dir / "epochs"
     epoch_dir.mkdir(parents=True, exist_ok=True)
     torch.save({"epoch": epoch, "model": model.state_dict()}, epoch_dir / f"{epoch:04d}.pt")
@@ -178,7 +170,7 @@ def save_epoch_checkpoint(run_dir: Path, epoch: int, model: NextStateModel) -> N
 def save_checkpoint(
     path: Path,
     *,
-    model: NextStateModel,
+    model: MixerNextStateModel,
     optimizer: torch.optim.Optimizer,
     epoch: int,
     train: TrainEpochStats,
@@ -264,7 +256,7 @@ def _stats_from_accumulators(
 
 
 def train_epoch(
-    model: NextStateModel,
+    model: MixerNextStateModel,
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
@@ -291,7 +283,6 @@ def train_epoch(
         result = rollout_train_batch(
             model,
             batch["clues"],
-            batch["clues_onehot"],
             batch["answer"],
             config=rollout_config,
             compute_pred=False,
@@ -325,7 +316,7 @@ def _seed_all(seed: int) -> None:
 
 @torch.inference_mode()
 def measure_split(
-    model: NextStateModel,
+    model: MixerNextStateModel,
     loader: DataLoader,
     device: torch.device,
     *,
@@ -355,7 +346,6 @@ def measure_split(
         result = rollout_train_batch(
             model,
             batch["clues"],
-            batch["clues_onehot"],
             batch["answer"],
             config=rollout_config,
         )
@@ -390,8 +380,8 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-2, help="L2 regularization on weights only (not bias)")
     parser.add_argument("--max-grad-norm", type=float, default=0.0, help="Clip gradient global norm (0 disables)")
-    parser.add_argument("--width", type=int, default=512, help="FFN block width")
-    parser.add_argument("--num-blocks", type=int, default=2, help="Number of FFN blocks")
+    parser.add_argument("--width", type=int, default=512, help="Embedding / mixer channel width (D)")
+    parser.add_argument("--num-blocks", type=int, default=2, help="Mixer blocks per inner step (layers in M)")
     parser.add_argument(
         "--train-inner-iters",
         type=int,
@@ -415,12 +405,6 @@ def main() -> None:
         type=int,
         default=DEFAULT_OUTER_ITERS,
         help="Argmax commits per puzzle during val/viz/test",
-    )
-    parser.add_argument(
-        "--outer-commit-prob",
-        type=float,
-        default=DEFAULT_OUTER_COMMIT_PROB,
-        help="Per-cell probability of updating rollout state from decoded logits each outer step",
     )
     parser.add_argument(
         "--no-fixed-point",
@@ -508,7 +492,8 @@ def main() -> None:
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **loader_kwargs)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, **loader_kwargs)
 
-    model = NextStateModel(width=args.width, num_blocks=args.num_blocks).to(device)
+    args.model = "mixer-looped"
+    model = MixerNextStateModel(width=args.width, num_blocks=args.num_blocks).to(device)
     decay_params, no_decay_params = [], []
     for name, param in model.named_parameters():
         if not param.requires_grad:
@@ -534,7 +519,6 @@ def main() -> None:
         train_init=train_init,
         inner_iters=args.train_inner_iters,
         outer_iters=args.train_outer_iters,
-        outer_commit_prob=args.outer_commit_prob,
         fixed_point=not args.no_fixed_point,
         truncated_bptt_steps=args.truncated_bptt_steps,
     )
@@ -542,7 +526,6 @@ def main() -> None:
         train_init="clues",
         inner_iters=args.eval_inner_iters,
         outer_iters=args.eval_outer_iters,
-        outer_commit_prob=args.outer_commit_prob,
         fixed_point=not args.no_fixed_point,
     )
     best_val_cell_acc = -1.0

@@ -5,7 +5,6 @@ from torch.utils.data import Dataset
 
 from augment import AugmentConfig, apply_augment
 from data import answer_to_tensor, load_split, puzzle_to_tensor
-from encoding import grid_to_onehot
 
 
 def filter_rows(
@@ -80,7 +79,6 @@ class PuzzleDataset(Dataset):
             )
         return {
             "clues": clues,
-            "clues_onehot": grid_to_onehot(clues),
             "answer": answer,
         }
 
@@ -88,7 +86,6 @@ class PuzzleDataset(Dataset):
 def collate_puzzles(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
     return {
         "clues": torch.stack([item["clues"] for item in batch]),
-        "clues_onehot": torch.stack([item["clues_onehot"] for item in batch]),
         "answer": torch.stack([item["answer"] for item in batch]),
     }
 

@@ -6,8 +6,7 @@ from pathlib import Path
 import torch
 
 from data import puzzle_to_tensor
-from encoding import grid_to_onehot
-from model import NextStateModel
+from model import MixerNextStateModel
 from rollout import RolloutConfig, rollout_trace_batch
 
 
@@ -68,7 +67,7 @@ def _trajectory_payload(
 
 
 def save_epoch_trajectories(
-    model: NextStateModel,
+    model: MixerNextStateModel,
     rows: list[dict],
     *,
     split: str,
@@ -90,7 +89,6 @@ def save_epoch_trajectories(
         clues = torch.stack([puzzle_to_tensor(row["question"]) for row in chunk]).to(device)
         trajectories = rollout_trace_batch(
             model,
-            grid_to_onehot(clues),
             clues,
             config=rollout_config,
         )

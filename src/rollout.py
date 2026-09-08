@@ -8,14 +8,13 @@ import torch
 import torch.nn.functional as F
 
 from data import tensor_to_string
-from encoding import attach_clue_mask, grid_to_onehot, onehot_to_grid
-from model import NextStateModel
+from encoding import decode_logits, target_mask
+from model import MixerNextStateModel
 
 TrainInitMode = Literal["clues", "noisy_gt", "zero_gt", "curriculum"]
 
 DEFAULT_INNER_ITERS = 5
 DEFAULT_OUTER_ITERS = 10
-DEFAULT_OUTER_COMMIT_PROB = 1.0
 DEFAULT_TRUNCATED_BPTT_STEPS = 2
 
 
@@ -24,7 +23,6 @@ class RolloutConfig:
     train_init: TrainInitMode = "noisy_gt"
     inner_iters: int = DEFAULT_INNER_ITERS
     outer_iters: int = DEFAULT_OUTER_ITERS
-    outer_commit_prob: float = DEFAULT_OUTER_COMMIT_PROB
     fixed_point: bool = True
     truncated_bptt_steps: int = DEFAULT_TRUNCATED_BPTT_STEPS
 
@@ -33,8 +31,6 @@ class RolloutConfig:
             raise ValueError("inner_iters must be >= 1")
         if self.outer_iters < 1:
             raise ValueError("outer_iters must be >= 1")
-        if not 0.0 < self.outer_commit_prob <= 1.0:
-            raise ValueError("outer_commit_prob must be in (0, 1]")
         if not 0 <= self.truncated_bptt_steps <= self.inner_iters:
             raise ValueError("truncated_bptt_steps must be in [0, inner_iters]")
         if self.fixed_point and self.inner_iters < 2:
@@ -43,24 +39,31 @@ class RolloutConfig:
 
 @dataclass(frozen=True)
 class _ClueContext:
-    clue_state: torch.Tensor
-    clue_mask: torch.Tensor
-    clue_mask_channel: torch.Tensor
+    clue_digit_ids: torch.Tensor
+    clue_pin: torch.Tensor
 
     @classmethod
-    def from_clues(cls, clues: torch.Tensor, clues_onehot: torch.Tensor | None = None) -> _ClueContext:
-        mask = (clues > 0).unsqueeze(-1)
-        return cls(
-            clue_state=clues_onehot if clues_onehot is not None else grid_to_onehot(clues),
-            clue_mask=mask,
-            clue_mask_channel=mask.to(dtype=torch.float32),
-        )
+    def from_rollout_clues(cls, rollout_clues: torch.Tensor) -> _ClueContext:
+        clue_pin = rollout_clues > 0
+        return cls(clue_digit_ids=rollout_clues, clue_pin=clue_pin)
+
+
+@dataclass
+class RolloutState:
+    digit_id: torch.Tensor
+    clue_pin: torch.Tensor
+    input_embed: torch.Tensor | None = None
+    cell_embed: torch.Tensor | None = None
 
 
 @dataclass
 class RolloutResult:
     loss: torch.Tensor
     pred: torch.Tensor | None = None
+
+
+def _pin_clue_digits(digit_id: torch.Tensor, ctx: _ClueContext) -> torch.Tensor:
+    return torch.where(ctx.clue_pin, ctx.clue_digit_ids, digit_id)
 
 
 def _random_zero_non_clue_grid(answer: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
@@ -77,11 +80,8 @@ def _random_zero_non_clue_grid(answer: torch.Tensor, clues: torch.Tensor) -> tor
 def _noisy_ground_truth_initial(
     answer: torch.Tensor,
     clues: torch.Tensor,
-    *,
-    clues_onehot: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Start from ground truth; flip whole non-clue cells to another digit with prob p~U[0,1]."""
-    ctx = _ClueContext.from_clues(clues, clues_onehot)
     non_clue = clues == 0
     if answer.dim() == 2:
         p = torch.rand((), device=answer.device)
@@ -90,21 +90,17 @@ def _noisy_ground_truth_initial(
     flip_cell = (torch.rand_like(clues, dtype=torch.float32) < p) & non_clue
     offset = torch.randint(1, 9, answer.shape, device=answer.device)
     flipped = (answer - 1 + offset) % 9 + 1
-    corrupted_grid = torch.where(flip_cell, flipped, answer)
-    onehot = grid_to_onehot(corrupted_grid)
-    return torch.where(ctx.clue_mask, ctx.clue_state, onehot)
+    corrupted = torch.where(flip_cell, flipped, answer)
+    return _pin_clue_digits(corrupted, _ClueContext.from_rollout_clues(clues))
 
 
 def _zeroed_ground_truth_initial(
     answer: torch.Tensor,
     clues: torch.Tensor,
-    *,
-    clues_onehot: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Start from ground truth; zero each non-clue cell with prob p~U[0,1]."""
-    ctx = _ClueContext.from_clues(clues, clues_onehot)
-    onehot = grid_to_onehot(_random_zero_non_clue_grid(answer, clues))
-    return torch.where(ctx.clue_mask, ctx.clue_state, onehot)
+    zeroed = _random_zero_non_clue_grid(answer, clues)
+    return _pin_clue_digits(zeroed, _ClueContext.from_rollout_clues(clues))
 
 
 def _curriculum_initial(
@@ -113,72 +109,64 @@ def _curriculum_initial(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Reveal GT on non-clue cells with prob (1-p), p~U[0,1]; hidden cells get random digits."""
     rollout_clues = _random_zero_non_clue_grid(answer, clues)
-    grid = rollout_clues.clone()
+    digit_id = rollout_clues.clone()
     hidden = (rollout_clues == 0) & (clues == 0)
     if hidden.any():
-        grid[hidden] = torch.randint(1, 10, (int(hidden.sum().item()),), device=clues.device)
-    return grid_to_onehot(grid), rollout_clues
+        digit_id[hidden] = torch.randint(1, 10, (int(hidden.sum().item()),), device=clues.device)
+    ctx = _ClueContext.from_rollout_clues(rollout_clues)
+    digit_id = _pin_clue_digits(digit_id, ctx)
+    return digit_id, rollout_clues
 
 
 def _training_rollout_inputs(
     config: RolloutConfig,
     answer: torch.Tensor,
     clues: torch.Tensor,
-    clues_onehot: torch.Tensor,
 ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
     if config.train_init == "curriculum":
-        initial_onehot, rollout_clues = _curriculum_initial(answer, clues)
-        return initial_onehot, rollout_clues, grid_to_onehot(rollout_clues)
-    initial_onehot = None
+        initial_digit_id, rollout_clues = _curriculum_initial(answer, clues)
+        return initial_digit_id, rollout_clues, (rollout_clues > 0)
+    initial_digit_id = None
+    rollout_clues = clues
+    clue_pin = clues > 0
     if config.train_init == "noisy_gt":
-        initial_onehot = _noisy_ground_truth_initial(answer, clues, clues_onehot=clues_onehot)
+        initial_digit_id = _noisy_ground_truth_initial(answer, clues)
     elif config.train_init == "zero_gt":
-        initial_onehot = _zeroed_ground_truth_initial(answer, clues, clues_onehot=clues_onehot)
-    return initial_onehot, clues, clues_onehot
+        initial_digit_id = _zeroed_ground_truth_initial(answer, clues)
+    return initial_digit_id, rollout_clues, clue_pin
 
 
 def predict_grid(logits: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
     """Hard argmax decode with clues pinned."""
-    pred = logits.argmax(dim=-1) + 1
+    pred = decode_logits(logits)
     return torch.where(clues > 0, clues, pred)
 
 
-def target_mask(target: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
-    """Loss mask: non-clue cells that are filled in the target."""
-    return (target > 0) & (clues == 0)
-
-
-def _ensure_batched_clues(clues: torch.Tensor) -> tuple[torch.Tensor, bool]:
-    if clues.dim() == 2:
-        return clues.unsqueeze(0), False
-    return clues, True
-
-
-def _ensure_batched_onehot(onehot: torch.Tensor) -> tuple[torch.Tensor, bool]:
-    if onehot.dim() == 3:
-        return onehot.unsqueeze(0), False
-    return onehot, True
+def _ensure_batched(grid: torch.Tensor) -> tuple[torch.Tensor, bool]:
+    if grid.dim() == 2:
+        return grid.unsqueeze(0), False
+    return grid, True
 
 
 def _masked_ce(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     masked_logits = logits[mask, :]
-    targets = target[mask] - 1
+    targets = target[mask]
     return F.cross_entropy(masked_logits, targets)
 
 
 def _compute_rollout_loss_batch_mean(
     logits: torch.Tensor,
     *,
-    clues: torch.Tensor,
+    clue_pin: torch.Tensor,
     answer: torch.Tensor,
 ) -> torch.Tensor:
     """Mean of per-puzzle masked CE (equal weight per puzzle)."""
     if logits.dim() == 3:
-        mask = target_mask(answer, clues)
+        mask = target_mask(answer, clue_pin)
         return _masked_ce(logits, answer, mask)
-    mask = target_mask(answer, clues)
+    mask = target_mask(answer, clue_pin)
     flat_logits = logits.flatten(1, 2)
-    flat_targets = answer.flatten(1, 2) - 1
+    flat_targets = answer.flatten(1, 2)
     flat_mask = mask.flatten(1, 2)
     b, n_cells, n_classes = flat_logits.shape
     per_cell = F.cross_entropy(
@@ -194,78 +182,54 @@ def _compute_inner_loop_loss(
     final_logits: torch.Tensor,
     penultimate_logits: torch.Tensor | None,
     *,
-    clues: torch.Tensor,
+    clue_pin: torch.Tensor,
     answer: torch.Tensor,
 ) -> torch.Tensor:
     final_loss = _compute_rollout_loss_batch_mean(
         final_logits,
-        clues=clues,
+        clue_pin=clue_pin,
         answer=answer,
     )
     if penultimate_logits is None:
         return final_loss
     penultimate_loss = _compute_rollout_loss_batch_mean(
         penultimate_logits,
-        clues=clues,
+        clue_pin=clue_pin,
         answer=answer,
     )
     return (final_loss + penultimate_loss) / 2
 
 
-def logits_to_softmax_state(
-    logits: torch.Tensor,
-    ctx: _ClueContext,
-    rollout_clues: torch.Tensor,
-) -> torch.Tensor:
-    probs = F.softmax(logits, dim=-1)
-    digits = torch.where(ctx.clue_mask, ctx.clue_state, probs)
-    return attach_clue_mask(digits, rollout_clues, clue_mask_channel=ctx.clue_mask_channel)
-
-
-def logits_to_argmax_state(
-    logits: torch.Tensor,
-    ctx: _ClueContext,
-    rollout_clues: torch.Tensor,
-    *,
-    state: torch.Tensor,
-    outer_commit_prob: float = DEFAULT_OUTER_COMMIT_PROB,
-) -> torch.Tensor:
-    decoded = grid_to_onehot(predict_grid(logits, rollout_clues).detach())
-    if outer_commit_prob == 1.0:
-        digits = torch.where(ctx.clue_mask, ctx.clue_state, decoded)
-    else:
-        prev_digits = state[..., :9]
-        update = (torch.rand_like(rollout_clues, dtype=torch.float32) < outer_commit_prob) & ~ctx.clue_mask.squeeze(-1)
-        blended = torch.where(update.unsqueeze(-1), decoded, prev_digits)
-        digits = torch.where(ctx.clue_mask, ctx.clue_state, blended)
-    return attach_clue_mask(digits, rollout_clues, clue_mask_channel=ctx.clue_mask_channel)
+def _outer_commit(logits: torch.Tensor, ctx: _ClueContext) -> torch.Tensor:
+    decoded = decode_logits(logits).detach()
+    return torch.where(ctx.clue_pin, ctx.clue_digit_ids, decoded)
 
 
 def _no_grad_inner_steps(
-    model: NextStateModel,
-    state: torch.Tensor,
-    ctx: _ClueContext,
-    rollout_clues: torch.Tensor,
+    model: MixerNextStateModel,
+    state: RolloutState,
     *,
     inner_iters: int,
     fixed_point: bool,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    assert state.input_embed is not None
     penultimate_logits: torch.Tensor | None = None
+    cell_embed = state.cell_embed
     for step in range(inner_iters):
-        logits = model(state)
+        out = model(input_embed=state.input_embed, cell_embed=cell_embed)
+        logits = out.logits
+        cell_embed = out.cell_embed
         if fixed_point and step == inner_iters - 2:
             penultimate_logits = logits
         if step == inner_iters - 1:
+            state.cell_embed = cell_embed
             return logits, penultimate_logits
-        state = logits_to_softmax_state(logits, ctx, rollout_clues)
     raise RuntimeError("unreachable")
 
 
 def _inner_loop(
-    model: NextStateModel,
-    state: torch.Tensor,
-    ctx: _ClueContext,
-    rollout_clues: torch.Tensor,
+    model: MixerNextStateModel,
+    state: RolloutState,
     inner_iters: int,
     *,
     truncated_bptt_steps: int | None = None,
@@ -276,8 +240,6 @@ def _inner_loop(
         return _no_grad_inner_steps(
             model,
             state,
-            ctx,
-            rollout_clues,
             inner_iters=inner_iters,
             fixed_point=fixed_point,
         )
@@ -286,35 +248,37 @@ def _inner_loop(
         truncated_bptt_steps = DEFAULT_TRUNCATED_BPTT_STEPS
     no_grad_steps = inner_iters - 1 if truncated_bptt_steps == 0 else inner_iters - truncated_bptt_steps
 
+    assert state.input_embed is not None
     penultimate_logits: torch.Tensor | None = None
     final_logits: torch.Tensor | None = None
+    cell_embed = state.cell_embed
 
     for step in range(inner_iters):
         use_no_grad = step < no_grad_steps
         with torch.no_grad() if use_no_grad else nullcontext():
-            logits = model(state)
+            out = model(input_embed=state.input_embed, cell_embed=cell_embed)
+            logits = out.logits
+            cell_embed = out.cell_embed
             if fixed_point and step == inner_iters - 2:
                 penultimate_logits = logits
             if step == inner_iters - 1:
                 final_logits = logits
-            elif step < inner_iters - 1:
-                state = logits_to_softmax_state(logits, ctx, rollout_clues)
         if use_no_grad and step == no_grad_steps - 1:
-            state = state.detach()
+            cell_embed = cell_embed.detach()
 
+    state.cell_embed = cell_embed
     assert final_logits is not None
     return final_logits, penultimate_logits if fixed_point else None
 
 
 def _rollout_loop(
-    model: NextStateModel,
-    state: torch.Tensor,
+    model: MixerNextStateModel,
+    state: RolloutState,
     rollout_clues: torch.Tensor,
     ctx: _ClueContext,
     inner_iters: int,
     outer_iters: int,
     *,
-    outer_commit_prob: float = DEFAULT_OUTER_COMMIT_PROB,
     answer: torch.Tensor | None = None,
     collect_state_grids: bool = False,
     accumulate_grad: bool = False,
@@ -323,14 +287,14 @@ def _rollout_loop(
 ) -> tuple[torch.Tensor, list[torch.Tensor] | None, torch.Tensor]:
     state_grids: list[torch.Tensor] | None = [] if collect_state_grids else None
     outer_losses: list[torch.Tensor] = []
-    logits = state.new_zeros((rollout_clues.size(0), 9, 9, 9))
+    logits = state.digit_id.new_zeros((rollout_clues.size(0), 9, 9, 10), dtype=torch.float32)
 
     for _ in range(outer_iters):
+        state.input_embed = model.encode_input(state.digit_id, state.clue_pin)
+        state.cell_embed = None
         logits, penultimate_logits = _inner_loop(
             model,
             state,
-            ctx,
-            rollout_clues,
             inner_iters,
             truncated_bptt_steps=truncated_bptt_steps,
             fixed_point=fixed_point,
@@ -340,7 +304,7 @@ def _rollout_loop(
             outer_loss = _compute_inner_loop_loss(
                 logits,
                 penultimate_logits,
-                clues=rollout_clues,
+                clue_pin=ctx.clue_pin,
                 answer=answer,
             )
             if accumulate_grad:
@@ -348,15 +312,10 @@ def _rollout_loop(
                 outer_losses.append(outer_loss.detach())
             else:
                 outer_losses.append(outer_loss)
-        state = logits_to_argmax_state(
-            logits,
-            ctx,
-            rollout_clues,
-            state=state,
-            outer_commit_prob=outer_commit_prob,
-        )
+        state.digit_id = _outer_commit(logits, ctx)
+        state.cell_embed = None
         if state_grids is not None:
-            state_grids.append(onehot_to_grid(state[..., :9]))
+            state_grids.append(state.digit_id.clone())
 
     if answer is None:
         total_loss = logits.new_zeros(())
@@ -368,25 +327,38 @@ def _rollout_loop(
     return logits, state_grids, total_loss
 
 
+def _init_rollout_state(
+    clues: torch.Tensor,
+    *,
+    initial_digit_id: torch.Tensor | None = None,
+    clue_pin: torch.Tensor | None = None,
+) -> RolloutState:
+    if initial_digit_id is None:
+        digit_id = clues.clone()
+    else:
+        digit_id = initial_digit_id
+    if clue_pin is None:
+        clue_pin = clues > 0
+    return RolloutState(digit_id=digit_id, clue_pin=clue_pin)
+
+
 def _run_rollout(
-    model: NextStateModel,
-    clues_onehot: torch.Tensor,
+    model: MixerNextStateModel,
     clues: torch.Tensor,
     *,
     config: RolloutConfig,
-    initial_onehot: torch.Tensor | None = None,
+    initial_digit_id: torch.Tensor | None = None,
+    clue_pin: torch.Tensor | None = None,
     collect_state_grids: bool = False,
 ) -> tuple[torch.Tensor, list[torch.Tensor] | None]:
-    """Inner/outer rollout with argmax commits. Returns final logits."""
-    clues, _ = _ensure_batched_clues(clues)
-    clues_onehot, _ = _ensure_batched_onehot(clues_onehot)
-    if initial_onehot is None:
-        initial_onehot = clues_onehot
-    else:
-        initial_onehot, _ = _ensure_batched_onehot(initial_onehot)
-    ctx = _ClueContext.from_clues(clues, clues_onehot)
+    clues, _ = _ensure_batched(clues)
+    if initial_digit_id is not None:
+        initial_digit_id, _ = _ensure_batched(initial_digit_id)
+    if clue_pin is not None:
+        clue_pin, _ = _ensure_batched(clue_pin)
+    state = _init_rollout_state(clues, initial_digit_id=initial_digit_id, clue_pin=clue_pin)
+    ctx = _ClueContext.from_rollout_clues(clues)
 
-    state = attach_clue_mask(initial_onehot, clues, clue_mask_channel=ctx.clue_mask_channel)
     logits, state_grids, _ = _rollout_loop(
         model,
         state,
@@ -394,16 +366,14 @@ def _run_rollout(
         ctx,
         config.inner_iters,
         config.outer_iters,
-        outer_commit_prob=config.outer_commit_prob,
         collect_state_grids=collect_state_grids,
     )
     return logits, state_grids
 
 
 def rollout_train_batch(
-    model: NextStateModel,
+    model: MixerNextStateModel,
     clues: torch.Tensor,
-    clues_onehot: torch.Tensor,
     answer: torch.Tensor,
     *,
     config: RolloutConfig | None = None,
@@ -415,24 +385,24 @@ def rollout_train_batch(
         raise ValueError("accumulate_grad must be True when model.training")
     config = config or RolloutConfig()
     rollout_clues = clues
-    rollout_clues_onehot = clues_onehot
-    initial_onehot = None
+    clue_pin = clues > 0
+    initial_digit_id = None
     if model.training:
-        initial_onehot, rollout_clues, rollout_clues_onehot = _training_rollout_inputs(
-            config, answer, clues, clues_onehot
-        )
+        initial_digit_id, rollout_clues, clue_pin = _training_rollout_inputs(config, answer, clues)
 
-    clues_batched, was_batched = _ensure_batched_clues(rollout_clues)
-    clues_onehot_batched, _ = _ensure_batched_onehot(rollout_clues_onehot)
-    answer_batched, _ = _ensure_batched_clues(answer)
-    initial_batched = initial_onehot
+    clues_batched, was_batched = _ensure_batched(rollout_clues)
+    answer_batched, _ = _ensure_batched(answer)
+    initial_batched = initial_digit_id
     if initial_batched is not None:
-        initial_batched, _ = _ensure_batched_onehot(initial_batched)
+        initial_batched, _ = _ensure_batched(initial_batched)
+    clue_pin_batched, _ = _ensure_batched(clue_pin)
 
-    ctx = _ClueContext.from_clues(clues_batched, clues_onehot_batched)
-    if initial_batched is None:
-        initial_batched = clues_onehot_batched
-    state = attach_clue_mask(initial_batched, clues_batched, clue_mask_channel=ctx.clue_mask_channel)
+    ctx = _ClueContext.from_rollout_clues(clues_batched)
+    state = _init_rollout_state(
+        clues_batched,
+        initial_digit_id=initial_batched,
+        clue_pin=clue_pin_batched,
+    )
 
     logits, _, total_loss = _rollout_loop(
         model,
@@ -441,7 +411,6 @@ def rollout_train_batch(
         ctx,
         config.inner_iters,
         config.outer_iters,
-        outer_commit_prob=config.outer_commit_prob,
         answer=answer_batched,
         accumulate_grad=accumulate_grad,
         fixed_point=config.fixed_point,
@@ -456,8 +425,7 @@ def rollout_train_batch(
 
 @torch.inference_mode()
 def rollout_solve(
-    model: NextStateModel,
-    clues_onehot: torch.Tensor,
+    model: MixerNextStateModel,
     clues: torch.Tensor,
     *,
     config: RolloutConfig | None = None,
@@ -465,7 +433,6 @@ def rollout_solve(
     config = config or RolloutConfig(train_init="clues")
     logits, _ = _run_rollout(
         model,
-        clues_onehot,
         clues,
         config=config,
     )
@@ -474,19 +441,16 @@ def rollout_solve(
 
 @torch.inference_mode()
 def rollout_trace_batch(
-    model: NextStateModel,
-    clues_onehot: torch.Tensor,
+    model: MixerNextStateModel,
     clues: torch.Tensor,
     *,
     config: RolloutConfig | None = None,
 ) -> list[list[str]]:
     """Rollout for viz; one frame per outer argmax commit, per puzzle."""
     config = config or RolloutConfig(train_init="clues")
-    clues, _ = _ensure_batched_clues(clues)
-    clues_onehot, _ = _ensure_batched_onehot(clues_onehot)
+    clues, _ = _ensure_batched(clues)
     _, state_grids = _run_rollout(
         model,
-        clues_onehot,
         clues,
         config=config,
         collect_state_grids=True,
@@ -503,18 +467,15 @@ def rollout_trace_batch(
 
 @torch.inference_mode()
 def rollout_trace(
-    model: NextStateModel,
-    clues_onehot: torch.Tensor,
+    model: MixerNextStateModel,
     clues: torch.Tensor,
     *,
     config: RolloutConfig | None = None,
 ) -> list[str]:
     """Rollout for viz; one frame per outer argmax commit."""
-    clues_b, _ = _ensure_batched_clues(clues)
-    clues_onehot_b, _ = _ensure_batched_onehot(clues_onehot)
+    clues_b, _ = _ensure_batched(clues)
     return rollout_trace_batch(
         model,
-        clues_onehot_b,
         clues_b,
         config=config,
     )[0]
