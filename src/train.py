@@ -17,6 +17,7 @@ from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import NextStateModel
 from rollout import (
     DEFAULT_INNER_ITERS,
+    DEFAULT_OUTER_COMMIT_PROB,
     DEFAULT_OUTER_ITERS,
     RolloutConfig,
     RolloutResult,
@@ -49,11 +50,13 @@ def build_rollout_config(
     train_init: str,
     inner_iters: int,
     outer_iters: int,
+    outer_commit_prob: float = DEFAULT_OUTER_COMMIT_PROB,
 ) -> RolloutConfig:
     return RolloutConfig(
         train_init=train_init,
         inner_iters=inner_iters,
         outer_iters=outer_iters,
+        outer_commit_prob=outer_commit_prob,
     )
 
 
@@ -408,6 +411,12 @@ def main() -> None:
         default=DEFAULT_OUTER_ITERS,
         help="Argmax commits per puzzle during val/viz/test",
     )
+    parser.add_argument(
+        "--outer-commit-prob",
+        type=float,
+        default=DEFAULT_OUTER_COMMIT_PROB,
+        help="Per-cell probability of updating rollout state from decoded logits each outer step",
+    )
     parser.add_argument("--batch-size", type=int, default=8, help="Training batch size")
     parser.add_argument(
         "--num-workers",
@@ -503,11 +512,13 @@ def main() -> None:
         train_init=train_init,
         inner_iters=args.train_inner_iters,
         outer_iters=args.train_outer_iters,
+        outer_commit_prob=args.outer_commit_prob,
     )
     eval_rollout_config = build_rollout_config(
         train_init="clues",
         inner_iters=args.eval_inner_iters,
         outer_iters=args.eval_outer_iters,
+        outer_commit_prob=args.outer_commit_prob,
     )
     best_val_cell_acc = -1.0
     manifest = load_manifest(run_dir)

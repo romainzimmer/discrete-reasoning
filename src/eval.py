@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import NextStateModel
-from rollout import DEFAULT_INNER_ITERS, DEFAULT_OUTER_ITERS, RolloutConfig
+from rollout import DEFAULT_INNER_ITERS, DEFAULT_OUTER_COMMIT_PROB, DEFAULT_OUTER_ITERS, RolloutConfig
 from train import EpochStats, build_rollout_config, measure_split, require_run_args
 
 
@@ -131,6 +131,7 @@ def main() -> None:
         train_init="clues",
         inner_iters=inner_iters,
         outer_iters=outer_iters,
+        outer_commit_prob=float(run_args.get("outer_commit_prob", DEFAULT_OUTER_COMMIT_PROB)),
     )
 
     epoch = int(ckpt["epoch"])

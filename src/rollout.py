@@ -14,6 +14,7 @@ TrainInitMode = Literal["clues", "noisy_gt", "zero_gt", "curriculum"]
 
 DEFAULT_INNER_ITERS = 5
 DEFAULT_OUTER_ITERS = 10
+DEFAULT_OUTER_COMMIT_PROB = 0.5
 
 
 @dataclass(frozen=True)
@@ -21,12 +22,15 @@ class RolloutConfig:
     train_init: TrainInitMode = "noisy_gt"
     inner_iters: int = DEFAULT_INNER_ITERS
     outer_iters: int = DEFAULT_OUTER_ITERS
+    outer_commit_prob: float = DEFAULT_OUTER_COMMIT_PROB
 
     def __post_init__(self) -> None:
         if self.inner_iters < 1:
             raise ValueError("inner_iters must be >= 1")
         if self.outer_iters < 1:
             raise ValueError("outer_iters must be >= 1")
+        if not 0.0 < self.outer_commit_prob <= 1.0:
+            raise ValueError("outer_commit_prob must be in (0, 1]")
 
 
 @dataclass(frozen=True)
@@ -192,9 +196,18 @@ def logits_to_argmax_state(
     logits: torch.Tensor,
     ctx: _ClueContext,
     rollout_clues: torch.Tensor,
+    *,
+    state: torch.Tensor,
+    outer_commit_prob: float = DEFAULT_OUTER_COMMIT_PROB,
 ) -> torch.Tensor:
     decoded = grid_to_onehot(predict_grid(logits, rollout_clues).detach())
-    digits = torch.where(ctx.clue_mask, ctx.clue_state, decoded)
+    if outer_commit_prob == 1.0:
+        digits = torch.where(ctx.clue_mask, ctx.clue_state, decoded)
+    else:
+        prev_digits = state[..., :9]
+        update = (torch.rand_like(rollout_clues, dtype=torch.float32) < outer_commit_prob) & ~ctx.clue_mask.squeeze(-1)
+        blended = torch.where(update.unsqueeze(-1), decoded, prev_digits)
+        digits = torch.where(ctx.clue_mask, ctx.clue_state, blended)
     return attach_clue_mask(digits, rollout_clues, clue_mask_channel=ctx.clue_mask_channel)
 
 
@@ -219,6 +232,7 @@ def _rollout_loop(
     inner_iters: int,
     outer_iters: int,
     *,
+    outer_commit_prob: float = DEFAULT_OUTER_COMMIT_PROB,
     answer: torch.Tensor | None = None,
     collect_state_grids: bool = False,
     accumulate_grad: bool = False,
@@ -240,7 +254,13 @@ def _rollout_loop(
                 outer_losses.append(outer_loss.detach())
             else:
                 outer_losses.append(outer_loss)
-        state = logits_to_argmax_state(logits, ctx, rollout_clues)
+        state = logits_to_argmax_state(
+            logits,
+            ctx,
+            rollout_clues,
+            state=state,
+            outer_commit_prob=outer_commit_prob,
+        )
         if state_grids is not None:
             state_grids.append(onehot_to_grid(state[..., :9]))
 
@@ -280,6 +300,7 @@ def _run_rollout(
         ctx,
         config.inner_iters,
         config.outer_iters,
+        outer_commit_prob=config.outer_commit_prob,
         collect_state_grids=collect_state_grids,
     )
     return logits, state_grids
@@ -326,6 +347,7 @@ def rollout_train_batch(
         ctx,
         config.inner_iters,
         config.outer_iters,
+        outer_commit_prob=config.outer_commit_prob,
         answer=answer_batched,
         accumulate_grad=accumulate_grad,
     )

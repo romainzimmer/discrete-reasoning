@@ -7,6 +7,7 @@ from encoding import attach_clue_mask, grid_to_onehot, onehot_to_grid
 from model import NextStateModel
 from rollout import (
     DEFAULT_INNER_ITERS,
+    DEFAULT_OUTER_COMMIT_PROB,
     DEFAULT_OUTER_ITERS,
     RolloutConfig,
     _ClueContext,
@@ -48,6 +49,10 @@ def test_rollout_config_validation():
         RolloutConfig(inner_iters=0)
     with pytest.raises(ValueError):
         RolloutConfig(outer_iters=0)
+    with pytest.raises(ValueError):
+        RolloutConfig(outer_commit_prob=1.5)
+    with pytest.raises(ValueError):
+        RolloutConfig(outer_commit_prob=0.0)
 
 
 def test_rollout_fixed_steps_and_clues_pinned():
@@ -96,7 +101,7 @@ def test_outer_detach_isolates_blocks():
     state = attach_clue_mask(clues_onehot_b, clues_b, clue_mask_channel=ctx.clue_mask_channel)
 
     logits_o1 = _inner_loop(model, state, ctx, clues_b, inner_iters=2)
-    state_o1 = logits_to_argmax_state(logits_o1, ctx, clues_b)
+    state_o1 = logits_to_argmax_state(logits_o1, ctx, clues_b, state=state, outer_commit_prob=1.0)
     assert not state_o1.requires_grad
 
     state_o1_leaf = state_o1.detach().requires_grad_(True)
@@ -110,7 +115,7 @@ def test_per_outer_backward_matches_stacked_mean():
     model = NextStateModel(width=32, num_blocks=1)
     model.train()
     clues, clues_onehot, answer = _tiny_batch()
-    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=3)
+    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=3, outer_commit_prob=1.0)
     clues_b = clues
     clues_onehot_b = clues_onehot
     ctx = _ClueContext.from_clues(clues_b, clues_onehot_b)
@@ -137,6 +142,7 @@ def test_per_outer_backward_matches_stacked_mean():
         ctx,
         config.inner_iters,
         config.outer_iters,
+        outer_commit_prob=config.outer_commit_prob,
         answer=answer,
         accumulate_grad=False,
     )
@@ -186,7 +192,13 @@ def test_curriculum_pins_revealed_cells_in_state():
     ctx = _ClueContext.from_clues(rollout_clues.unsqueeze(0), grid_to_onehot(rollout_clues).unsqueeze(0))
     logits = torch.randn(1, 9, 9, 9)
     softmax_state = logits_to_softmax_state(logits, ctx, rollout_clues.unsqueeze(0))
-    argmax_state = logits_to_argmax_state(logits, ctx, rollout_clues.unsqueeze(0))
+    argmax_state = logits_to_argmax_state(
+        logits,
+        ctx,
+        rollout_clues.unsqueeze(0),
+        state=softmax_state,
+        outer_commit_prob=1.0,
+    )
     for state in (softmax_state, argmax_state):
         grid = onehot_to_grid(state[0, ..., :9])
         assert grid[0, 0] == 5
@@ -213,7 +225,7 @@ def test_reproducible_eval():
     model = NextStateModel(width=32, num_blocks=1)
     model.eval()
     clues, clues_onehot, answer = _tiny_batch()
-    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=3)
+    config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=3, outer_commit_prob=1.0)
 
     r1 = rollout_train_batch(model, clues, clues_onehot, answer, config=config)
     r2 = rollout_train_batch(model, clues, clues_onehot, answer, config=config)
@@ -259,6 +271,24 @@ def test_defaults():
     config = RolloutConfig()
     assert config.inner_iters == DEFAULT_INNER_ITERS
     assert config.outer_iters == DEFAULT_OUTER_ITERS
+    assert config.outer_commit_prob == DEFAULT_OUTER_COMMIT_PROB
+
+
+def test_outer_commit_prob_one_matches_full_decode():
+    clues = torch.zeros(9, 9, dtype=torch.long)
+    ctx = _ClueContext.from_clues(clues.unsqueeze(0), grid_to_onehot(clues).unsqueeze(0))
+    state = attach_clue_mask(grid_to_onehot(clues).unsqueeze(0), clues.unsqueeze(0), clue_mask_channel=ctx.clue_mask_channel)
+    state[..., 0, 0, 2] = 1.0
+    logits = torch.zeros(1, 9, 9, 9)
+    logits[0, 0, 0, 4] = 10.0  # predict digit 5
+    committed = logits_to_argmax_state(
+        logits,
+        ctx,
+        clues.unsqueeze(0),
+        state=state,
+        outer_commit_prob=1.0,
+    )
+    assert onehot_to_grid(committed[0, ..., :9])[0, 0] == 5
 
 
 def test_curriculum_training_rollout():
