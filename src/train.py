@@ -65,8 +65,8 @@ def _epoch_desc(epoch: int, epochs: int, phase: str) -> str:
 @dataclass
 class TrainEpochStats:
     loss: float
-    cell_acc: float | None = None
-    puzzle_acc: float | None = None
+    cell_acc: float = 0.0
+    puzzle_acc: float = 0.0
 
 
 @dataclass
@@ -150,7 +150,7 @@ def save_epoch_metrics(
     history["epochs"].append(
         {
             "epoch": epoch,
-            **{f"train_{k}": v for k, v in asdict(train).items() if v is not None},
+            **{f"train_{k}": v for k, v in asdict(train).items()},
             **{f"val_{k}": v for k, v in asdict(val).items()},
         }
     )
@@ -253,12 +253,9 @@ def _train_stats_from_accumulators(
     correct_cells: int = 0,
     total_cells: int = 0,
     correct_puzzles: int = 0,
-    compute_train_acc: bool = False,
 ) -> TrainEpochStats:
     if n == 0:
         return TrainEpochStats(loss=0.0)
-    if not compute_train_acc:
-        return TrainEpochStats(loss=total_loss / n)
     return TrainEpochStats(
         loss=total_loss / n,
         cell_acc=correct_cells / total_cells if total_cells else 0.0,
@@ -295,7 +292,6 @@ def train_epoch(
     batch_size: int,
     use_cuda: bool,
     max_grad_norm: float,
-    compute_train_acc: bool = False,
 ) -> TrainEpochStats:
     model.train()
     total_loss = 0.0
@@ -317,7 +313,7 @@ def train_epoch(
             batch["clues"],
             batch["answer"],
             config=rollout_config,
-            compute_pred=compute_train_acc,
+            compute_pred=True,
             accumulate_grad=True,
         )
         if max_grad_norm > 0:
@@ -329,17 +325,16 @@ def train_epoch(
             total_loss=total_loss,
             n=n,
         )
-        if compute_train_acc:
-            correct_cells, total_cells, correct_puzzles = _accumulate_pred_stats(
-                result,
-                batch["answer"],
-                batch["clues"],
-                correct_cells=correct_cells,
-                total_cells=total_cells,
-                correct_puzzles=correct_puzzles,
-            )
+        correct_cells, total_cells, correct_puzzles = _accumulate_pred_stats(
+            result,
+            batch["answer"],
+            batch["clues"],
+            correct_cells=correct_cells,
+            total_cells=total_cells,
+            correct_puzzles=correct_puzzles,
+        )
         postfix = {"loss": f"{total_loss / n:.4f}"}
-        if compute_train_acc and total_cells:
+        if total_cells:
             postfix["cell_acc"] = f"{correct_cells / total_cells:.4f}"
         progress.set_postfix(**postfix, refresh=False)
     progress.close()
@@ -349,7 +344,6 @@ def train_epoch(
         correct_cells=correct_cells,
         total_cells=total_cells,
         correct_puzzles=correct_puzzles,
-        compute_train_acc=compute_train_acc,
     )
 
 
@@ -471,19 +465,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--train-init",
-        choices=["clues", "noisy-gt", "zero-gt", "curriculum"],
+        choices=["clues", "noisy-gt", "zero-gt"],
         default="noisy-gt",
-        help="clues: clues only; noisy-gt: flip non-clue cells to random 0-9; zero-gt: randomly zero non-clue GT cells; curriculum: reveal GT as extra clues with prob (1-p), p~U[0,1], random 0-9 elsewhere",
+        help="clues: clues only; noisy-gt: flip non-clue cells to random 0-9 (p~U[0,1]); zero-gt: randomly zero non-clue GT cells (p~U[0,1])",
     )
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for augment RNG and training")
     parser.add_argument("--no-augment", action="store_true", help="Disable training data augmentations")
-    parser.add_argument(
-        "--compute-train-acc",
-        action="store_true",
-        help="Track train cell/puzzle accuracy from the final training logits each batch",
-    )
     parser.add_argument("--aug-digit-proba", type=float, default=0.5)
     parser.add_argument("--aug-rot-proba", type=float, default=0.5)
     parser.add_argument("--aug-band-proba", type=float, default=0.3)
@@ -552,7 +541,6 @@ def main() -> None:
         "clues": "clues",
         "noisy-gt": "noisy_gt",
         "zero-gt": "zero_gt",
-        "curriculum": "curriculum",
     }[args.train_init]
     rollout_config = build_rollout_config(
         train_init=train_init,
@@ -584,7 +572,6 @@ def main() -> None:
             batch_size=args.batch_size,
             use_cuda=use_cuda,
             max_grad_norm=args.max_grad_norm,
-            compute_train_acc=args.compute_train_acc,
         )
         val = measure_split(
             model,
@@ -633,9 +620,10 @@ def main() -> None:
             val=val,
             args=args,
         )
-        train_msg = f"train_loss={train.loss:.4f}"
-        if train.cell_acc is not None and train.puzzle_acc is not None:
-            train_msg += f" train_cell_acc={train.cell_acc:.4f} train_puzzle_acc={train.puzzle_acc:.4f}"
+        train_msg = (
+            f"train_loss={train.loss:.4f} "
+            f"train_cell_acc={train.cell_acc:.4f} train_puzzle_acc={train.puzzle_acc:.4f}"
+        )
         print(
             f"epoch {epoch}/{args.epochs}: "
             f"{train_msg} val_loss={val.loss:.4f} "

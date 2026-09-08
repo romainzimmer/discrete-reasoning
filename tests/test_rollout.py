@@ -5,7 +5,6 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from encoding import decode_logits, target_mask
 from model import MixerNextStateModel
 from rollout import (
     DEFAULT_INNER_ITERS,
@@ -14,7 +13,6 @@ from rollout import (
     RolloutState,
     _ClueContext,
     _compute_rollout_loss_batch_mean,
-    _curriculum_initial,
     _discard_rollout_graph,
     _inner_loop,
     _init_rollout_state,
@@ -273,82 +271,6 @@ def test_training_supervises_every_outer_loop():
     assert len(per_outer_losses) == config.outer_iters
 
 
-def test_curriculum_init():
-    clues = torch.tensor(
-        [
-            [5, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        ]
-    )
-    answer = torch.full((9, 9), 3)
-    answer[0, 0] = 5
-    torch.manual_seed(0)
-    digit_id, rollout_clues = _curriculum_initial(answer, clues)
-    assert digit_id[0, 0] == 5
-    assert torch.all(rollout_clues[clues > 0] == clues[clues > 0])
-    revealed = (rollout_clues > 0) & (clues == 0)
-    if revealed.any():
-        assert torch.all(rollout_clues[revealed] == answer[revealed])
-    hidden = (rollout_clues == 0) & (clues == 0)
-    if hidden.any():
-        assert torch.all((digit_id[hidden] >= 0) & (digit_id[hidden] <= 9))
-
-
-def test_curriculum_pins_revealed_cells_in_state():
-    clues = torch.zeros(9, 9, dtype=torch.long)
-    clues[0, 0] = 5
-    answer = torch.full((9, 9), 4)
-    answer[0, 0] = 5
-    torch.manual_seed(1)
-    digit_id, rollout_clues = _curriculum_initial(answer, clues)
-    ctx = _ClueContext.from_rollout_clues(rollout_clues.unsqueeze(0))
-    logits = torch.randn(1, 9, 9, 10)
-    committed = _outer_commit(logits, ctx)
-    for grid in (digit_id, committed[0]):
-        assert grid[0, 0] == 5
-        revealed = (rollout_clues > 0) & (clues == 0)
-        if revealed.any():
-            assert torch.all(grid[revealed] == answer[revealed])
-
-
-def test_curriculum_excludes_revealed_from_loss_mask():
-    clues = torch.zeros(9, 9, dtype=torch.long)
-    clues[0, 0] = 5
-    answer = torch.full((9, 9), 4)
-    answer[0, 0] = 5
-    answer[0, 1] = 6
-    torch.manual_seed(2)
-    _, rollout_clues = _curriculum_initial(answer, clues)
-    clue_pin = rollout_clues > 0
-    mask = target_mask(answer, clue_pin)
-    revealed = (rollout_clues > 0) & (clues == 0)
-    if revealed.any():
-        assert not mask[revealed].any()
-
-
-def test_curriculum_hidden_can_sample_empty():
-    clues = torch.zeros(9, 9, dtype=torch.long)
-    answer = torch.full((9, 9), 4)
-    with (
-        patch("rollout.torch.rand", return_value=torch.tensor(1.0)),
-        patch(
-            "rollout.torch.rand_like",
-            return_value=torch.full_like(clues, 0.5, dtype=torch.float32),
-        ),
-        patch("rollout.torch.randint", return_value=torch.zeros((), dtype=torch.long)),
-    ):
-        digit_id, _ = _curriculum_initial(answer, clues)
-    hidden = clues == 0
-    assert torch.all(digit_id[hidden] == 0)
-
-
 def test_reproducible_eval():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
@@ -521,7 +443,7 @@ def test_zero_gt_keeps_answer_when_p_zero():
     assert torch.equal(initial, answer)
 
 
-@pytest.mark.parametrize("train_init", ["clues", "noisy_gt", "zero_gt", "curriculum"])
+@pytest.mark.parametrize("train_init", ["clues", "noisy_gt", "zero_gt"])
 def test_training_rollout_inputs_dispatch(train_init: str):
     clues, answer = _simple_clue_answer()
     config = RolloutConfig(train_init=train_init)
@@ -540,10 +462,6 @@ def test_training_rollout_inputs_dispatch(train_init: str):
         assert initial_digit_id is not None
         assert torch.equal(rollout_clues, clues)
         assert torch.equal(clue_pin, clues > 0)
-    elif train_init == "curriculum":
-        assert initial_digit_id is not None
-        assert torch.all(rollout_clues[clues > 0] == clues[clues > 0])
-        assert torch.equal(clue_pin, rollout_clues > 0)
 
 
 def test_eval_skips_train_init():
@@ -603,38 +521,6 @@ def test_noisy_gt_differs_from_clues_initial():
     assert not torch.equal(noisy_initial, clues)
 
 
-def test_curriculum_training_rollout():
-    model = MixerNextStateModel(dim=32, num_blocks=1)
-    model.train()
-    clues = torch.tensor(
-        [
-            [5, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        ]
-    )
-    answer = torch.full((9, 9), 4)
-    answer[0, 0] = 5
-    config = RolloutConfig(train_init="curriculum", inner_iters=2, outer_iters=2)
-    torch.manual_seed(0)
-    result = rollout_train_batch(
-        model,
-        clues,
-        answer,
-        config=config,
-        compute_pred=False,
-        accumulate_grad=True,
-    )
-    assert result.loss.item() > 0
-    assert _first_param(model).grad is not None
-
-
 def test_accumulate_grad_required_in_training():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
@@ -652,7 +538,7 @@ def test_accumulate_grad_required_in_training():
         )
 
 
-@pytest.mark.parametrize("train_init", ["clues", "noisy_gt", "zero_gt", "curriculum"])
+@pytest.mark.parametrize("train_init", ["clues", "noisy_gt", "zero_gt"])
 def test_all_train_inits_with_multiple_outer_iters(train_init: str):
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()

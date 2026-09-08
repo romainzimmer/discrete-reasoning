@@ -11,7 +11,7 @@ from data import tensor_to_string
 from encoding import decode_logits, target_mask
 from model import MixerNextStateModel
 
-TrainInitMode = Literal["clues", "noisy_gt", "zero_gt", "curriculum"]
+TrainInitMode = Literal["clues", "noisy_gt", "zero_gt"]
 
 DEFAULT_INNER_ITERS = 5
 DEFAULT_OUTER_ITERS = 10
@@ -59,13 +59,19 @@ def _pin_clue_digits(digit_id: torch.Tensor, ctx: _ClueContext) -> torch.Tensor:
     return torch.where(ctx.clue_pin, ctx.clue_digit_ids, digit_id)
 
 
-def _random_zero_non_clue_grid(answer: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
+def _noise_probability(answer: torch.Tensor) -> torch.Tensor:
+    if answer.dim() == 2:
+        return torch.rand((), device=answer.device)
+    return torch.rand(answer.size(0), 1, 1, device=answer.device)
+
+
+def _random_zero_non_clue_grid(
+    answer: torch.Tensor,
+    clues: torch.Tensor,
+) -> torch.Tensor:
     """Zero each non-clue cell with prob p~U[0,1]; keep clue cells unchanged."""
     non_clue = clues == 0
-    if answer.dim() == 2:
-        p = torch.rand((), device=answer.device)
-    else:
-        p = torch.rand(answer.size(0), 1, 1, device=answer.device)
+    p = _noise_probability(answer)
     zero_out = (torch.rand_like(clues, dtype=torch.float32) < p) & non_clue
     return torch.where(zero_out, torch.zeros_like(answer), answer)
 
@@ -76,10 +82,7 @@ def _noisy_ground_truth_initial(
 ) -> torch.Tensor:
     """Start from ground truth; flip non-clue cells to another digit in 0-9 with prob p~U[0,1]."""
     non_clue = clues == 0
-    if answer.dim() == 2:
-        p = torch.rand((), device=answer.device)
-    else:
-        p = torch.rand(answer.size(0), 1, 1, device=answer.device)
+    p = _noise_probability(answer)
     flip_cell = (torch.rand_like(clues, dtype=torch.float32) < p) & non_clue
     offset = torch.randint(1, 10, answer.shape, device=answer.device)
     flipped = (answer + offset) % 10
@@ -96,29 +99,11 @@ def _zeroed_ground_truth_initial(
     return _pin_clue_digits(zeroed, _ClueContext.from_rollout_clues(clues))
 
 
-def _curriculum_initial(
-    answer: torch.Tensor,
-    clues: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Reveal GT on non-clue cells with prob (1-p), p~U[0,1]; hidden cells get random digits in 0-9."""
-    rollout_clues = _random_zero_non_clue_grid(answer, clues)
-    digit_id = rollout_clues.clone()
-    hidden = (rollout_clues == 0) & (clues == 0)
-    if hidden.any():
-        digit_id[hidden] = torch.randint(0, 10, (int(hidden.sum().item()),), device=clues.device)
-    ctx = _ClueContext.from_rollout_clues(rollout_clues)
-    digit_id = _pin_clue_digits(digit_id, ctx)
-    return digit_id, rollout_clues
-
-
 def _training_rollout_inputs(
     config: RolloutConfig,
     answer: torch.Tensor,
     clues: torch.Tensor,
 ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
-    if config.train_init == "curriculum":
-        initial_digit_id, rollout_clues = _curriculum_initial(answer, clues)
-        return initial_digit_id, rollout_clues, (rollout_clues > 0)
     initial_digit_id = None
     rollout_clues = clues
     clue_pin = clues > 0
@@ -318,7 +303,11 @@ def rollout_train_batch(
     clue_pin = clues > 0
     initial_digit_id = None
     if model.training:
-        initial_digit_id, rollout_clues, clue_pin = _training_rollout_inputs(config, answer, clues)
+        initial_digit_id, rollout_clues, clue_pin = _training_rollout_inputs(
+            config,
+            answer,
+            clues,
+        )
 
     clues_batched, was_batched = _ensure_batched(rollout_clues)
     answer_batched, _ = _ensure_batched(answer)
