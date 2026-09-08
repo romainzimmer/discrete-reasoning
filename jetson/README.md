@@ -58,7 +58,7 @@ Writes `data/train.csv` and `data/test.csv` (~798 MB).
 Main run (mixer-looped; reduce `--train-batch-size` if OOM):
 
 ```bash
-docker compose run --rm train   --epochs 150   --dim 256   --num-blocks 2   --train-batch-size 128   --num-workers 3   --val-samples 1024   --train-init empty-noisy-gt  --max-samples 13824   --train-inner-iters 4   --train-outer-iters 1   --eval-inner-iters 4   --eval-outer-iters 50
+docker compose run --rm train   --epochs 150   --dim 256   --num-blocks 2   --train-batch-size 128 --val-batch-size 256   --num-workers 3   --val-samples 1024   --train-init empty-noisy-gt  --max-samples 13824   --train-inner-iters 3   --train-outer-iters 1   --eval-inner-iters 3   --eval-outer-iters 30 --weight-decay 1
 ```
 
 Quick test (easy sudoku, ~1k train cap):
