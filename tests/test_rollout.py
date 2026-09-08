@@ -14,6 +14,7 @@ from rollout import (
     RolloutConfig,
     _ClueContext,
     _halt_target,
+    _masked_digits_for_inner_loop,
     _outer_commit,
     _predict_halt,
     predict_grid,
@@ -73,6 +74,19 @@ def test_rollout_config_validation():
         RolloutConfig(inner_iters=0)
     with pytest.raises(ValueError):
         RolloutConfig(max_outer_iters=0)
+    with pytest.raises(ValueError):
+        RolloutConfig(rollout_mask_prob=1.1)
+
+
+def test_masked_digits_for_inner_loop():
+    clues, _ = _tiny_batch()
+    clue_pin = clues > 0
+    filled = clues.clone()
+    filled[0, 0, 2] = 7
+    masked = _masked_digits_for_inner_loop(filled, clue_pin, prob=1.0)
+    assert torch.equal(masked[clue_pin], filled[clue_pin])
+    assert (masked[~clue_pin] == 0).all()
+    assert torch.equal(_masked_digits_for_inner_loop(filled, clue_pin, prob=0.0), filled)
 
 
 def test_defaults():
@@ -359,9 +373,10 @@ def test_trace_includes_halt_metadata():
 def test_build_rollout_config():
     from train import build_rollout_config
 
-    config = build_rollout_config(inner_iters=2, max_outer_iters=3)
+    config = build_rollout_config(inner_iters=2, max_outer_iters=3, rollout_mask_prob=0.2)
     assert config.inner_iters == 2
     assert config.max_outer_iters == 3
+    assert config.rollout_mask_prob == 0.2
 
 
 def test_train_metrics_done_only_puzzle_acc():

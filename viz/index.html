@@ -461,6 +461,10 @@
         },
         { label: "Batch size / steps per epoch", value: `${args.train_batch_size ?? "?"} / ${args.batches_per_epoch ?? "?"}` },
         { label: "Halt loss weight", value: args.halt_loss_weight ?? "—" },
+        {
+          label: "Rollout mask prob",
+          value: args.rollout_mask_prob ?? 0,
+        },
         { label: "Epochs", value: args.epochs },
       ];
       const totalSeconds = totalRunSeconds(history);
@@ -720,6 +724,11 @@
         {
           label: "Inner / max outer iters",
           value: `${test.inner_iters ?? "?"}/${test.max_outer_iters ?? "?"}`,
+        },
+        {
+          label: "Rollout mask prob",
+          value: test.rollout_mask_prob,
+          format: v => Number(v).toFixed(3),
         },
       ]
         .filter(stat => stat.value != null)

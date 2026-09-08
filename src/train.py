@@ -55,11 +55,13 @@ def build_rollout_config(
     inner_iters: int,
     max_outer_iters: int,
     halt_threshold: float = 0.5,
+    rollout_mask_prob: float = 0.0,
 ) -> RolloutConfig:
     return RolloutConfig(
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
         halt_threshold=halt_threshold,
+        rollout_mask_prob=rollout_mask_prob,
     )
 
 
@@ -577,6 +579,12 @@ def main() -> None:
         help="Weight for halt BCE loss",
     )
     parser.add_argument(
+        "--rollout-mask-prob",
+        type=float,
+        default=0.0,
+        help="Per-cell prob of masking to empty at each outer step inner-loop input (clues untouched)",
+    )
+    parser.add_argument(
         "--val-batch-size",
         type=int,
         default=None,
@@ -670,10 +678,12 @@ def main() -> None:
     rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.train_max_outer_iters,
+        rollout_mask_prob=args.rollout_mask_prob,
     )
     eval_rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.eval_max_outer_iters,
+        rollout_mask_prob=args.rollout_mask_prob,
     )
     refill_generator = torch.Generator(device="cpu").manual_seed(args.seed)
     best_val_cell_acc = -1.0

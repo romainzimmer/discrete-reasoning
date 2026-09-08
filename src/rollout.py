@@ -19,12 +19,15 @@ class RolloutConfig:
     inner_iters: int = DEFAULT_INNER_ITERS
     max_outer_iters: int = DEFAULT_MAX_OUTER_ITERS
     halt_threshold: float = 0.5
+    rollout_mask_prob: float = 0.0
 
     def __post_init__(self) -> None:
         if self.inner_iters < 1:
             raise ValueError("inner_iters must be >= 1")
         if self.max_outer_iters < 1:
             raise ValueError("max_outer_iters must be >= 1")
+        if not 0.0 <= self.rollout_mask_prob <= 1.0:
+            raise ValueError("rollout_mask_prob must be in [0, 1]")
 
 
 @dataclass(frozen=True)
@@ -160,13 +163,30 @@ def _outer_commit(logits: torch.Tensor, ctx: _ClueContext) -> torch.Tensor:
     return torch.where(ctx.clue_pin, ctx.clue_digit_ids, decoded)
 
 
+def _masked_digits_for_inner_loop(
+    digit_id: torch.Tensor,
+    clue_pin: torch.Tensor,
+    prob: float,
+) -> torch.Tensor:
+    """Randomly mask committed digits to empty for inner-loop input only (clues untouched)."""
+    if prob <= 0.0:
+        return digit_id
+    mutable = ~clue_pin
+    mask = mutable & (torch.rand(digit_id.shape, device=digit_id.device) < prob)
+    return torch.where(mask, torch.zeros_like(digit_id), digit_id)
+
+
 def _inner_loop(
     model: MixerNextStateModel,
-    input_embed: torch.Tensor,
+    digit_id: torch.Tensor,
+    clue_pin: torch.Tensor,
     inner_iters: int,
     *,
+    rollout_mask_prob: float = 0.0,
     with_grad: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    loop_digit_id = _masked_digits_for_inner_loop(digit_id, clue_pin, rollout_mask_prob)
+    input_embed = model.encode_input(loop_digit_id, clue_pin)
     cell_embed: torch.Tensor | None = None
     logits: torch.Tensor | None = None
     halt_logit: torch.Tensor | None = None
@@ -194,11 +214,12 @@ def rollout_train_step(
     if not model.training:
         raise ValueError("rollout_train_step requires model.training")
     ctx = _ClueContext.from_clues(state.clues)
-    input_embed = model.encode_input(state.digit_id, state.clue_pin)
     logits, halt_logit, _ = _inner_loop(
         model,
-        input_embed,
+        state.digit_id,
+        state.clue_pin,
         config.inner_iters,
+        rollout_mask_prob=config.rollout_mask_prob,
         with_grad=True,
     )
     pre_commit = predict_grid(logits, state.clues)
@@ -285,11 +306,12 @@ def rollout_eval_batch(
     halt_total_rounds = 0
 
     while slot_idx.numel() > 0:
-        input_embed = model.encode_input(active_digit_id, active_clue_pin)
         logits, halt_logit, _ = _inner_loop(
             model,
-            input_embed,
+            active_digit_id,
+            active_clue_pin,
             config.inner_iters,
+            rollout_mask_prob=config.rollout_mask_prob,
             with_grad=False,
         )
         pre_commit = predict_grid(logits, active_clues)
@@ -401,11 +423,12 @@ def rollout_trace_batch(
     active_ctx = ctx
 
     while slot_idx.numel() > 0:
-        input_embed = model.encode_input(active_digit_id, active_clue_pin)
         logits, halt_logit, _ = _inner_loop(
             model,
-            input_embed,
+            active_digit_id,
+            active_clue_pin,
             config.inner_iters,
+            rollout_mask_prob=config.rollout_mask_prob,
             with_grad=False,
         )
         committed = _outer_commit(logits, active_ctx)
