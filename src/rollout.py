@@ -11,7 +11,7 @@ from data import tensor_to_string
 from encoding import decode_logits, target_mask
 from model import MixerNextStateModel
 
-TrainInitMode = Literal["clues", "noisy_gt", "zero_gt"]
+TrainInitMode = Literal["clues", "noisy_gt", "zero_gt", "empty_noisy_gt"]
 
 DEFAULT_INNER_ITERS = 5
 DEFAULT_OUTER_ITERS = 10
@@ -19,7 +19,7 @@ DEFAULT_OUTER_ITERS = 10
 
 @dataclass(frozen=True)
 class RolloutConfig:
-    train_init: TrainInitMode = "noisy_gt"
+    train_init: TrainInitMode = "empty_noisy_gt"
     inner_iters: int = DEFAULT_INNER_ITERS
     outer_iters: int = DEFAULT_OUTER_ITERS
 
@@ -99,6 +99,24 @@ def _zeroed_ground_truth_initial(
     return _pin_clue_digits(zeroed, _ClueContext.from_rollout_clues(clues))
 
 
+def _empty_noisy_ground_truth_initial(
+    answer: torch.Tensor,
+    clues: torch.Tensor,
+) -> torch.Tensor:
+    """Zero non-clue cells with p_empty~U[0,1]; flip remaining non-clue cells with p_noise~U[0,1]."""
+    non_clue = clues == 0
+    p_empty = _noise_probability(answer)
+    p_noise = _noise_probability(answer)
+    zero_out = (torch.rand_like(clues, dtype=torch.float32) < p_empty) & non_clue
+    digit_id = torch.where(zero_out, torch.zeros_like(answer), answer)
+    keep_gt = non_clue & ~zero_out
+    flip_cell = (torch.rand_like(clues, dtype=torch.float32) < p_noise) & keep_gt
+    offset = torch.randint(1, 10, answer.shape, device=answer.device)
+    flipped = (answer + offset) % 10
+    corrupted = torch.where(flip_cell, flipped, digit_id)
+    return _pin_clue_digits(corrupted, _ClueContext.from_rollout_clues(clues))
+
+
 def _training_rollout_inputs(
     config: RolloutConfig,
     answer: torch.Tensor,
@@ -111,6 +129,8 @@ def _training_rollout_inputs(
         initial_digit_id = _noisy_ground_truth_initial(answer, clues)
     elif config.train_init == "zero_gt":
         initial_digit_id = _zeroed_ground_truth_initial(answer, clues)
+    elif config.train_init == "empty_noisy_gt":
+        initial_digit_id = _empty_noisy_ground_truth_initial(answer, clues)
     return initial_digit_id, rollout_clues, clue_pin
 
 
@@ -126,12 +146,6 @@ def _ensure_batched(grid: torch.Tensor) -> tuple[torch.Tensor, bool]:
     return grid, True
 
 
-def _masked_ce(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    masked_logits = logits[mask, :]
-    targets = target[mask]
-    return F.cross_entropy(masked_logits, targets)
-
-
 def _compute_rollout_loss_batch_mean(
     logits: torch.Tensor,
     *,
@@ -139,9 +153,6 @@ def _compute_rollout_loss_batch_mean(
     answer: torch.Tensor,
 ) -> torch.Tensor:
     """Mean of per-puzzle masked CE (equal weight per puzzle)."""
-    if logits.dim() == 3:
-        mask = target_mask(answer, clue_pin)
-        return _masked_ce(logits, answer, mask)
     mask = target_mask(answer, clue_pin)
     flat_logits = logits.flatten(1, 2)
     flat_targets = answer.flatten(1, 2)
@@ -262,16 +273,10 @@ def _run_rollout(
     clues: torch.Tensor,
     *,
     config: RolloutConfig,
-    initial_digit_id: torch.Tensor | None = None,
-    clue_pin: torch.Tensor | None = None,
     collect_state_grids: bool = False,
 ) -> tuple[torch.Tensor, list[torch.Tensor] | None]:
     clues, _ = _ensure_batched(clues)
-    if initial_digit_id is not None:
-        initial_digit_id, _ = _ensure_batched(initial_digit_id)
-    if clue_pin is not None:
-        clue_pin, _ = _ensure_batched(clue_pin)
-    state = _init_rollout_state(clues, initial_digit_id=initial_digit_id, clue_pin=clue_pin)
+    state = _init_rollout_state(clues)
     ctx = _ClueContext.from_rollout_clues(clues)
 
     logits, state_grids, _ = _rollout_loop(

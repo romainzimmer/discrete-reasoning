@@ -13,6 +13,7 @@ from rollout import (
     RolloutState,
     _ClueContext,
     _compute_rollout_loss_batch_mean,
+    _empty_noisy_ground_truth_initial,
     _discard_rollout_graph,
     _inner_loop,
     _init_rollout_state,
@@ -443,7 +444,49 @@ def test_zero_gt_keeps_answer_when_p_zero():
     assert torch.equal(initial, answer)
 
 
-@pytest.mark.parametrize("train_init", ["clues", "noisy_gt", "zero_gt"])
+def test_empty_noisy_gt_pins_clues():
+    clues, answer = _simple_clue_answer()
+    torch.manual_seed(0)
+    initial = _empty_noisy_ground_truth_initial(answer, clues)
+    assert initial[0, 0] == 5
+
+
+def test_empty_noisy_gt_zeros_all_non_clue_when_p_empty_one():
+    clues, answer = _simple_clue_answer()
+    with (
+        patch("rollout.torch.rand", side_effect=[torch.tensor(1.0), torch.tensor(0.0)]),
+        patch(
+            "rollout.torch.rand_like",
+            return_value=torch.full_like(clues, 0.5, dtype=torch.float32),
+        ),
+    ):
+        initial = _empty_noisy_ground_truth_initial(answer, clues)
+    non_clue = clues == 0
+    assert torch.all(initial[non_clue] == 0)
+
+
+def test_empty_noisy_gt_noises_remaining_when_p_noise_one():
+    clues, answer = _simple_clue_answer()
+    with (
+        patch("rollout.torch.rand", side_effect=[torch.tensor(0.0), torch.tensor(1.0)]),
+        patch(
+            "rollout.torch.rand_like",
+            return_value=torch.full_like(clues, 0.5, dtype=torch.float32),
+        ),
+    ):
+        initial = _empty_noisy_ground_truth_initial(answer, clues)
+    non_clue = clues == 0
+    assert torch.all(initial[non_clue] != answer[non_clue])
+
+
+def test_empty_noisy_gt_keeps_answer_when_both_p_zero():
+    clues, answer = _simple_clue_answer()
+    with patch("rollout.torch.rand", side_effect=[torch.tensor(0.0), torch.tensor(0.0)]):
+        initial = _empty_noisy_ground_truth_initial(answer, clues)
+    assert torch.equal(initial, answer)
+
+
+@pytest.mark.parametrize("train_init", ["clues", "noisy_gt", "zero_gt", "empty_noisy_gt"])
 def test_training_rollout_inputs_dispatch(train_init: str):
     clues, answer = _simple_clue_answer()
     config = RolloutConfig(train_init=train_init)
@@ -462,6 +505,11 @@ def test_training_rollout_inputs_dispatch(train_init: str):
         assert initial_digit_id is not None
         assert torch.equal(rollout_clues, clues)
         assert torch.equal(clue_pin, clues > 0)
+    elif train_init == "empty_noisy_gt":
+        assert initial_digit_id is not None
+        assert torch.equal(rollout_clues, clues)
+        assert torch.equal(clue_pin, clues > 0)
+        assert torch.all(initial_digit_id[clues > 0] == clues[clues > 0])
 
 
 def test_eval_skips_train_init():
@@ -478,7 +526,7 @@ def test_eval_skips_train_init():
     assert torch.equal(clues_result.pred, noisy_result.pred)
 
 
-@pytest.mark.parametrize("train_init", ["noisy_gt", "zero_gt"])
+@pytest.mark.parametrize("train_init", ["noisy_gt", "zero_gt", "empty_noisy_gt"])
 def test_train_init_training_rollout(train_init: str):
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
@@ -538,7 +586,7 @@ def test_accumulate_grad_required_in_training():
         )
 
 
-@pytest.mark.parametrize("train_init", ["clues", "noisy_gt", "zero_gt"])
+@pytest.mark.parametrize("train_init", ["clues", "noisy_gt", "zero_gt", "empty_noisy_gt"])
 def test_all_train_inits_with_multiple_outer_iters(train_init: str):
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()

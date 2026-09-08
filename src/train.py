@@ -291,7 +291,6 @@ def train_epoch(
     rollout_config: RolloutConfig,
     batch_size: int,
     use_cuda: bool,
-    max_grad_norm: float,
 ) -> TrainEpochStats:
     model.train()
     total_loss = 0.0
@@ -316,8 +315,6 @@ def train_epoch(
             compute_pred=True,
             accumulate_grad=True,
         )
-        if max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
         total_loss, n = _accumulate_loss(
             result,
@@ -418,7 +415,6 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-2, help="L2 regularization on weights only (not bias)")
-    parser.add_argument("--max-grad-norm", type=float, default=0.0, help="Clip gradient global norm (0 disables)")
     parser.add_argument("--dim", type=int, default=512, help="Embedding / mixer hidden dimension D")
     parser.add_argument("--num-blocks", type=int, default=2, help="Mixer blocks per inner step (layers in M)")
     parser.add_argument(
@@ -465,9 +461,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--train-init",
-        choices=["clues", "noisy-gt", "zero-gt"],
-        default="noisy-gt",
-        help="clues: clues only; noisy-gt: flip non-clue cells to random 0-9 (p~U[0,1]); zero-gt: randomly zero non-clue GT cells (p~U[0,1])",
+        choices=["clues", "noisy-gt", "zero-gt", "empty-noisy-gt"],
+        default="empty-noisy-gt",
+        help="clues: clues only; noisy-gt: flip non-clue cells (p~U[0,1]); zero-gt: zero non-clue cells (p~U[0,1]); empty-noisy-gt: zero then noise on remaining non-clue cells (p_empty,p_noise~U[0,1])",
     )
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -541,6 +537,7 @@ def main() -> None:
         "clues": "clues",
         "noisy-gt": "noisy_gt",
         "zero-gt": "zero_gt",
+        "empty-noisy-gt": "empty_noisy_gt",
     }[args.train_init]
     rollout_config = build_rollout_config(
         train_init=train_init,
@@ -571,7 +568,6 @@ def main() -> None:
             rollout_config=rollout_config,
             batch_size=args.batch_size,
             use_cuda=use_cuda,
-            max_grad_norm=args.max_grad_norm,
         )
         val = measure_split(
             model,

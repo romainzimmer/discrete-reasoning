@@ -96,7 +96,6 @@ class MixerNextStateModel(nn.Module):
         self.blocks = nn.ModuleList(MixerBlock(SEQ_LEN, dim) for _ in range(num_blocks))
         self.unembed = UnembedHead(dim)
         self.dim = dim
-        self.num_blocks = num_blocks
 
     def encode_input(self, digit_id: torch.Tensor, clue_pin: torch.Tensor) -> torch.Tensor:
         return self.encoder.encode_input(digit_id, clue_pin)

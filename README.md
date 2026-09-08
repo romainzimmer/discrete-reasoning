@@ -33,7 +33,7 @@ Writes `data/train.csv` and `data/test.csv` (~798 MB).
 uv run train \
   --min-rating 0 --max-rating 0 \
   --max-samples 100 --epochs 30 \
-  --dim 512 --num-blocks 1 \
+  --dim 512 --num-blocks 2 \
   --train-inner-iters 5 --train-outer-iters 10 \
   --eval-inner-iters 5 --eval-outer-iters 10 \
   --batch-size 8
