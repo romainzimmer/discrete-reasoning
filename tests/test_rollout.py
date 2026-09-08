@@ -20,6 +20,7 @@ from rollout import (
     predict_grid,
     rollout_train_batch,
     rollout_trace,
+    rollout_trace_batch,
     target_mask,
 )
 
@@ -332,6 +333,32 @@ def test_rollout_trace_frame_count():
     config = RolloutConfig(train_init="clues", inner_iters=2, outer_iters=outer_iters)
     grids = rollout_trace(model, clues_onehot, clues, config=config)
     assert len(grids) == outer_iters + 1
+
+
+def test_rollout_trace_batch_matches_single():
+    model = NextStateModel(width=32, num_blocks=1)
+    model.eval()
+    clues, clues_onehot, _ = _tiny_batch()
+    clues2 = clues.clone()
+    clues2[0, 0, 2] = 4
+    clues_onehot2 = grid_to_onehot(clues2)
+    clues_b = torch.cat([clues, clues2], dim=0)
+    clues_onehot_b = grid_to_onehot(clues_b)
+    config = RolloutConfig(
+        train_init="clues",
+        inner_iters=2,
+        outer_iters=3,
+        outer_commit_prob=1.0,
+    )
+    torch.manual_seed(0)
+    single_first = rollout_trace(model, clues_onehot, clues, config=config)
+    torch.manual_seed(0)
+    single_second = rollout_trace(model, clues_onehot2, clues2, config=config)
+    torch.manual_seed(0)
+    batched = rollout_trace_batch(model, clues_onehot_b, clues_b, config=config)
+    assert len(batched) == 2
+    assert batched[0] == single_first
+    assert batched[1] == single_second
 
 
 def test_inner_one_outer_n_commits():

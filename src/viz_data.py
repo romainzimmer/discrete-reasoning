@@ -8,7 +8,7 @@ import torch
 from data import puzzle_to_tensor
 from encoding import grid_to_onehot
 from model import NextStateModel
-from rollout import RolloutConfig, rollout_trace
+from rollout import RolloutConfig, rollout_trace_batch
 
 
 def json_safe(value):
@@ -45,23 +45,14 @@ def save_trajectory(run_dir: Path, split: str, epoch: int, puzzle_index: int, pa
     path.write_text(json.dumps(payload, indent=2))
 
 
-def build_trajectory(
-    model: NextStateModel,
+def _trajectory_payload(
     row: dict,
+    states: list[str],
     *,
     split: str,
     epoch: int,
     puzzle_index: int,
-    device: torch.device,
-    rollout_config: RolloutConfig,
 ) -> dict:
-    clues = puzzle_to_tensor(row["question"]).unsqueeze(0).to(device)
-    states = rollout_trace(
-        model,
-        grid_to_onehot(clues),
-        clues,
-        config=rollout_config,
-    )
     return {
         "question": row["question"],
         "answer": row["answer"],
@@ -85,20 +76,40 @@ def save_epoch_trajectories(
     run_dir: Path,
     device: torch.device,
     rollout_config: RolloutConfig,
+    batch_size: int | None = None,
 ) -> list[int]:
+    if not rows:
+        return []
+    if batch_size is not None and batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+    model.eval()
+    chunk_size = batch_size or len(rows)
     puzzle_indices: list[int] = []
-    for puzzle_index, row in enumerate(rows):
-        payload = build_trajectory(
+    for start in range(0, len(rows), chunk_size):
+        chunk = rows[start : start + chunk_size]
+        clues = torch.stack([puzzle_to_tensor(row["question"]) for row in chunk]).to(device)
+        trajectories = rollout_trace_batch(
             model,
-            row,
-            split=split,
-            epoch=epoch,
-            puzzle_index=puzzle_index,
-            device=device,
-            rollout_config=rollout_config,
+            grid_to_onehot(clues),
+            clues,
+            config=rollout_config,
         )
-        save_trajectory(run_dir, split, epoch, puzzle_index, payload)
-        puzzle_indices.append(puzzle_index)
+        for offset, (row, states) in enumerate(zip(chunk, trajectories)):
+            puzzle_index = start + offset
+            save_trajectory(
+                run_dir,
+                split,
+                epoch,
+                puzzle_index,
+                _trajectory_payload(
+                    row,
+                    states,
+                    split=split,
+                    epoch=epoch,
+                    puzzle_index=puzzle_index,
+                ),
+            )
+            puzzle_indices.append(puzzle_index)
     return puzzle_indices
 
 

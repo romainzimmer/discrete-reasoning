@@ -446,6 +446,12 @@ def main() -> None:
     parser.add_argument("--val-samples", type=int, default=100, help="Validation puzzles from train.csv pool")
     parser.add_argument("--viz-samples", type=int, default=10, help="Puzzles per split to save for viz")
     parser.add_argument(
+        "--viz-batch-size",
+        type=int,
+        default=None,
+        help="Batch size for viz trajectory rollouts (default: training batch size)",
+    )
+    parser.add_argument(
         "--train-init",
         choices=["clues", "noisy-gt", "zero-gt", "curriculum"],
         default="noisy-gt",
@@ -584,6 +590,7 @@ def main() -> None:
                 run_dir=run_dir,
                 device=device,
                 rollout_config=eval_rollout_config,
+                batch_size=args.viz_batch_size or args.batch_size,
             )
             update_manifest_split(manifest, split, epoch, puzzle_indices)
         save_manifest(run_dir, manifest)

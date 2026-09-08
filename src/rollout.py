@@ -15,7 +15,7 @@ TrainInitMode = Literal["clues", "noisy_gt", "zero_gt", "curriculum"]
 
 DEFAULT_INNER_ITERS = 5
 DEFAULT_OUTER_ITERS = 10
-DEFAULT_OUTER_COMMIT_PROB = 0.5
+DEFAULT_OUTER_COMMIT_PROB = 1.0
 DEFAULT_TRUNCATED_BPTT_STEPS = 2
 
 
@@ -473,15 +473,17 @@ def rollout_solve(
 
 
 @torch.inference_mode()
-def rollout_trace(
+def rollout_trace_batch(
     model: NextStateModel,
     clues_onehot: torch.Tensor,
     clues: torch.Tensor,
     *,
     config: RolloutConfig | None = None,
-) -> list[str]:
-    """Rollout for viz; one frame per outer argmax commit."""
+) -> list[list[str]]:
+    """Rollout for viz; one frame per outer argmax commit, per puzzle."""
     config = config or RolloutConfig(train_init="clues")
+    clues, _ = _ensure_batched_clues(clues)
+    clues_onehot, _ = _ensure_batched_onehot(clues_onehot)
     _, state_grids = _run_rollout(
         model,
         clues_onehot,
@@ -490,7 +492,29 @@ def rollout_trace(
         collect_state_grids=True,
     )
     assert state_grids is not None
-    grids = [tensor_to_string(clues[0] if clues.dim() == 3 else clues)]
-    for grid in state_grids:
-        grids.append(tensor_to_string(grid[0] if grid.dim() == 3 else grid))
-    return grids
+    trajectories: list[list[str]] = []
+    for batch_idx in range(clues.size(0)):
+        grids = [tensor_to_string(clues[batch_idx])]
+        for grid in state_grids:
+            grids.append(tensor_to_string(grid[batch_idx]))
+        trajectories.append(grids)
+    return trajectories
+
+
+@torch.inference_mode()
+def rollout_trace(
+    model: NextStateModel,
+    clues_onehot: torch.Tensor,
+    clues: torch.Tensor,
+    *,
+    config: RolloutConfig | None = None,
+) -> list[str]:
+    """Rollout for viz; one frame per outer argmax commit."""
+    clues_b, _ = _ensure_batched_clues(clues)
+    clues_onehot_b, _ = _ensure_batched_onehot(clues_onehot)
+    return rollout_trace_batch(
+        model,
+        clues_onehot_b,
+        clues_b,
+        config=config,
+    )[0]
