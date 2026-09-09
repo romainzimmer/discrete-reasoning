@@ -62,6 +62,7 @@ def build_rollout_config(
     rollout_mask_prob: float = 0.0,
     rollout_noise_prob: float = 0.0,
     ema_alpha: float = DEFAULT_EMA_ALPHA,
+    curriculum_training: bool = True,
 ) -> RolloutConfig:
     return RolloutConfig(
         inner_iters=inner_iters,
@@ -70,6 +71,7 @@ def build_rollout_config(
         rollout_mask_prob=rollout_mask_prob,
         rollout_noise_prob=rollout_noise_prob,
         ema_alpha=ema_alpha,
+        curriculum_training=curriculum_training,
     )
 
 
@@ -431,6 +433,7 @@ def train_epoch(
                 generator=refill_generator,
                 dim=model.dim,
                 ema_alpha=rollout_config.ema_alpha,
+                curriculum_training=rollout_config.curriculum_training,
             )
         if profiler is not None:
             profiler.step()
@@ -498,7 +501,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train rollout sudoku model")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--weight-decay", type=float, default=1e-2, help="L2 regularization on weights only (not bias)")
+    parser.add_argument("--weight-decay", type=float, default=1.0, help="L2 regularization on weights only (not bias)")
     parser.add_argument("--dim", type=int, default=512, help="Embedding / mixer hidden dimension D")
     parser.add_argument("--num-blocks", type=int, default=2, help="Mixer blocks per inner step (layers in M)")
     parser.add_argument(
@@ -576,6 +579,11 @@ def main() -> None:
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for augment RNG and training")
+    parser.add_argument(
+        "--no-curriculum-training",
+        action="store_true",
+        help="Disable curriculum puzzle init (GT reveal + noise) during training seed/refill",
+    )
     parser.add_argument("--no-augment", action="store_true", help="Disable training data augmentations")
     parser.add_argument("--aug-digit-proba", type=float, default=0.5)
     parser.add_argument("--aug-rot-proba", type=float, default=0.5)
@@ -658,12 +666,14 @@ def main() -> None:
         ],
         lr=args.lr,
     )
+    curriculum_training = not args.no_curriculum_training
     rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.train_max_outer_iters,
         rollout_mask_prob=args.rollout_mask_prob,
         rollout_noise_prob=args.rollout_noise_prob,
         ema_alpha=args.ema_alpha,
+        curriculum_training=curriculum_training,
     )
     eval_rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
@@ -671,6 +681,7 @@ def main() -> None:
         rollout_mask_prob=args.rollout_mask_prob,
         rollout_noise_prob=args.rollout_noise_prob,
         ema_alpha=args.ema_alpha,
+        curriculum_training=False,
     )
     refill_generator = torch.Generator(device="cpu").manual_seed(args.seed)
     best_val_cell_acc = -1.0
@@ -709,6 +720,7 @@ def main() -> None:
                 generator=refill_generator,
                 dim=model.dim,
                 ema_alpha=rollout_config.ema_alpha,
+                curriculum_training=rollout_config.curriculum_training,
             )
 
         profiler = None

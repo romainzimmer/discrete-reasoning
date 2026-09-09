@@ -17,6 +17,7 @@ from rollout import (
     _halt_target,
     _apply_rollout_mask,
     _apply_rollout_noise,
+    _curriculum_init_digit_id,
     _digits_for_inner_loop,
     _outer_commit,
     _predict_halt,
@@ -157,11 +158,17 @@ def test_state_persists_across_epochs():
     assert not torch.equal(state.digit_id, digit_after_step)
 
 
-def test_always_clues_init():
+def test_clues_init_without_curriculum():
     cache = _tiny_cache()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
-        cache, batch_size=2, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
+        cache,
+        batch_size=2,
+        device=torch.device("cpu"),
+        generator=gen,
+        dim=32,
+        ema_alpha=1.0,
+        curriculum_training=False,
     )
     assert torch.equal(state.digit_id, state.clues)
 
@@ -195,7 +202,9 @@ def test_refill_after_done():
     )
     original_clues = state.clues.clone()
     done = torch.tensor([True])
-    refill_done_slots(state, done, cache, generator=gen, dim=32, ema_alpha=1.0)
+    refill_done_slots(
+        state, done, cache, generator=gen, dim=32, ema_alpha=1.0, curriculum_training=False
+    )
     assert not torch.equal(state.clues, original_clues)
     assert state.outer_count.item() == 0
     assert torch.equal(state.digit_id, state.clues)
@@ -215,8 +224,116 @@ def test_max_outer_forces_refill():
     assert result.done is not None
     assert result.done.all()
     original_clues = state.clues.clone()
-    refill_done_slots(state, result.done, cache, generator=gen, dim=32, ema_alpha=1.0)
+    refill_done_slots(
+        state, result.done, cache, generator=gen, dim=32, ema_alpha=1.0, curriculum_training=False
+    )
     assert not torch.equal(state.clues, original_clues)
+
+
+def _curriculum_rand_side_effect():
+    """Return p_gt=0, p_noise=0, cell draws=1 so GT/noise steps are deterministic."""
+    values = [0.0, 0.0, 1.0, 1.0]
+    idx = 0
+
+    def _side_effect(shape, *, device=None):
+        nonlocal idx
+        val = values[min(idx, len(values) - 1)]
+        idx += 1
+        size = shape if isinstance(shape, tuple) else (shape,)
+        return torch.full(size, val, device=device)
+
+    return _side_effect
+
+
+def test_curriculum_init_preserves_clues():
+    clues, answer = _tiny_batch()
+    clue_pin = clues > 0
+    with patch("rollout.torch.rand", side_effect=_curriculum_rand_side_effect()):
+        digit_id = _curriculum_init_digit_id(clues, answer, clue_pin)
+    assert torch.equal(digit_id[clue_pin], clues[clue_pin])
+
+
+def test_curriculum_init_gt_reveal():
+    clues, answer = _tiny_batch()
+    clue_pin = clues > 0
+    calls = 0
+
+    def _rand(shape, *, device=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return torch.tensor([1.0], device=device)
+        if calls == 2:
+            return torch.tensor([0.0], device=device)
+        size = shape if isinstance(shape, tuple) else (shape,)
+        return torch.zeros(size, device=device)
+
+    with patch("rollout.torch.rand", side_effect=_rand):
+        digit_id = _curriculum_init_digit_id(clues, answer, clue_pin)
+    assert torch.equal(digit_id[~clue_pin], answer[~clue_pin])
+
+
+def test_curriculum_init_noise_on_empty():
+    clues, answer = _tiny_batch()
+    clue_pin = clues > 0
+    calls: list[tuple] = []
+
+    def _rand(shape, *, device=None):
+        calls.append(shape)
+        if len(calls) == 1:
+            return torch.tensor([0.0], device=device)
+        if len(calls) == 2:
+            return torch.tensor([1.0], device=device)
+        return torch.zeros(shape, device=device)
+
+    with patch("rollout.torch.rand", side_effect=_rand):
+        with patch("rollout.torch.randint", return_value=torch.full(clues.shape, 7, dtype=clues.dtype)):
+            digit_id = _curriculum_init_digit_id(clues, answer, clue_pin)
+    assert (digit_id[~clue_pin] == 7).all()
+
+
+def test_curriculum_seed_fills_cells():
+    cache = _tiny_cache()
+    gen = torch.Generator().manual_seed(0)
+    torch.manual_seed(42)
+    state = BatchSlotState.seed(
+        cache, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
+    )
+    assert not torch.equal(state.digit_id, state.clues)
+    assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
+
+
+def test_curriculum_refill_fills_cells():
+    cache = _tiny_cache()
+    gen = torch.Generator().manual_seed(0)
+    state = BatchSlotState.seed(
+        cache,
+        batch_size=1,
+        device=torch.device("cpu"),
+        generator=gen,
+        dim=32,
+        ema_alpha=1.0,
+        curriculum_training=False,
+    )
+    torch.manual_seed(42)
+    refill_done_slots(state, torch.tensor([True]), cache, generator=gen, dim=32, ema_alpha=1.0)
+    assert not torch.equal(state.digit_id, state.clues)
+    assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
+
+
+def test_eval_starts_from_clues():
+    clues, answer = _tiny_batch()
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.eval()
+    with patch("rollout._inner_loop") as mock_inner:
+        mock_inner.return_value = (
+            torch.zeros(1, 9, 9, 10),
+            torch.zeros(1),
+            torch.zeros(1, 9, 9, 32),
+        )
+        rollout_eval_batch(model, clues, answer, config=_baseline_config(inner_iters=1, max_outer_iters=1))
+    call_digit_id = mock_inner.call_args.args[1]
+    assert torch.equal(call_digit_id, clues)
 
 
 def test_halt_stops_eval_early():
@@ -482,6 +599,16 @@ def test_build_rollout_config():
     assert config.rollout_mask_prob == 0.2
     assert config.rollout_noise_prob == 0.05
     assert config.ema_alpha == 0.05
+    assert config.curriculum_training is True
+
+
+def test_eval_rollout_config_disables_curriculum():
+    from train import build_rollout_config
+
+    train_config = build_rollout_config(inner_iters=2, max_outer_iters=3, curriculum_training=True)
+    eval_config = build_rollout_config(inner_iters=2, max_outer_iters=3, curriculum_training=False)
+    assert train_config.curriculum_training is True
+    assert eval_config.curriculum_training is False
 
 
 def test_train_metrics_done_only_puzzle_acc():

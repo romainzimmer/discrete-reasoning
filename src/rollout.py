@@ -24,6 +24,7 @@ class RolloutConfig:
     rollout_mask_prob: float = 0.0
     rollout_noise_prob: float = 0.0
     ema_alpha: float = DEFAULT_EMA_ALPHA
+    curriculum_training: bool = True
 
     def __post_init__(self) -> None:
         if self.inner_iters < 1:
@@ -68,15 +69,21 @@ class BatchSlotState:
         generator: torch.Generator,
         dim: int,
         ema_alpha: float,
+        curriculum_training: bool = True,
     ) -> BatchSlotState:
         validate_ema_alpha(ema_alpha)
         idx = torch.randint(cache.clues.size(0), (batch_size,), generator=generator)
         clues = cache.clues[idx].to(device, non_blocking=True)
         answers = cache.answers[idx].to(device, non_blocking=True)
         clue_pin = clues > 0
+        digit_id = (
+            _curriculum_init_digit_id(clues, answers, clue_pin)
+            if curriculum_training
+            else clues.clone()
+        )
         ema_embed = zero_ema(batch_size, dim, device) if uses_ema(ema_alpha) else None
         return cls(
-            digit_id=clues.clone(),
+            digit_id=digit_id,
             clues=clues,
             answer=answers,
             clue_pin=clue_pin,
@@ -183,6 +190,29 @@ def _compute_losses(
 def _outer_commit(logits: torch.Tensor, ctx: _ClueContext) -> torch.Tensor:
     decoded = decode_logits(logits).detach()
     return torch.where(ctx.clue_pin, ctx.clue_digit_ids, decoded)
+
+
+def _curriculum_init_digit_id(
+    clues: torch.Tensor,
+    answer: torch.Tensor,
+    clue_pin: torch.Tensor,
+) -> torch.Tensor:
+    """Training-only puzzle entry: partial GT reveal + random fill on empty cells."""
+    digit_id = clues.clone()
+    non_clue = ~clue_pin
+    b, device = clues.size(0), clues.device
+
+    p_gt = torch.rand(b, device=device)
+    p_noise = torch.rand(b, device=device)
+    reveal = non_clue & (torch.rand(clues.shape, device=device) < p_gt.view(b, 1, 1))
+    digit_id = torch.where(reveal, answer, digit_id)
+
+    still_empty = non_clue & (digit_id == 0)
+    noise = still_empty & (torch.rand(clues.shape, device=device) < p_noise.view(b, 1, 1))
+    random_digits = torch.randint(
+        1, NUM_VOCAB, clues.shape, device=device, dtype=clues.dtype
+    )
+    return torch.where(noise, random_digits, digit_id)
 
 
 def _apply_rollout_mask(
@@ -343,6 +373,7 @@ def refill_done_slots(
     generator: torch.Generator,
     dim: int,
     ema_alpha: float,
+    curriculum_training: bool = True,
 ) -> None:
     b = done.size(0)
     device = state.digit_id.device
@@ -350,7 +381,13 @@ def refill_done_slots(
     new_clues = cache.clues[idx].to(device, non_blocking=True)
     new_answers = cache.answers[idx].to(device, non_blocking=True)
     done_mask = done.view(b, 1, 1)
-    state.digit_id = torch.where(done_mask, new_clues, state.digit_id)
+    new_clue_pin = new_clues > 0
+    new_digit_id = (
+        _curriculum_init_digit_id(new_clues, new_answers, new_clue_pin)
+        if curriculum_training
+        else new_clues
+    )
+    state.digit_id = torch.where(done_mask, new_digit_id, state.digit_id)
     state.clues = torch.where(done_mask, new_clues, state.clues)
     state.answer = torch.where(done_mask, new_answers, state.answer)
     state.clue_pin = state.clues > 0
