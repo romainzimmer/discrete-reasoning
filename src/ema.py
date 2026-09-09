@@ -4,7 +4,7 @@ import torch
 
 from amp import STORAGE_DTYPE, to_storage_dtype
 
-DEFAULT_EMA_ALPHA = 0.05
+DEFAULT_EMA_ALPHA = 0.5
 
 
 def validate_ema_alpha(alpha: float) -> None:

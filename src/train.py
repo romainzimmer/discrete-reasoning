@@ -800,8 +800,9 @@ def main() -> None:
         print(
             f"epoch {epoch}/{args.epochs}: "
             f"{train_msg} val_loss={val.loss:.4f} val_cell_loss={val.cell_loss:.4f} "
-            f"val_halt_loss={val.halt_loss:.4f} val_cell_acc={val.cell_acc:.4f} "
-            f"val_puzzle_acc={val.puzzle_acc:.4f} val_halt_rate={val.halt_rate:.4f}",
+            f"val_halt_loss={val.halt_loss:.4f} val_halt_acc={val.halt_acc:.4f} "
+            f"val_cell_acc={val.cell_acc:.4f} val_puzzle_acc={val.puzzle_acc:.4f} "
+            f"val_halt_rate={val.halt_rate:.4f}",
             flush=True,
         )
 
