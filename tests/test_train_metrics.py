@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from rollout import BatchSlotState
+from rollout import BatchSlotState, _PinContext
 from train import (
     TrainEpochStats,
     EpochStats,
@@ -18,9 +18,7 @@ from train import (
 def test_accumulate_step_metrics_from_training_logits() -> None:
     from rollout import RolloutResult
 
-    result = RolloutResult(
-        loss=torch.tensor(1.0),
-        pred=torch.tensor(
+    pred = torch.tensor(
             [
                 [
                     [5, 3, 0, 0, 7, 0, 0, 0, 0],
@@ -34,7 +32,11 @@ def test_accumulate_step_metrics_from_training_logits() -> None:
                     [0, 0, 0, 0, 8, 0, 0, 7, 9],
                 ]
             ]
-        ),
+        )
+    result = RolloutResult(
+        loss=torch.tensor(1.0),
+        pred=pred,
+        pred_raw=pred,
         done=torch.tensor([True]),
         halted=torch.tensor([False]),
         halt_target=torch.tensor([0.0]),
@@ -43,20 +45,69 @@ def test_accumulate_step_metrics_from_training_logits() -> None:
     clues = torch.zeros(9, 9, dtype=torch.long)
     clues[0, 0] = 5
     answer = torch.full((9, 9), 4)
+    clues_b = clues.unsqueeze(0)
+    answer_b = answer.unsqueeze(0)
+    clue_pin = clues_b > 0
+    gt_pin = torch.zeros_like(clue_pin)
     state = BatchSlotState(
-        digit_id=clues.unsqueeze(0),
-        clues=clues.unsqueeze(0),
-        answer=answer.unsqueeze(0),
-        clue_pin=clues.unsqueeze(0) > 0,
+        digit_id=clues_b,
+        clues=clues_b,
+        answer=answer_b,
+        clue_pin=clue_pin,
+        gt_pin=gt_pin,
+        pin_ctx=_PinContext.from_state(clues_b, answer_b, gt_pin),
         outer_count=torch.tensor([1]),
     )
     acc = TrainMetricsAccumulator.empty(torch.device("cpu"))
     acc.add_step(result, state)
     stats = acc.finalize()
     assert int(acc.total_cells.item()) == 81 - 1
-    assert int(acc.correct_cells.item()) == int((result.pred[0][clues == 0] == answer[clues == 0]).sum())
+    assert int(acc.correct_cells.item()) == int(
+        (result.pred_raw[0][clues == 0] == answer[clues == 0]).sum()
+    )
     assert stats.completions_per_epoch == 1
     assert int(acc.correct_puzzles_done.item()) == int((result.pred[0] == answer).all())
+
+
+def test_accumulate_step_uses_pred_raw_with_gt_pin() -> None:
+    from rollout import RolloutResult
+
+    clues = torch.zeros(9, 9, dtype=torch.long)
+    clues[0, 0] = 5
+    answer = torch.full((9, 9), 4)
+    clues_b = clues.unsqueeze(0)
+    answer_b = answer.unsqueeze(0)
+    clue_pin = clues_b > 0
+    gt_pin = torch.zeros_like(clue_pin)
+    gt_pin[0, 0, 1] = True
+    pred_raw = torch.full((1, 9, 9), 2)
+    pred = pred_raw.clone()
+    pred[0, 0, 0] = 5
+    result = RolloutResult(
+        loss=torch.tensor(1.0),
+        pred=pred,
+        pred_raw=pred_raw,
+        done=torch.tensor([True]),
+        halted=torch.tensor([False]),
+        halt_target=torch.tensor([0.0]),
+        halt_logit=torch.tensor([0.0]),
+    )
+    state = BatchSlotState(
+        digit_id=clues_b,
+        clues=clues_b,
+        answer=answer_b,
+        clue_pin=clue_pin,
+        gt_pin=gt_pin,
+        pin_ctx=_PinContext.from_state(clues_b, answer_b, gt_pin),
+        outer_count=torch.tensor([1]),
+    )
+    acc = TrainMetricsAccumulator.empty(torch.device("cpu"))
+    acc.add_step(result, state)
+    mask = (answer_b > 0) & ~clue_pin
+    expected_correct = int((pred_raw[mask] == answer_b[mask]).sum())
+    assert int(acc.correct_cells.item()) == expected_correct
+    assert int(acc.total_cells.item()) == int(mask.sum())
+    assert int(acc.correct_puzzles_done.item()) == 0
 
 
 def test_save_epoch_metrics_includes_train_acc(tmp_path: Path) -> None:

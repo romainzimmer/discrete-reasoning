@@ -39,14 +39,18 @@ class RolloutConfig:
 
 
 @dataclass(frozen=True)
-class _ClueContext:
-    clue_digit_ids: torch.Tensor
-    clue_pin: torch.Tensor
+class _PinContext:
+    pin: torch.Tensor
+    pin_digit_ids: torch.Tensor
 
     @classmethod
-    def from_clues(cls, clues: torch.Tensor) -> _ClueContext:
+    def from_state(
+        cls, clues: torch.Tensor, answer: torch.Tensor, gt_pin: torch.Tensor
+    ) -> _PinContext:
         clue_pin = clues > 0
-        return cls(clue_digit_ids=clues, clue_pin=clue_pin)
+        pin = clue_pin | gt_pin
+        pin_digit_ids = torch.where(clue_pin, clues, answer)
+        return cls(pin=pin, pin_digit_ids=pin_digit_ids)
 
 
 @dataclass
@@ -55,6 +59,8 @@ class BatchSlotState:
     clues: torch.Tensor
     answer: torch.Tensor
     clue_pin: torch.Tensor
+    gt_pin: torch.Tensor
+    pin_ctx: _PinContext
     outer_count: torch.Tensor
     memory_embed: torch.Tensor | None = None
     ema_embed: torch.Tensor | None = None
@@ -76,17 +82,20 @@ class BatchSlotState:
         clues = cache.clues[idx].to(device, non_blocking=True)
         answers = cache.answers[idx].to(device, non_blocking=True)
         clue_pin = clues > 0
-        digit_id = (
-            _curriculum_init_digit_id(clues, answers, clue_pin)
-            if curriculum_training
-            else clues.clone()
-        )
+        if curriculum_training:
+            digit_id, gt_pin = _curriculum_init_digit_id(clues, answers, clue_pin)
+        else:
+            digit_id = clues.clone()
+            gt_pin = torch.zeros_like(clue_pin)
+        pin_ctx = _PinContext.from_state(clues, answers, gt_pin)
         ema_embed = zero_ema(batch_size, dim, device) if uses_ema(ema_alpha) else None
         return cls(
             digit_id=digit_id,
             clues=clues,
             answer=answers,
             clue_pin=clue_pin,
+            gt_pin=gt_pin,
+            pin_ctx=pin_ctx,
             outer_count=torch.zeros(batch_size, dtype=torch.long, device=device),
             ema_embed=ema_embed,
         )
@@ -98,6 +107,7 @@ class RolloutResult:
     cell_loss: torch.Tensor | None = None
     halt_loss: torch.Tensor | None = None
     pred: torch.Tensor | None = None
+    pred_raw: torch.Tensor | None = None
     done: torch.Tensor | None = None
     halted: torch.Tensor | None = None
     halt_target: torch.Tensor | None = None
@@ -187,41 +197,35 @@ def _compute_losses(
     return cell_loss, halt_loss, total_loss
 
 
-def _outer_commit(logits: torch.Tensor, ctx: _ClueContext) -> torch.Tensor:
+def _outer_commit(logits: torch.Tensor, ctx: _PinContext) -> torch.Tensor:
     decoded = decode_logits(logits).detach()
-    return torch.where(ctx.clue_pin, ctx.clue_digit_ids, decoded)
+    return torch.where(ctx.pin, ctx.pin_digit_ids, decoded)
 
 
 def _curriculum_init_digit_id(
     clues: torch.Tensor,
     answer: torch.Tensor,
     clue_pin: torch.Tensor,
-) -> torch.Tensor:
-    """Training-only puzzle entry: partial GT reveal + random fill on empty cells."""
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Training-only puzzle entry: partial GT reveal; unrevealed non-clue cells stay empty."""
     digit_id = clues.clone()
     non_clue = ~clue_pin
     b, device = clues.size(0), clues.device
 
     p_gt = torch.rand(b, device=device)
-    p_noise = torch.rand(b, device=device)
     reveal = non_clue & (torch.rand(clues.shape, device=device) < p_gt.view(b, 1, 1))
     digit_id = torch.where(reveal, answer, digit_id)
-
-    still_empty = non_clue & (digit_id == 0)
-    noise = still_empty & (torch.rand(clues.shape, device=device) < p_noise.view(b, 1, 1))
-    random_digits = torch.randint(
-        1, NUM_VOCAB, clues.shape, device=device, dtype=clues.dtype
-    )
-    return torch.where(noise, random_digits, digit_id)
+    return digit_id, reveal
 
 
 def _apply_rollout_mask(
     digit_id: torch.Tensor,
     clue_pin: torch.Tensor,
+    gt_pin: torch.Tensor,
     prob: float,
 ) -> torch.Tensor:
     """Randomly mask committed digits to empty for inner-loop input only (clues untouched)."""
-    mutable = ~clue_pin
+    mutable = ~(clue_pin | gt_pin)
     mask = mutable & (torch.rand(digit_id.shape, device=digit_id.device) < prob)
     return torch.where(mask, torch.zeros_like(digit_id), digit_id)
 
@@ -229,10 +233,11 @@ def _apply_rollout_mask(
 def _apply_rollout_noise(
     digit_id: torch.Tensor,
     clue_pin: torch.Tensor,
+    gt_pin: torch.Tensor,
     prob: float,
 ) -> torch.Tensor:
     """Randomly replace committed digits with digits 1-9 (clues untouched)."""
-    mutable = ~clue_pin
+    mutable = ~(clue_pin | gt_pin)
     replace = mutable & (torch.rand(digit_id.shape, device=digit_id.device) < prob)
     random_digits = torch.randint(
         1,
@@ -247,6 +252,7 @@ def _apply_rollout_noise(
 def _digits_for_inner_loop(
     digit_id: torch.Tensor,
     clue_pin: torch.Tensor,
+    gt_pin: torch.Tensor,
     *,
     rollout_mask_prob: float,
     rollout_noise_prob: float,
@@ -256,9 +262,13 @@ def _digits_for_inner_loop(
         return digit_id
     loop_digit_id = digit_id
     if rollout_mask_prob > 0.0:
-        loop_digit_id = _apply_rollout_mask(loop_digit_id, clue_pin, rollout_mask_prob)
+        loop_digit_id = _apply_rollout_mask(
+            loop_digit_id, clue_pin, gt_pin, rollout_mask_prob
+        )
     if rollout_noise_prob > 0.0:
-        loop_digit_id = _apply_rollout_noise(loop_digit_id, clue_pin, rollout_noise_prob)
+        loop_digit_id = _apply_rollout_noise(
+            loop_digit_id, clue_pin, gt_pin, rollout_noise_prob
+        )
     return loop_digit_id
 
 
@@ -266,6 +276,7 @@ def _inner_loop(
     model: MixerNextStateModel,
     digit_id: torch.Tensor,
     clue_pin: torch.Tensor,
+    gt_pin: torch.Tensor,
     inner_iters: int,
     *,
     memory_embed: torch.Tensor | None,
@@ -278,6 +289,7 @@ def _inner_loop(
     loop_digit_id = _digits_for_inner_loop(
         digit_id,
         clue_pin,
+        gt_pin,
         rollout_mask_prob=rollout_mask_prob,
         rollout_noise_prob=rollout_noise_prob,
     )
@@ -321,11 +333,11 @@ def rollout_train_step(
 ) -> RolloutResult:
     if not model.training:
         raise ValueError("rollout_train_step requires model.training")
-    ctx = _ClueContext.from_clues(state.clues)
     logits, halt_logit, final_cell_embed = _inner_loop(
         model,
         state.digit_id,
         state.clue_pin,
+        state.gt_pin,
         config.inner_iters,
         memory_embed=state.memory_embed,
         ema_embed=state.ema_embed,
@@ -334,20 +346,21 @@ def rollout_train_step(
         rollout_noise_prob=config.rollout_noise_prob,
         with_grad=True,
     )
-    pre_commit = predict_grid(logits, state.clues)
-    halt_target = _halt_target(pre_commit, state.answer)
+    pred_raw = decode_logits(logits)
+    pred = predict_grid(logits, state.clues)
+    halt_target = _halt_target(pred, state.answer)
     predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
     cell_loss, halt_loss, loss = _compute_losses(
         logits,
         halt_logit,
-        clue_pin=ctx.clue_pin,
+        clue_pin=state.clue_pin,
         answer=state.answer,
         halt_target=halt_target,
         halt_loss_weight=halt_loss_weight,
     )
     if backward:
         loss.backward()
-    state.digit_id = _outer_commit(logits, ctx)
+    state.digit_id = _outer_commit(logits, state.pin_ctx)
     state.memory_embed = memory_init(final_cell_embed)
     if state.ema_embed is not None:
         state.ema_embed = ema_update(state.ema_embed, final_cell_embed, config.ema_alpha)
@@ -357,7 +370,8 @@ def rollout_train_step(
         loss=loss.detach() if backward else loss,
         cell_loss=cell_loss.detach(),
         halt_loss=halt_loss.detach(),
-        pred=pre_commit.detach(),
+        pred=pred.detach(),
+        pred_raw=pred_raw.detach(),
         done=done,
         halted=predict_halt,
         halt_target=halt_target.detach(),
@@ -382,15 +396,19 @@ def refill_done_slots(
     new_answers = cache.answers[idx].to(device, non_blocking=True)
     done_mask = done.view(b, 1, 1)
     new_clue_pin = new_clues > 0
-    new_digit_id = (
-        _curriculum_init_digit_id(new_clues, new_answers, new_clue_pin)
-        if curriculum_training
-        else new_clues
-    )
+    if curriculum_training:
+        new_digit_id, new_gt_pin = _curriculum_init_digit_id(
+            new_clues, new_answers, new_clue_pin
+        )
+    else:
+        new_digit_id = new_clues
+        new_gt_pin = torch.zeros_like(new_clue_pin)
     state.digit_id = torch.where(done_mask, new_digit_id, state.digit_id)
     state.clues = torch.where(done_mask, new_clues, state.clues)
     state.answer = torch.where(done_mask, new_answers, state.answer)
     state.clue_pin = state.clues > 0
+    state.gt_pin = torch.where(done_mask, new_gt_pin, state.gt_pin)
+    state.pin_ctx = _PinContext.from_state(state.clues, state.answer, state.gt_pin)
     state.outer_count = torch.where(done, torch.zeros_like(state.outer_count), state.outer_count)
     done_mask_mem = done.view(b, 1, 1, 1)
     if state.memory_embed is not None:
@@ -418,7 +436,8 @@ def rollout_eval_batch(
 
     digit_id = clues_b.clone()
     clue_pin = clues_b > 0
-    ctx = _ClueContext.from_clues(clues_b)
+    gt_pin = torch.zeros_like(clue_pin)
+    ctx = _PinContext.from_state(clues_b, answer_b, gt_pin)
     outer_count = torch.zeros(b, dtype=torch.long, device=device)
 
     out_pred = digit_id.clone()
@@ -442,10 +461,12 @@ def rollout_eval_batch(
     halt_total_rounds = 0
 
     while slot_idx.numel() > 0:
+        active_gt_pin = gt_pin[slot_idx]
         logits, halt_logit, final_cell_embed = _inner_loop(
             model,
             active_digit_id,
             active_clue_pin,
+            active_gt_pin,
             config.inner_iters,
             memory_embed=active_memory_embed,
             ema_embed=active_ema_embed,
@@ -480,18 +501,19 @@ def rollout_eval_batch(
         active_clues = active_clues[keep]
         active_answer = active_answer[keep]
         active_clue_pin = active_clue_pin[keep]
+        active_gt_pin = active_gt_pin[keep]
         active_outer_count = active_outer_count[keep]
         active_memory_embed = active_memory_embed[keep] if active_memory_embed is not None else None
         if active_ema_embed is not None:
             active_ema_embed = active_ema_embed[keep]
-        active_ctx = _ClueContext.from_clues(active_clues)
+        active_ctx = _PinContext.from_state(active_clues, active_answer, active_gt_pin)
 
     pre_commit_final = predict_grid(final_logits, clues_b)
     halt_target = _halt_target(pre_commit_final, answer_b)
     cell_loss, halt_loss, loss = _compute_losses(
         final_logits,
         final_halt_logit,
-        clue_pin=ctx.clue_pin,
+        clue_pin=clue_pin,
         answer=answer_b,
         halt_target=halt_target,
         halt_loss_weight=halt_loss_weight,
@@ -556,7 +578,8 @@ def rollout_trace_batch(
 
     digit_id = clues.clone()
     clue_pin = clues > 0
-    ctx = _ClueContext.from_clues(clues)
+    gt_pin = torch.zeros_like(clue_pin)
+    ctx = _PinContext.from_state(clues, clues, gt_pin)
     outer_count = torch.zeros(b, dtype=torch.long, device=device)
     trajectories: list[list[str]] = [[tensor_to_string(clues[i])] for i in range(b)]
     out_halted = torch.zeros(b, dtype=torch.bool, device=device)
@@ -566,6 +589,7 @@ def rollout_trace_batch(
     active_digit_id = digit_id
     active_clues = clues
     active_clue_pin = clue_pin
+    active_gt_pin = gt_pin
     active_outer_count = outer_count
     active_ctx = ctx
     active_memory_embed: torch.Tensor | None = None
@@ -578,6 +602,7 @@ def rollout_trace_batch(
             model,
             active_digit_id,
             active_clue_pin,
+            active_gt_pin,
             config.inner_iters,
             memory_embed=active_memory_embed,
             ema_embed=active_ema_embed,
@@ -609,11 +634,12 @@ def rollout_trace_batch(
         active_digit_id = committed[keep]
         active_clues = active_clues[keep]
         active_clue_pin = active_clue_pin[keep]
+        active_gt_pin = active_gt_pin[keep]
         active_outer_count = active_outer_count[keep]
         active_memory_embed = active_memory_embed[keep] if active_memory_embed is not None else None
         if active_ema_embed is not None:
             active_ema_embed = active_ema_embed[keep]
-        active_ctx = _ClueContext.from_clues(active_clues)
+        active_ctx = _PinContext.from_state(active_clues, active_clues, active_gt_pin)
 
     return [
         PuzzleTrace(

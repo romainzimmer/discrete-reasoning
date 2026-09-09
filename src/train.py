@@ -147,8 +147,9 @@ class TrainMetricsAccumulator:
         self.halt_correct += (result.halted == (result.halt_target > 0.5)).sum()
         self.halt_total += b
 
-        mask = state.clues == 0
-        self.correct_cells += (result.pred[mask] == state.answer[mask]).sum()
+        assert result.pred_raw is not None
+        mask = (state.answer > 0) & ~state.clue_pin
+        self.correct_cells += (result.pred_raw[mask] == state.answer[mask]).sum()
         self.total_cells += mask.sum()
 
         puzzle_ok = (result.pred == state.answer).all(dim=(-2, -1))
@@ -582,7 +583,7 @@ def main() -> None:
     parser.add_argument(
         "--no-curriculum-training",
         action="store_true",
-        help="Disable curriculum puzzle init (GT reveal + noise) during training seed/refill",
+        help="Disable curriculum puzzle init (partial GT reveal) during training seed/refill",
     )
     parser.add_argument("--no-augment", action="store_true", help="Disable training data augmentations")
     parser.add_argument("--aug-digit-proba", type=float, default=0.5)
