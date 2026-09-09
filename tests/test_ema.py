@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from ema import ema_combine, ema_update, validate_ema_alpha, zero_ema
+from ema import ema_combine, ema_update, memory_init, validate_ema_alpha, zero_ema
 from rollout import RolloutConfig
 
 
@@ -35,6 +35,14 @@ def test_zero_ema_shape():
     assert ema.shape == (2, 9, 9, 8)
     assert ema.dtype == torch.float32
     assert ema.sum().item() == 0.0
+
+
+def test_memory_init_detached():
+    value = torch.randn(1, 9, 9, 4, requires_grad=True)
+    stored = memory_init(value)
+    assert stored.shape == (1, 9, 9, 4)
+    assert stored.dtype == torch.float32
+    assert not stored.requires_grad
 
 
 def test_ema_update_stores_float32_from_bf16():

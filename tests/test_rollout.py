@@ -294,15 +294,20 @@ def test_no_grad_across_steps():
     assert not state.digit_id.requires_grad
 
 
-def test_cell_embed_not_persisted():
+def test_memory_embed_persisted_detached():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
     config = _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    assert state.memory_embed is None
     rollout_train_step(model, state, config)
-    # state has no cell_embed field — fresh encode each step
-    assert not hasattr(state, "cell_embed")
+    assert state.memory_embed is not None
+    assert not state.memory_embed.requires_grad
+    memory_after_step1 = state.memory_embed.clone()
+    rollout_train_step(model, state, config)
+    assert state.memory_embed is not None
+    assert not torch.equal(state.memory_embed, memory_after_step1)
 
 
 def test_seeded_refill():
@@ -558,6 +563,18 @@ def test_ema_end_of_inner_matches_stored_ema():
         rollout_train_step(model, state, config, backward=False)
     expected = ema_combine(final_cell, ema_before, ema_alpha)
     assert torch.allclose(state.ema_embed, expected)
+
+
+def test_refill_zeros_memory_embed():
+    cache = _tiny_cache()
+    gen = torch.Generator().manual_seed(0)
+    state = BatchSlotState.seed(
+        cache, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
+    )
+    state.memory_embed = torch.randn(1, 9, 9, 32)
+    refill_done_slots(state, torch.tensor([True]), cache, generator=gen, dim=32, ema_alpha=1.0)
+    assert state.memory_embed is not None
+    assert state.memory_embed.sum().item() == 0.0
 
 
 def test_refill_zeros_ema_embed():

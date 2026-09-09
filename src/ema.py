@@ -25,5 +25,10 @@ def ema_update(ema: torch.Tensor, value: torch.Tensor, alpha: float) -> torch.Te
     return ema_combine(to_storage_dtype(value.detach()), ema, alpha).detach()
 
 
+def memory_init(value: torch.Tensor) -> torch.Tensor:
+    """Detached memory carry for the next outer step (no grad)."""
+    return to_storage_dtype(value.detach()).detach()
+
+
 def zero_ema(batch: int, dim: int, device: torch.device) -> torch.Tensor:
     return torch.zeros(batch, 9, 9, dim, device=device, dtype=STORAGE_DTYPE)
