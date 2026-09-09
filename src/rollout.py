@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 from data import tensor_to_string
 from dataset import PuzzleTensorCache
-from encoding import decode_logits, target_mask
+from encoding import NUM_VOCAB, decode_logits, target_mask
 from model import MixerNextStateModel
 
 DEFAULT_INNER_ITERS = 5
@@ -20,6 +20,7 @@ class RolloutConfig:
     max_outer_iters: int = DEFAULT_MAX_OUTER_ITERS
     halt_threshold: float = 0.5
     rollout_mask_prob: float = 0.0
+    rollout_noise_prob: float = 0.0
 
     def __post_init__(self) -> None:
         if self.inner_iters < 1:
@@ -28,6 +29,8 @@ class RolloutConfig:
             raise ValueError("max_outer_iters must be >= 1")
         if not 0.0 <= self.rollout_mask_prob <= 1.0:
             raise ValueError("rollout_mask_prob must be in [0, 1]")
+        if not 0.0 <= self.rollout_noise_prob <= 1.0:
+            raise ValueError("rollout_noise_prob must be in [0, 1]")
 
 
 @dataclass(frozen=True)
@@ -168,17 +171,51 @@ def _outer_commit(logits: torch.Tensor, ctx: _ClueContext) -> torch.Tensor:
     return torch.where(ctx.clue_pin, ctx.clue_digit_ids, decoded)
 
 
-def _masked_digits_for_inner_loop(
+def _apply_rollout_mask(
     digit_id: torch.Tensor,
     clue_pin: torch.Tensor,
     prob: float,
 ) -> torch.Tensor:
     """Randomly mask committed digits to empty for inner-loop input only (clues untouched)."""
-    if prob <= 0.0:
-        return digit_id
     mutable = ~clue_pin
     mask = mutable & (torch.rand(digit_id.shape, device=digit_id.device) < prob)
     return torch.where(mask, torch.zeros_like(digit_id), digit_id)
+
+
+def _apply_rollout_noise(
+    digit_id: torch.Tensor,
+    clue_pin: torch.Tensor,
+    prob: float,
+) -> torch.Tensor:
+    """Randomly replace committed digits with random digits (clues untouched)."""
+    mutable = ~clue_pin
+    replace = mutable & (torch.rand(digit_id.shape, device=digit_id.device) < prob)
+    random_digits = torch.randint(
+        0,
+        NUM_VOCAB,
+        digit_id.shape,
+        device=digit_id.device,
+        dtype=digit_id.dtype,
+    )
+    return torch.where(replace, random_digits, digit_id)
+
+
+def _digits_for_inner_loop(
+    digit_id: torch.Tensor,
+    clue_pin: torch.Tensor,
+    *,
+    rollout_mask_prob: float,
+    rollout_noise_prob: float,
+) -> torch.Tensor:
+    """Perturb committed digits for inner-loop input only; commit/decode stay clean."""
+    if rollout_mask_prob <= 0.0 and rollout_noise_prob <= 0.0:
+        return digit_id
+    loop_digit_id = digit_id
+    if rollout_mask_prob > 0.0:
+        loop_digit_id = _apply_rollout_mask(loop_digit_id, clue_pin, rollout_mask_prob)
+    if rollout_noise_prob > 0.0:
+        loop_digit_id = _apply_rollout_noise(loop_digit_id, clue_pin, rollout_noise_prob)
+    return loop_digit_id
 
 
 def _inner_loop(
@@ -188,9 +225,15 @@ def _inner_loop(
     inner_iters: int,
     *,
     rollout_mask_prob: float = 0.0,
+    rollout_noise_prob: float = 0.0,
     with_grad: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    loop_digit_id = _masked_digits_for_inner_loop(digit_id, clue_pin, rollout_mask_prob)
+    loop_digit_id = _digits_for_inner_loop(
+        digit_id,
+        clue_pin,
+        rollout_mask_prob=rollout_mask_prob,
+        rollout_noise_prob=rollout_noise_prob,
+    )
     input_embed = model.encode_input(loop_digit_id, clue_pin)
     cell_embed: torch.Tensor | None = None
     logits: torch.Tensor | None = None
@@ -225,6 +268,7 @@ def rollout_train_step(
         state.clue_pin,
         config.inner_iters,
         rollout_mask_prob=config.rollout_mask_prob,
+        rollout_noise_prob=config.rollout_noise_prob,
         with_grad=True,
     )
     pre_commit = predict_grid(logits, state.clues)
@@ -319,6 +363,7 @@ def rollout_eval_batch(
             active_clue_pin,
             config.inner_iters,
             rollout_mask_prob=config.rollout_mask_prob,
+            rollout_noise_prob=config.rollout_noise_prob,
             with_grad=False,
         )
         pre_commit = predict_grid(logits, active_clues)
@@ -440,6 +485,7 @@ def rollout_trace_batch(
             active_clue_pin,
             config.inner_iters,
             rollout_mask_prob=config.rollout_mask_prob,
+            rollout_noise_prob=config.rollout_noise_prob,
             with_grad=False,
         )
         committed = _outer_commit(logits, active_ctx)

@@ -24,6 +24,7 @@ def save_test_metrics(
     inner_iters: int,
     max_outer_iters: int,
     rollout_mask_prob: float,
+    rollout_noise_prob: float,
 ) -> None:
     history_path = run_dir / "history.json"
     if history_path.exists():
@@ -38,6 +39,7 @@ def save_test_metrics(
         "inner_iters": inner_iters,
         "max_outer_iters": max_outer_iters,
         "rollout_mask_prob": rollout_mask_prob,
+        "rollout_noise_prob": rollout_noise_prob,
         **asdict(test),
     }
     history_path.write_text(json.dumps(history, indent=2))
@@ -89,6 +91,12 @@ def main() -> None:
         default=None,
         help="Inner-loop input mask prob (default: from checkpoint, else 0)",
     )
+    parser.add_argument(
+        "--rollout-noise-prob",
+        type=float,
+        default=None,
+        help="Inner-loop input noise prob (default: from checkpoint, else 0)",
+    )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducible test metrics")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
@@ -137,10 +145,16 @@ def main() -> None:
         if args.rollout_mask_prob is not None
         else float(run_args.get("rollout_mask_prob", 0.0))
     )
+    rollout_noise_prob = (
+        args.rollout_noise_prob
+        if args.rollout_noise_prob is not None
+        else float(run_args.get("rollout_noise_prob", 0.0))
+    )
     rollout_config = build_rollout_config(
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
         rollout_mask_prob=rollout_mask_prob,
+        rollout_noise_prob=rollout_noise_prob,
     )
 
     epoch = int(ckpt["epoch"])
@@ -166,10 +180,11 @@ def main() -> None:
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
         rollout_mask_prob=rollout_mask_prob,
+        rollout_noise_prob=rollout_noise_prob,
     )
     print(
         f"test (epoch {epoch}, n={len(test_rows)}, inner={inner_iters}, max_outer={max_outer_iters}, "
-        f"mask={rollout_mask_prob}): "
+        f"mask={rollout_mask_prob}, noise={rollout_noise_prob}): "
         f"loss={test.loss:.4f} cell_acc={test.cell_acc:.4f} "
         f"cell_loss={test.cell_loss:.4f} halt_loss={test.halt_loss:.4f} "
         f"puzzle_acc={test.puzzle_acc:.4f} halt_rate={test.halt_rate:.4f}",

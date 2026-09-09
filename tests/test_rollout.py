@@ -14,7 +14,9 @@ from rollout import (
     RolloutConfig,
     _ClueContext,
     _halt_target,
-    _masked_digits_for_inner_loop,
+    _apply_rollout_mask,
+    _apply_rollout_noise,
+    _digits_for_inner_loop,
     _outer_commit,
     _predict_halt,
     predict_grid,
@@ -76,17 +78,25 @@ def test_rollout_config_validation():
         RolloutConfig(max_outer_iters=0)
     with pytest.raises(ValueError):
         RolloutConfig(rollout_mask_prob=1.1)
+    with pytest.raises(ValueError):
+        RolloutConfig(rollout_noise_prob=1.1)
 
 
-def test_masked_digits_for_inner_loop():
+def test_rollout_mask_and_noise():
     clues, _ = _tiny_batch()
     clue_pin = clues > 0
     filled = clues.clone()
     filled[0, 0, 2] = 7
-    masked = _masked_digits_for_inner_loop(filled, clue_pin, prob=1.0)
+    masked = _apply_rollout_mask(filled, clue_pin, prob=1.0)
     assert torch.equal(masked[clue_pin], filled[clue_pin])
     assert (masked[~clue_pin] == 0).all()
-    assert torch.equal(_masked_digits_for_inner_loop(filled, clue_pin, prob=0.0), filled)
+    noisy = _apply_rollout_noise(filled, clue_pin, prob=1.0)
+    assert torch.equal(noisy[clue_pin], filled[clue_pin])
+    assert not torch.equal(noisy, filled)
+    assert torch.equal(
+        _digits_for_inner_loop(filled, clue_pin, rollout_mask_prob=0.0, rollout_noise_prob=0.0),
+        filled,
+    )
 
 
 def test_defaults():
@@ -373,10 +383,13 @@ def test_trace_includes_halt_metadata():
 def test_build_rollout_config():
     from train import build_rollout_config
 
-    config = build_rollout_config(inner_iters=2, max_outer_iters=3, rollout_mask_prob=0.2)
+    config = build_rollout_config(
+        inner_iters=2, max_outer_iters=3, rollout_mask_prob=0.2, rollout_noise_prob=0.05
+    )
     assert config.inner_iters == 2
     assert config.max_outer_iters == 3
     assert config.rollout_mask_prob == 0.2
+    assert config.rollout_noise_prob == 0.05
 
 
 def test_train_metrics_done_only_puzzle_acc():

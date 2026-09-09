@@ -483,6 +483,10 @@
           label: "Rollout mask prob",
           value: args.rollout_mask_prob ?? 0,
         },
+        {
+          label: "Rollout noise prob",
+          value: args.rollout_noise_prob ?? 0,
+        },
         { label: "Epochs", value: args.epochs },
       ];
       const totalSeconds = totalRunSeconds(history);
@@ -748,6 +752,11 @@
         {
           label: "Rollout mask prob",
           value: test.rollout_mask_prob,
+          format: v => Number(v).toFixed(3),
+        },
+        {
+          label: "Rollout noise prob",
+          value: test.rollout_noise_prob,
           format: v => Number(v).toFixed(3),
         },
       ]
