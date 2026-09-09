@@ -98,6 +98,30 @@ def test_forward_ema_alpha_changes_output():
     assert not torch.allclose(out_base.logits, out_new.logits)
 
 
+def test_dual_readout_carry_uses_memory_branch():
+    model = MixerNextStateModel(dim=16, num_blocks=1)
+    digit_id = torch.randint(0, 10, (1, 9, 9))
+    clue_pin = (digit_id > 0).long()
+    p = model.encode_input(digit_id, clue_pin)
+    out0 = model(input_embed=p, cell_embed=None, ema_embed=None, ema_alpha=1.0)
+    out_memory_carry = model(
+        input_embed=p,
+        cell_embed=out0.cell_embed,
+        ema_embed=None,
+        ema_alpha=1.0,
+    )
+    z = p
+    for block in model.blocks:
+        z = block(z)
+    out_raw_carry = model(
+        input_embed=p,
+        cell_embed=z.view(1, 9, 9, 16),
+        ema_embed=None,
+        ema_alpha=1.0,
+    )
+    assert not torch.allclose(out_memory_carry.logits, out_raw_carry.logits)
+
+
 def test_ema_end_of_inner_matches_update():
     alpha = 0.05
     ema_h = torch.randn(1, 9, 9, 16)

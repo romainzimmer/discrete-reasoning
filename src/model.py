@@ -85,7 +85,7 @@ class ModelOutput:
 
 
 class MixerNextStateModel(nn.Module):
-    """Looped MLP-Mixer: h_{t+1} = M(P + state), state = h_t or α·h_t + (1−α)·ema_h."""
+    """Looped MLP-Mixer with dual readout: h_{t+1} = LN_h(z), logits = unembed(LN_o(z)), z = M(P + h_t)."""
 
     def __init__(self, *, dim: int, num_blocks: int):
         super().__init__()
@@ -96,6 +96,7 @@ class MixerNextStateModel(nn.Module):
 
         self.encoder = StateEncoder(dim)
         self.blocks = nn.ModuleList(MixerBlock(SEQ_LEN, dim) for _ in range(num_blocks))
+        self.norm_memory = RMSNorm(dim)
         self.unembed = UnembedHead(dim)
         self.halt_head = nn.Linear(dim, 1, bias=True)
         self.dim = dim
@@ -121,10 +122,11 @@ class MixerNextStateModel(nn.Module):
                 raise ValueError("ema_embed is required when ema_alpha < 1")
             ema = ema_embed.reshape(b, SEQ_LEN, self.dim)
             state = ema_combine(h, ema, ema_alpha)
-        x = input_embed + state
+        z = input_embed + state
         for block in self.blocks:
-            x = block(x)
-        cell_embed = x.view(b, GRID_SIZE, GRID_SIZE, self.dim)
-        logits = self.unembed(x).view(b, GRID_SIZE, GRID_SIZE, NUM_VOCAB)
-        halt_logit = self.halt_head(x.mean(dim=1)).squeeze(-1)
+            z = block(z)
+        memory = self.norm_memory(z)
+        cell_embed = memory.view(b, GRID_SIZE, GRID_SIZE, self.dim)
+        logits = self.unembed(z).view(b, GRID_SIZE, GRID_SIZE, NUM_VOCAB)
+        halt_logit = self.halt_head(z.mean(dim=1)).squeeze(-1)
         return ModelOutput(cell_embed=cell_embed, logits=logits, halt_logit=halt_logit)

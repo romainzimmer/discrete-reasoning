@@ -83,5 +83,6 @@ y = answer_to_tensor(row["answer"])    # (9, 9), 1-9
 
 ## References
 
-- [Less is More: Recursive Reasoning with Tiny Networks (TRM)](https://arxiv.org/html/2510.04871v1) — MLP-Mixer blocks
-- [Looped Transformers are Better at Learning Learning Algorithms](https://arxiv.org/pdf/2311.12424) — looped update `Y_{t+1} = M(Y_t + P)`
+- [Less is More: Recursive Reasoning with Tiny Networks (TRM)](https://arxiv.org/abs/2510.04871) — MLP-Mixer blocks
+- [Looped Transformers are Better at Learning Learning Algorithms](https://arxiv.org/abs/2311.12424) — looped update `Y_{t+1} = M(Y_t + P)`
+- [Diffusion as a Training Curriculum for Timestep-Free Iterative Reasoning](https://arxiv.org/abs/2609.01449) — persistent hidden state, anytime iterative solving

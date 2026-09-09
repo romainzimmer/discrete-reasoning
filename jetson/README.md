@@ -59,7 +59,7 @@ Writes `data/train.csv` and `data/test.csv` (~798 MB).
 Main run (mixer-looped; reduce `--train-batch-size` if OOM):
 
 ```bash
-docker compose run --rm train   --epochs 1000   --dim 256   --num-blocks 2   --train-batch-size 128 --val-batch-size 256   --num-workers 3   --val-samples 1024   --max-samples 13824   --inner-iters 3   --train-max-outer-iters 30   --eval-max-outer-iters 30 --batches-per-epoch 100 --rollout-mask-prob 0 --rollout-noise-prob 0
+docker compose run --rm train   --epochs 1000   --dim 256   --num-blocks 2   --train-batch-size 128 --val-batch-size 256   --num-workers 3   --val-samples 1024   --max-samples 13824   --inner-iters 3   --train-max-outer-iters 30   --eval-max-outer-iters 30 --batches-per-epoch 100 --rollout-mask-prob 0 --rollout-noise-prob 0 --ema-alpha 0.3
 ```
 
 Quick test (easy sudoku, ~1k train cap):
@@ -175,5 +175,6 @@ Then open http://localhost:8000/viz/
 
 ## References
 
-- [Less is More: Recursive Reasoning with Tiny Networks (TRM)](https://arxiv.org/html/2510.04871v1) — MLP-Mixer blocks
-- [Looped Transformers are Better at Learning Learning Algorithms](https://arxiv.org/pdf/2311.12424) — looped update `Y_{t+1} = M(Y_t + P)`
+- [Less is More: Recursive Reasoning with Tiny Networks (TRM)](https://arxiv.org/abs/2510.04871) — MLP-Mixer blocks
+- [Looped Transformers are Better at Learning Learning Algorithms](https://arxiv.org/abs/2311.12424) — looped update `Y_{t+1} = M(Y_t + P)`
+- [Diffusion as a Training Curriculum for Timestep-Free Iterative Reasoning](https://arxiv.org/abs/2609.01449) — persistent hidden state, anytime iterative solving
