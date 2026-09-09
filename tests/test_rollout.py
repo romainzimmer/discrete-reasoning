@@ -259,6 +259,23 @@ def test_seeded_refill():
     assert torch.equal(state1.clues, state2.clues)
 
 
+def test_refill_no_op_when_not_done():
+    cache = _tiny_cache()
+    gen = torch.Generator().manual_seed(0)
+    state = BatchSlotState.seed(cache, batch_size=2, device=torch.device("cpu"), generator=gen)
+    before = (
+        state.digit_id.clone(),
+        state.clues.clone(),
+        state.answer.clone(),
+        state.outer_count.clone(),
+    )
+    refill_done_slots(state, torch.tensor([False, False]), cache, generator=gen)
+    assert torch.equal(state.digit_id, before[0])
+    assert torch.equal(state.clues, before[1])
+    assert torch.equal(state.answer, before[2])
+    assert torch.equal(state.outer_count, before[3])
+
+
 def test_eval_pred_matches_rollout_solve():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
@@ -394,7 +411,7 @@ def test_build_rollout_config():
 
 
 def test_train_metrics_done_only_puzzle_acc():
-    from train import _accumulate_step_metrics
+    from train import TrainMetricsAccumulator
 
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
@@ -406,33 +423,7 @@ def test_train_metrics_done_only_puzzle_acc():
         RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1),
     )
     result.done = torch.tensor([False])
-    (
-        _,
-        _,
-        _,
-        _,
-        _,
-        _,
-        _,
-        correct_puzzles_done,
-        puzzles_done,
-        *_,
-    ) = _accumulate_step_metrics(
-        result,
-        state,
-        total_loss=0.0,
-        total_cell_loss=0.0,
-        total_halt_loss=0.0,
-        halt_correct=0,
-        halt_total=0,
-        correct_cells=0,
-        total_cells=0,
-        correct_puzzles_done=0,
-        puzzles_done=0,
-        outer_iters_done=0.0,
-        halted_done=0,
-        refills=0,
-        n_steps=0,
-    )
-    assert puzzles_done == 0
-    assert correct_puzzles_done == 0
+    acc = TrainMetricsAccumulator.empty(torch.device("cpu"))
+    acc.add_step(result, state)
+    assert int(acc.puzzles_done.item()) == 0
+    assert int(acc.correct_puzzles_done.item()) == 0

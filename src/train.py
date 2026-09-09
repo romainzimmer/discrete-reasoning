@@ -86,6 +86,112 @@ class TrainEpochStats:
     completions_per_epoch: int = 0
 
 
+_TRAIN_POSTFIX_EVERY = 10
+
+
+@dataclass
+class TrainMetricsAccumulator:
+    total_loss: torch.Tensor
+    total_cell_loss: torch.Tensor
+    total_halt_loss: torch.Tensor
+    halt_correct: torch.Tensor
+    halt_total: torch.Tensor
+    correct_cells: torch.Tensor
+    total_cells: torch.Tensor
+    correct_puzzles_done: torch.Tensor
+    puzzles_done: torch.Tensor
+    outer_iters_done: torch.Tensor
+    halted_done: torch.Tensor
+    refills: torch.Tensor
+    n_steps: torch.Tensor
+
+    @classmethod
+    def empty(cls, device: torch.device) -> TrainMetricsAccumulator:
+        zero = torch.zeros((), device=device)
+        zero_i = torch.zeros((), device=device, dtype=torch.long)
+        return cls(
+            total_loss=zero.clone(),
+            total_cell_loss=zero.clone(),
+            total_halt_loss=zero.clone(),
+            halt_correct=zero_i.clone(),
+            halt_total=zero_i.clone(),
+            correct_cells=zero_i.clone(),
+            total_cells=zero_i.clone(),
+            correct_puzzles_done=zero_i.clone(),
+            puzzles_done=zero_i.clone(),
+            outer_iters_done=zero.clone(),
+            halted_done=zero_i.clone(),
+            refills=zero_i.clone(),
+            n_steps=zero_i.clone(),
+        )
+
+    def add_step(self, result: RolloutResult, state: BatchSlotState) -> None:
+        b = state.digit_id.size(0)
+        self.n_steps += 1
+        self.total_loss += result.loss.detach()
+        if result.cell_loss is not None:
+            self.total_cell_loss += result.cell_loss.detach()
+        if result.halt_loss is not None:
+            self.total_halt_loss += result.halt_loss.detach()
+        assert result.pred is not None
+        assert result.halt_target is not None
+        assert result.halted is not None
+        assert result.done is not None
+
+        done = result.done
+        self.refills += done.sum()
+        self.halt_correct += (result.halted == (result.halt_target > 0.5)).sum()
+        self.halt_total += b
+
+        mask = state.clues == 0
+        self.correct_cells += (result.pred[mask] == state.answer[mask]).sum()
+        self.total_cells += mask.sum()
+
+        puzzle_ok = (result.pred == state.answer).all(dim=(-2, -1))
+        self.correct_puzzles_done += (puzzle_ok & done).sum()
+        self.puzzles_done += done.sum()
+        self.outer_iters_done += (state.outer_count * done.long()).sum()
+        self.halted_done += (result.halted & done).sum()
+
+    def snapshot_postfix(self) -> dict[str, str]:
+        n = int(self.n_steps.item())
+        if n == 0:
+            return {}
+        postfix = {
+            "loss": f"{self.total_loss.item() / n:.4f}",
+            "cell_loss": f"{self.total_cell_loss.item() / n:.4f}",
+            "halt_loss": f"{self.total_halt_loss.item() / n:.4f}",
+        }
+        halt_total = int(self.halt_total.item())
+        total_cells = int(self.total_cells.item())
+        if halt_total:
+            postfix["halt_acc"] = f"{self.halt_correct.item() / halt_total:.4f}"
+        if total_cells:
+            postfix["cell_acc"] = f"{self.correct_cells.item() / total_cells:.4f}"
+        return postfix
+
+    def finalize(self) -> TrainEpochStats:
+        n = int(self.n_steps.item())
+        if n == 0:
+            return TrainEpochStats(loss=0.0)
+        halt_total = int(self.halt_total.item())
+        total_cells = int(self.total_cells.item())
+        puzzles_done = int(self.puzzles_done.item())
+        halted_done = int(self.halted_done.item())
+        return TrainEpochStats(
+            loss=self.total_loss.item() / n,
+            cell_loss=self.total_cell_loss.item() / n,
+            halt_loss=self.total_halt_loss.item() / n,
+            cell_acc=self.correct_cells.item() / total_cells if total_cells else 0.0,
+            puzzle_acc=self.correct_puzzles_done.item() / puzzles_done if puzzles_done else 0.0,
+            halt_acc=self.halt_correct.item() / halt_total if halt_total else 0.0,
+            avg_outer_iters=self.outer_iters_done.item() / puzzles_done if puzzles_done else 0.0,
+            halt_rate=halted_done / puzzles_done if puzzles_done else 0.0,
+            refills_per_step=self.refills.item() / n,
+            completions_per_epoch=puzzles_done,
+        )
+
+
 @dataclass
 class EpochStats:
     loss: float
@@ -209,102 +315,6 @@ def save_checkpoint(
     torch.save(payload, path)
 
 
-def _accumulate_step_metrics(
-    result: RolloutResult,
-    state: BatchSlotState,
-    *,
-    total_loss: float,
-    total_cell_loss: float,
-    total_halt_loss: float,
-    halt_correct: int,
-    halt_total: int,
-    correct_cells: int,
-    total_cells: int,
-    correct_puzzles_done: int,
-    puzzles_done: int,
-    outer_iters_done: float,
-    halted_done: int,
-    refills: int,
-    n_steps: int,
-) -> tuple[float, float, float, int, int, int, int, int, int, int, float, int, int, int]:
-    b = state.digit_id.size(0)
-    total_loss += result.loss.item()
-    if result.cell_loss is not None:
-        total_cell_loss += result.cell_loss.item()
-    if result.halt_loss is not None:
-        total_halt_loss += result.halt_loss.item()
-    n_steps += 1
-    refills += int(result.done.sum().item())
-
-    assert result.pred is not None
-    assert result.halt_target is not None
-    assert result.halted is not None
-    assert result.done is not None
-
-    predict_halt = result.halted
-    halt_correct += int((predict_halt == (result.halt_target > 0.5)).sum().item())
-    halt_total += b
-
-    mask = state.clues == 0
-    correct_cells += int((result.pred[mask] == state.answer[mask]).sum().item())
-    total_cells += int(mask.sum().item())
-
-    if result.done.any():
-        done = result.done
-        correct_puzzles_done += int((result.pred[done] == state.answer[done]).all(dim=(-2, -1)).sum().item())
-        puzzles_done += int(done.sum().item())
-        outer_iters_done += float(state.outer_count[done].sum().item())
-        halted_done += int((result.halted[done]).sum().item())
-
-    return (
-        total_loss,
-        total_cell_loss,
-        total_halt_loss,
-        halt_correct,
-        halt_total,
-        correct_cells,
-        total_cells,
-        correct_puzzles_done,
-        puzzles_done,
-        outer_iters_done,
-        halted_done,
-        refills,
-        n_steps,
-    )
-
-
-def _train_stats_from_accumulators(
-    *,
-    total_loss: float,
-    total_cell_loss: float,
-    total_halt_loss: float,
-    n_steps: int,
-    halt_correct: int,
-    halt_total: int,
-    correct_cells: int,
-    total_cells: int,
-    correct_puzzles_done: int,
-    puzzles_done: int,
-    outer_iters_done: float,
-    halted_done: int,
-    refills: int,
-) -> TrainEpochStats:
-    if n_steps == 0:
-        return TrainEpochStats(loss=0.0)
-    return TrainEpochStats(
-        loss=total_loss / n_steps,
-        cell_loss=total_cell_loss / n_steps,
-        halt_loss=total_halt_loss / n_steps,
-        cell_acc=correct_cells / total_cells if total_cells else 0.0,
-        puzzle_acc=correct_puzzles_done / puzzles_done if puzzles_done else 0.0,
-        halt_acc=halt_correct / halt_total if halt_total else 0.0,
-        avg_outer_iters=outer_iters_done / puzzles_done if puzzles_done else 0.0,
-        halt_rate=halted_done / puzzles_done if puzzles_done else 0.0,
-        refills_per_step=refills / n_steps,
-        completions_per_epoch=puzzles_done,
-    )
-
-
 def _accumulate_eval_stats(
     result,
     answer: torch.Tensor,
@@ -402,19 +412,7 @@ def train_epoch(
     profiler: TrainProfiler | None = None,
 ) -> TrainEpochStats:
     model.train()
-    total_loss = 0.0
-    total_cell_loss = 0.0
-    total_halt_loss = 0.0
-    halt_correct = 0
-    halt_total = 0
-    correct_cells = 0
-    total_cells = 0
-    correct_puzzles_done = 0
-    puzzles_done = 0
-    outer_iters_done = 0.0
-    halted_done = 0
-    refills = 0
-    n_steps = 0
+    acc = TrainMetricsAccumulator.empty(state.digit_id.device)
 
     progress = tqdm(
         range(batches_per_epoch),
@@ -422,7 +420,7 @@ def train_epoch(
         leave=False,
         unit="step",
     )
-    for _ in progress:
+    for step_i, _ in enumerate(progress, start=1):
         optimizer.zero_grad(set_to_none=True)
         with torch.profiler.record_function("rollout_train_step"):
             result = rollout_train_step(
@@ -434,69 +432,17 @@ def train_epoch(
         with torch.profiler.record_function("optimizer_step"):
             optimizer.step()
         with torch.profiler.record_function("metrics_and_refill"):
-            (
-                total_loss,
-                total_cell_loss,
-                total_halt_loss,
-                halt_correct,
-                halt_total,
-                correct_cells,
-                total_cells,
-                correct_puzzles_done,
-                puzzles_done,
-                outer_iters_done,
-                halted_done,
-                refills,
-                n_steps,
-            ) = _accumulate_step_metrics(
-                result,
-                state,
-                total_loss=total_loss,
-                total_cell_loss=total_cell_loss,
-                total_halt_loss=total_halt_loss,
-                halt_correct=halt_correct,
-                halt_total=halt_total,
-                correct_cells=correct_cells,
-                total_cells=total_cells,
-                correct_puzzles_done=correct_puzzles_done,
-                puzzles_done=puzzles_done,
-                outer_iters_done=outer_iters_done,
-                halted_done=halted_done,
-                refills=refills,
-                n_steps=n_steps,
-            )
+            acc.add_step(result, state)
             assert result.done is not None
             refill_done_slots(state, result.done, cache, generator=refill_generator)
         if profiler is not None:
             profiler.step()
-        postfix = {
-            "loss": f"{total_loss / n_steps:.4f}",
-            "cell_loss": f"{total_cell_loss / n_steps:.4f}",
-            "halt_loss": f"{total_halt_loss / n_steps:.4f}",
-        }
-        if halt_total:
-            postfix["halt_acc"] = f"{halt_correct / halt_total:.4f}"
-        if total_cells:
-            postfix["cell_acc"] = f"{correct_cells / total_cells:.4f}"
-        progress.set_postfix(**postfix, refresh=False)
+        if step_i % _TRAIN_POSTFIX_EVERY == 0 or step_i == batches_per_epoch:
+            progress.set_postfix(**acc.snapshot_postfix(), refresh=False)
     progress.close()
     if profiler is not None:
         profiler.finish()
-    return _train_stats_from_accumulators(
-        total_loss=total_loss,
-        total_cell_loss=total_cell_loss,
-        total_halt_loss=total_halt_loss,
-        n_steps=n_steps,
-        halt_correct=halt_correct,
-        halt_total=halt_total,
-        correct_cells=correct_cells,
-        total_cells=total_cells,
-        correct_puzzles_done=correct_puzzles_done,
-        puzzles_done=puzzles_done,
-        outer_iters_done=outer_iters_done,
-        halted_done=halted_done,
-        refills=refills,
-    )
+    return acc.finalize()
 
 
 def _seed_all(seed: int) -> None:

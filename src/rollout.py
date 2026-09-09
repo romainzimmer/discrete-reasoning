@@ -305,19 +305,17 @@ def refill_done_slots(
     *,
     generator: torch.Generator,
 ) -> None:
-    k = int(done.sum().item())
-    if k == 0:
-        return
+    b = done.size(0)
     device = state.digit_id.device
-    idx = torch.randint(cache.clues.size(0), (k,), generator=generator)
-    clues = cache.clues[idx].to(device, non_blocking=True)
-    answers = cache.answers[idx].to(device, non_blocking=True)
-    clue_pin = clues > 0
-    state.digit_id[done] = clues
-    state.clues[done] = clues
-    state.answer[done] = answers
-    state.clue_pin[done] = clue_pin
-    state.outer_count[done] = 0
+    idx = torch.randint(cache.clues.size(0), (b,), generator=generator)
+    new_clues = cache.clues[idx].to(device, non_blocking=True)
+    new_answers = cache.answers[idx].to(device, non_blocking=True)
+    done_mask = done.view(b, 1, 1)
+    state.digit_id = torch.where(done_mask, new_clues, state.digit_id)
+    state.clues = torch.where(done_mask, new_clues, state.clues)
+    state.answer = torch.where(done_mask, new_answers, state.answer)
+    state.clue_pin = state.clues > 0
+    state.outer_count = torch.where(done, torch.zeros_like(state.outer_count), state.outer_count)
 
 
 @torch.inference_mode()
