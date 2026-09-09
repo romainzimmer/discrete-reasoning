@@ -23,8 +23,8 @@ def test_h_plus_p_forward():
     digit_id = torch.randint(0, 10, (1, 9, 9))
     clue_pin = (digit_id > 0).long()
     p = model.encode_input(digit_id, clue_pin)
-    out0 = model(input_embed=p, cell_embed=None)
-    out1 = model(input_embed=p, cell_embed=out0.cell_embed)
+    out0 = model(input_embed=p, cell_embed=None, ema_embed=None, ema_alpha=1.0)
+    out1 = model(input_embed=p, cell_embed=out0.cell_embed, ema_embed=None, ema_alpha=1.0)
     assert out0.logits.shape == (1, 9, 9, NUM_VOCAB)
     assert out0.halt_logit.shape == (1,)
     assert not torch.allclose(out0.logits, out1.logits)
@@ -65,7 +65,12 @@ def test_encode_decode_round_trip_pins_clues():
     clues[0, 0, 0] = 7
     digit_id = clues.clone()
     clue_pin = clues > 0
-    logits = model(input_embed=model.encode_input(digit_id, clue_pin)).logits
+    logits = model(
+        input_embed=model.encode_input(digit_id, clue_pin),
+        cell_embed=None,
+        ema_embed=None,
+        ema_alpha=1.0,
+    ).logits
     pred = predict_grid(logits, clues)
     assert pred[0, 0, 0] == 7
     assert pred.shape == (1, 9, 9)
@@ -77,7 +82,7 @@ def test_forward_ema_alpha_one_ignores_ema_embed():
     clue_pin = (digit_id > 0).long()
     p = model.encode_input(digit_id, clue_pin)
     ema = torch.randn(1, 9, 9, 16)
-    out_base = model(input_embed=p, cell_embed=None, ema_alpha=1.0)
+    out_base = model(input_embed=p, cell_embed=None, ema_embed=None, ema_alpha=1.0)
     out_ema = model(input_embed=p, cell_embed=None, ema_embed=ema, ema_alpha=1.0)
     assert torch.allclose(out_base.logits, out_ema.logits)
 
@@ -89,7 +94,7 @@ def test_forward_ema_alpha_changes_output():
     p = model.encode_input(digit_id, clue_pin)
     ema = torch.randn(1, 9, 9, 16)
     out_base = model(input_embed=p, cell_embed=None, ema_embed=ema, ema_alpha=0.2)
-    out_new = model(input_embed=p, cell_embed=None, ema_embed=ema * 2, ema_alpha=0.2)
+    out_new = model(input_embed=p, cell_embed=None, ema_embed=ema * 2.0, ema_alpha=0.2)
     assert not torch.allclose(out_base.logits, out_new.logits)
 
 

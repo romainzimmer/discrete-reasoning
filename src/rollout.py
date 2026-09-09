@@ -65,7 +65,7 @@ class BatchSlotState:
         *,
         generator: torch.Generator,
         dim: int,
-        ema_alpha: float = DEFAULT_EMA_ALPHA,
+        ema_alpha: float,
     ) -> BatchSlotState:
         validate_ema_alpha(ema_alpha)
         idx = torch.randint(cache.clues.size(0), (batch_size,), generator=generator)
@@ -233,8 +233,8 @@ def _inner_loop(
     clue_pin: torch.Tensor,
     inner_iters: int,
     *,
-    ema_embed: torch.Tensor | None = None,
-    ema_alpha: float = DEFAULT_EMA_ALPHA,
+    ema_embed: torch.Tensor | None,
+    ema_alpha: float,
     rollout_mask_prob: float = 0.0,
     rollout_noise_prob: float = 0.0,
     with_grad: bool = False,
@@ -334,7 +334,7 @@ def refill_done_slots(
     *,
     generator: torch.Generator,
     dim: int,
-    ema_alpha: float = DEFAULT_EMA_ALPHA,
+    ema_alpha: float,
 ) -> None:
     b = done.size(0)
     device = state.digit_id.device

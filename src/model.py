@@ -87,7 +87,7 @@ class ModelOutput:
 class MixerNextStateModel(nn.Module):
     """Looped MLP-Mixer: h_{t+1} = M(P + state), state = h_t or α·h_t + (1−α)·ema_h."""
 
-    def __init__(self, *, dim: int = 512, num_blocks: int = 2):
+    def __init__(self, *, dim: int, num_blocks: int):
         super().__init__()
         if dim <= 0:
             raise ValueError("dim must be positive")
@@ -108,8 +108,8 @@ class MixerNextStateModel(nn.Module):
         *,
         input_embed: torch.Tensor,
         cell_embed: torch.Tensor | None = None,
-        ema_embed: torch.Tensor | None = None,
-        ema_alpha: float = 1.0,
+        ema_embed: torch.Tensor | None,
+        ema_alpha: float,
     ) -> ModelOutput:
         b = input_embed.size(0)
         h = cell_embed.reshape(b, SEQ_LEN, self.dim) if cell_embed is not None else 0
