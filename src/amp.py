@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -10,11 +11,17 @@ LOSS_DTYPE = torch.float32
 STORAGE_DTYPE = torch.float32
 
 
+def _make_grad_scaler() -> Any:
+    if hasattr(torch.amp, "GradScaler"):
+        return torch.amp.GradScaler("cuda")
+    return torch.cuda.amp.GradScaler()
+
+
 @dataclass(frozen=True)
 class AmpConfig:
     enabled: bool
     dtype: torch.dtype | None
-    scaler: torch.amp.GradScaler | None
+    scaler: Any | None
 
 
 def to_loss_dtype(x: torch.Tensor) -> torch.Tensor:
@@ -30,7 +37,7 @@ def resolve_amp(device: torch.device, *, enabled: bool) -> AmpConfig:
         return AmpConfig(enabled=False, dtype=None, scaler=None)
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     # bf16 has enough range; GradScaler is only needed for fp16.
-    scaler = torch.amp.GradScaler("cuda") if dtype == torch.float16 else None
+    scaler = _make_grad_scaler() if dtype == torch.float16 else None
     return AmpConfig(enabled=True, dtype=dtype, scaler=scaler)
 
 
