@@ -756,6 +756,7 @@ def main() -> None:
                 device=device,
                 rollout_config=eval_rollout_config,
                 batch_size=args.viz_batch_size or args.train_batch_size,
+                amp=amp,
             )
             update_manifest_split(manifest, split, epoch, puzzle_indices)
         save_manifest(run_dir, manifest)

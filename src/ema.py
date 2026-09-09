@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import torch
 
+from amp import STORAGE_DTYPE, to_storage_dtype
+
 DEFAULT_EMA_ALPHA = 0.05
 
 
@@ -20,8 +22,8 @@ def ema_combine(h: torch.Tensor, ema: torch.Tensor, alpha: float) -> torch.Tenso
 
 
 def ema_update(ema: torch.Tensor, value: torch.Tensor, alpha: float) -> torch.Tensor:
-    return ema_combine(value.detach(), ema, alpha).detach()
+    return ema_combine(to_storage_dtype(value.detach()), ema, alpha).detach()
 
 
 def zero_ema(batch: int, dim: int, device: torch.device) -> torch.Tensor:
-    return torch.zeros(batch, 9, 9, dim, device=device)
+    return torch.zeros(batch, 9, 9, dim, device=device, dtype=STORAGE_DTYPE)

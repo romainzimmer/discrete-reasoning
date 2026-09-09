@@ -33,7 +33,15 @@ def test_ema_update_matches_combine():
 def test_zero_ema_shape():
     ema = zero_ema(2, 8, torch.device("cpu"))
     assert ema.shape == (2, 9, 9, 8)
+    assert ema.dtype == torch.float32
     assert ema.sum().item() == 0.0
+
+
+def test_ema_update_stores_float32_from_bf16():
+    ema = zero_ema(1, 4, torch.device("cpu"))
+    value = torch.randn(1, 9, 9, 4, dtype=torch.bfloat16)
+    updated = ema_update(ema, value, 0.1)
+    assert updated.dtype == torch.float32
 
 
 @pytest.mark.parametrize("alpha", [0.0, -0.1, 1.1])

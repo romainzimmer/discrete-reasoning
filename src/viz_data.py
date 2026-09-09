@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 
+from amp import AmpConfig, autocast_context
 from data import puzzle_to_tensor
 from model import MixerNextStateModel
 from rollout import RolloutConfig, rollout_trace_batch
@@ -80,22 +81,25 @@ def save_epoch_trajectories(
     device: torch.device,
     rollout_config: RolloutConfig,
     batch_size: int | None = None,
+    amp: AmpConfig | None = None,
 ) -> list[int]:
     if not rows:
         return []
     if batch_size is not None and batch_size < 1:
         raise ValueError("batch_size must be >= 1")
     model.eval()
+    amp = amp or AmpConfig(enabled=False, dtype=None, scaler=None)
     chunk_size = batch_size or len(rows)
     puzzle_indices: list[int] = []
     for start in range(0, len(rows), chunk_size):
         chunk = rows[start : start + chunk_size]
         clues = torch.stack([puzzle_to_tensor(row["question"]) for row in chunk]).to(device)
-        trajectories = rollout_trace_batch(
-            model,
-            clues,
-            config=rollout_config,
-        )
+        with autocast_context(device, amp):
+            trajectories = rollout_trace_batch(
+                model,
+                clues,
+                config=rollout_config,
+            )
         for offset, (row, trace) in enumerate(zip(chunk, trajectories)):
             puzzle_index = start + offset
             save_trajectory(

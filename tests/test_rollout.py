@@ -243,6 +243,47 @@ def test_eval_compact_scatter():
     assert result.outer_steps.shape == (2,)
 
 
+def test_eval_batch_casts_autocast_logits_to_float32():
+    import rollout as rollout_module
+
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.eval()
+    clues, answer = _tiny_batch()
+    config = _baseline_config(inner_iters=2, max_outer_iters=3)
+    original_inner = rollout_module._inner_loop
+
+    def bf16_inner(*args, **kwargs):
+        logits, halt_logit, cell_embed = original_inner(*args, **kwargs)
+        return logits.to(torch.bfloat16), halt_logit.to(torch.bfloat16), cell_embed
+
+    with patch.object(rollout_module, "_inner_loop", bf16_inner):
+        result = rollout_eval_batch(model, clues, answer, config=config)
+    assert result.loss.dtype == torch.float32
+
+
+def test_train_step_loss_is_float32_under_autocast_logits():
+    import rollout as rollout_module
+
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    clues, answer = _tiny_batch()
+    state = _make_state(clues, answer)
+    config = _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    original_inner = rollout_module._inner_loop
+
+    def bf16_inner(*args, **kwargs):
+        logits, halt_logit, cell_embed = original_inner(*args, **kwargs)
+        return logits.to(torch.bfloat16), halt_logit.to(torch.bfloat16), cell_embed
+
+    with patch.object(rollout_module, "_inner_loop", bf16_inner):
+        result = rollout_train_step(model, state, config, backward=False)
+    assert result.loss.dtype == torch.float32
+    assert result.cell_loss is not None
+    assert result.cell_loss.dtype == torch.float32
+    assert result.halt_loss is not None
+    assert result.halt_loss.dtype == torch.float32
+
+
 def test_no_grad_across_steps():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()

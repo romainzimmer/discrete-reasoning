@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 from data import tensor_to_string
 from dataset import PuzzleTensorCache
+from amp import LOSS_DTYPE, to_loss_dtype
 from ema import DEFAULT_EMA_ALPHA, ema_update, uses_ema, validate_ema_alpha, zero_ema
 from encoding import NUM_VOCAB, decode_logits, target_mask
 from model import MixerNextStateModel
@@ -169,6 +170,9 @@ def _compute_losses(
     halt_target: torch.Tensor,
     halt_loss_weight: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    logits = to_loss_dtype(logits)
+    halt_logit = to_loss_dtype(halt_logit)
+    halt_target = to_loss_dtype(halt_target)
     cell_loss = _compute_cell_loss(logits, clue_pin=clue_pin, answer=answer)
     halt_loss = _compute_halt_loss(halt_logit, halt_target)
     total_loss = cell_loss + halt_loss_weight * halt_loss
@@ -376,8 +380,8 @@ def rollout_eval_batch(
     out_pred = digit_id.clone()
     out_steps = torch.zeros(b, dtype=torch.long, device=device)
     out_halted = torch.zeros(b, dtype=torch.bool, device=device)
-    final_logits = digit_id.new_zeros((b, 9, 9, 10), dtype=torch.float32)
-    final_halt_logit = digit_id.new_zeros((b,), dtype=torch.float32)
+    final_logits = digit_id.new_zeros((b, 9, 9, 10), dtype=LOSS_DTYPE)
+    final_halt_logit = digit_id.new_zeros((b,), dtype=LOSS_DTYPE)
 
     slot_idx = torch.arange(b, device=device)
     active_digit_id = digit_id
@@ -415,8 +419,8 @@ def rollout_eval_batch(
         active_outer_count = active_outer_count + 1
         done = predict_halt | (active_outer_count >= config.max_outer_iters)
 
-        final_logits[slot_idx] = logits
-        final_halt_logit[slot_idx] = halt_logit
+        final_logits[slot_idx] = to_loss_dtype(logits)
+        final_halt_logit[slot_idx] = to_loss_dtype(halt_logit)
 
         done_idx = slot_idx[done]
         out_pred[done_idx] = pre_commit[done]
