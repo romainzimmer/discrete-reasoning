@@ -48,6 +48,28 @@ Open http://localhost:8000/viz/
 
 Training uses **train** / **validation** / **test** splits: validation is held out from `train.csv`, test comes from `test.csv`. Charts show train vs validation; test metrics are reported separately. Trajectory viz shows one grid per **outer** rollout commit until model halt or max outer iters.
 
+## Profile
+
+PyTorch profiler on a short run (`wait + warmup + active` must fit in `--batches-per-epoch`):
+
+```bash
+uv run train \
+  --epochs 1 \
+  --batches-per-epoch 20 \
+  --dim 512 \
+  --num-blocks 2 \
+  --inner-iters 5 \
+  --train-batch-size 8 \
+  --profile-steps 5 \
+  --profile-wait 1 \
+  --profile-warmup 2 \
+  --max-samples 100 \
+  --min-rating 0 \
+  --max-rating 0
+```
+
+Writes `runs/<run-id>/profile/trace.json`. Open `chrome://tracing` and load the file.
+
 ## Python usage
 
 ```python

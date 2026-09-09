@@ -25,6 +25,7 @@ from rollout import (
     rollout_eval_batch,
     rollout_train_step,
 )
+from profiling import ProfileConfig, TrainProfiler
 from viz_data import (
     load_manifest,
     save_epoch_trajectories,
@@ -398,6 +399,7 @@ def train_epoch(
     batches_per_epoch: int,
     halt_loss_weight: float,
     refill_generator: torch.Generator,
+    profiler: TrainProfiler | None = None,
 ) -> TrainEpochStats:
     model.train()
     total_loss = 0.0
@@ -422,46 +424,51 @@ def train_epoch(
     )
     for _ in progress:
         optimizer.zero_grad(set_to_none=True)
-        result = rollout_train_step(
-            model,
-            state,
-            rollout_config,
-            halt_loss_weight=halt_loss_weight,
-        )
-        optimizer.step()
-        (
-            total_loss,
-            total_cell_loss,
-            total_halt_loss,
-            halt_correct,
-            halt_total,
-            correct_cells,
-            total_cells,
-            correct_puzzles_done,
-            puzzles_done,
-            outer_iters_done,
-            halted_done,
-            refills,
-            n_steps,
-        ) = _accumulate_step_metrics(
-            result,
-            state,
-            total_loss=total_loss,
-            total_cell_loss=total_cell_loss,
-            total_halt_loss=total_halt_loss,
-            halt_correct=halt_correct,
-            halt_total=halt_total,
-            correct_cells=correct_cells,
-            total_cells=total_cells,
-            correct_puzzles_done=correct_puzzles_done,
-            puzzles_done=puzzles_done,
-            outer_iters_done=outer_iters_done,
-            halted_done=halted_done,
-            refills=refills,
-            n_steps=n_steps,
-        )
-        assert result.done is not None
-        refill_done_slots(state, result.done, cache, generator=refill_generator)
+        with torch.profiler.record_function("rollout_train_step"):
+            result = rollout_train_step(
+                model,
+                state,
+                rollout_config,
+                halt_loss_weight=halt_loss_weight,
+            )
+        with torch.profiler.record_function("optimizer_step"):
+            optimizer.step()
+        with torch.profiler.record_function("metrics_and_refill"):
+            (
+                total_loss,
+                total_cell_loss,
+                total_halt_loss,
+                halt_correct,
+                halt_total,
+                correct_cells,
+                total_cells,
+                correct_puzzles_done,
+                puzzles_done,
+                outer_iters_done,
+                halted_done,
+                refills,
+                n_steps,
+            ) = _accumulate_step_metrics(
+                result,
+                state,
+                total_loss=total_loss,
+                total_cell_loss=total_cell_loss,
+                total_halt_loss=total_halt_loss,
+                halt_correct=halt_correct,
+                halt_total=halt_total,
+                correct_cells=correct_cells,
+                total_cells=total_cells,
+                correct_puzzles_done=correct_puzzles_done,
+                puzzles_done=puzzles_done,
+                outer_iters_done=outer_iters_done,
+                halted_done=halted_done,
+                refills=refills,
+                n_steps=n_steps,
+            )
+            assert result.done is not None
+            refill_done_slots(state, result.done, cache, generator=refill_generator)
+        if profiler is not None:
+            profiler.step()
         postfix = {
             "loss": f"{total_loss / n_steps:.4f}",
             "cell_loss": f"{total_cell_loss / n_steps:.4f}",
@@ -473,6 +480,8 @@ def train_epoch(
             postfix["cell_acc"] = f"{correct_cells / total_cells:.4f}"
         progress.set_postfix(**postfix, refresh=False)
     progress.close()
+    if profiler is not None:
+        profiler.finish()
     return _train_stats_from_accumulators(
         total_loss=total_loss,
         total_cell_loss=total_cell_loss,
@@ -670,6 +679,15 @@ def main() -> None:
     parser.add_argument("--aug-digit-proba", type=float, default=0.5)
     parser.add_argument("--aug-rot-proba", type=float, default=0.5)
     parser.add_argument("--aug-band-proba", type=float, default=0.3)
+    parser.add_argument(
+        "--profile-steps",
+        type=int,
+        default=0,
+        help="Profile this many training steps (0 = off); writes runs/<id>/profile/trace.json",
+    )
+    parser.add_argument("--profile-wait", type=int, default=1, help="Profiler schedule: steps before warmup")
+    parser.add_argument("--profile-warmup", type=int, default=2, help="Profiler schedule: warmup steps")
+    parser.add_argument("--profile-epoch", type=int, default=1, help="Epoch to run the profiler in")
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -752,6 +770,22 @@ def main() -> None:
     }
 
     state: BatchSlotState | None = None
+    profile_config = ProfileConfig(
+        steps=args.profile_steps,
+        wait=args.profile_wait,
+        warmup=args.profile_warmup,
+        epoch=args.profile_epoch,
+    )
+    if profile_config.enabled:
+        if profile_config.epoch > args.epochs:
+            raise ValueError(
+                f"--profile-epoch {profile_config.epoch} exceeds --epochs {args.epochs}"
+            )
+        if profile_config.total_steps > args.batches_per_epoch:
+            raise ValueError(
+                f"profile needs {profile_config.total_steps} steps "
+                f"(wait + warmup + active) but --batches-per-epoch is {args.batches_per_epoch}"
+            )
 
     for epoch in range(1, args.epochs + 1):
         train_ds.set_epoch(epoch)
@@ -764,6 +798,10 @@ def main() -> None:
                 generator=refill_generator,
             )
 
+        profiler = None
+        if profile_config.enabled and epoch == profile_config.epoch:
+            profiler = TrainProfiler(profile_config, output_dir=run_dir / "profile", device=device)
+
         train = train_epoch(
             model,
             state,
@@ -775,6 +813,7 @@ def main() -> None:
             batches_per_epoch=args.batches_per_epoch,
             halt_loss_weight=args.halt_loss_weight,
             refill_generator=refill_generator,
+            profiler=profiler,
         )
         val = measure_split(
             model,

@@ -59,7 +59,7 @@ Writes `data/train.csv` and `data/test.csv` (~798 MB).
 Main run (mixer-looped; reduce `--train-batch-size` if OOM):
 
 ```bash
-docker compose run --rm train   --epochs 1000   --dim 512   --num-blocks 2   --train-batch-size 64 --val-batch-size 128   --num-workers 3   --val-samples 1024   --max-samples 13824   --inner-iters 5   --train-max-outer-iters 30   --eval-max-outer-iters 30 --batches-per-epoch 100 --rollout-mask-prob 0.1
+docker compose run --rm train   --epochs 1000   --dim 512   --num-blocks 2   --train-batch-size 128 --val-batch-size 256   --num-workers 3   --val-samples 1024   --max-samples 13824   --inner-iters 3   --train-max-outer-iters 30   --eval-max-outer-iters 30 --batches-per-epoch 100 --rollout-mask-prob 0.1 --rollout-noise-prob 0.1
 ```
 
 Quick test (easy sudoku, ~1k train cap):
@@ -82,6 +82,58 @@ docker compose run --rm train \
 ```
 
 Checkpoints and trajectories are written to `runs/`. Trajectory JSON is unchanged: one frame per **outer** commit in `states[]`.
+
+## Profile
+
+### PyTorch profiler
+
+Short run with `--profile-steps` (`wait + warmup + active` must fit in `--batches-per-epoch`):
+
+```bash
+docker compose run --rm train \
+  --epochs 1 \
+  --batches-per-epoch 20 \
+  --dim 512 \
+  --num-blocks 2 \
+  --inner-iters 3 \
+  --train-batch-size 64 \
+  --profile-steps 5 \
+  --profile-wait 1 \
+  --profile-warmup 2 \
+  --max-samples 100 \
+  --min-rating 0 \
+  --max-rating 0
+```
+
+Writes `runs/<run-id>/profile/trace.json`. Copy to your laptop and open in `chrome://tracing`:
+
+```bash
+scp jetson:<repo>/runs/<run-id>/profile/trace.json ~/Downloads/trace.json
+```
+
+### Nsight Systems
+
+Requires `nsys` on the **Jetson host** (JetPack dev tools). Run from `jetson/` — the script wraps `docker compose run train` and writes `runs/nsys/<timestamp>.nsys-rep`:
+
+```bash
+./nsys-profile.sh
+```
+
+Custom train args (no `--profile-steps`; PyTorch profiler stays off by default):
+
+```bash
+./nsys-profile.sh --epochs 1 --batches-per-epoch 20 --dim 512 --num-blocks 2 --inner-iters 3 --train-batch-size 64 --max-samples 100 --min-rating 0 --max-rating 0 --val-samples 10 --viz-samples 0
+```
+
+If `nsys` is not on `PATH`, set `NSYS=/opt/nvidia/nsight-systems/.../target-linux-tegra-armv8/nsys`. Use `sudo` if profiling fails with permission errors.
+
+View on your laptop: install [Nsight Systems macOS Host](https://developer.nvidia.com/nsight-systems/get-started) (Mac version ≥ Jetson `nsys --version`), then:
+
+```bash
+scp jetson:<repo>/runs/nsys/<timestamp>.nsys-rep ~/Downloads/
+```
+
+Open the file in **NVIDIA Nsight Systems** (File → Open).
 
 ## Test
 
