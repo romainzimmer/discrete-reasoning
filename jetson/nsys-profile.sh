@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Profile training with Nsight Systems (run on the Jetson host, from jetson/).
+# Profile training with Nsight Systems inside the train container (run from jetson/ on the Jetson host).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,23 +8,25 @@ OUTPUT_DIR="${REPO_ROOT}/runs/nsys"
 mkdir -p "$OUTPUT_DIR"
 
 timestamp="$(date +%Y%m%d-%H%M%S)"
-output="${OUTPUT_DIR}/${timestamp}"
+output="/workspace/runs/nsys/${timestamp}"
 
-find_nsys() {
+find_nsys_tegra() {
   if [[ -n "${NSYS:-}" ]]; then
     echo "$NSYS"
-    return
-  fi
-  if command -v nsys >/dev/null 2>&1; then
-    command -v nsys
     return
   fi
   find /opt/nvidia/nsight-systems -path '*/target-linux-tegra-armv8/nsys' -type f 2>/dev/null | head -1
 }
 
-nsys_bin="$(find_nsys || true)"
+nsys_bin="$(find_nsys_tegra || true)"
 if [[ -z "$nsys_bin" ]]; then
-  echo "nsys not found. Install Nsight Systems (JetPack dev tools) or set NSYS=/path/to/nsys" >&2
+  echo "tegra nsys not found under /opt/nvidia/nsight-systems (install Nsight Systems from JetPack)." >&2
+  echo "Or set NSYS=/opt/nvidia/nsight-systems/<ver>/target-linux-tegra-armv8/nsys" >&2
+  exit 1
+fi
+
+if [[ ! -d /opt/nvidia/nsight-systems ]]; then
+  echo "/opt/nvidia/nsight-systems missing on host; cannot mount into container." >&2
   exit 1
 fi
 
@@ -45,13 +47,19 @@ if [[ $# -eq 0 ]]; then
     --viz-samples 0
 fi
 
-echo "nsys: $nsys_bin"
-echo "report: ${output}.nsys-rep"
+host_report="${OUTPUT_DIR}/${timestamp}.nsys-rep"
+echo "nsys (tegra): $nsys_bin"
+echo "report: $host_report"
 echo "train args: $*"
 
-exec "$nsys_bin" profile \
+exec docker compose run --rm --privileged \
+  -v /opt/nvidia/nsight-systems:/opt/nvidia/nsight-systems:ro \
+  --entrypoint "$nsys_bin" \
+  train \
+  profile \
   --trace=cuda,nvtx,osrt \
   --sample=none \
   --force-overwrite=true \
   -o "$output" \
-  docker compose run --rm train "$@"
+  -- \
+  train "$@"

@@ -59,7 +59,7 @@ Writes `data/train.csv` and `data/test.csv` (~798 MB).
 Main run (mixer-looped; reduce `--train-batch-size` if OOM):
 
 ```bash
-docker compose run --rm train   --epochs 1000   --dim 512   --num-blocks 2   --train-batch-size 128 --val-batch-size 256   --num-workers 3   --val-samples 1024   --max-samples 13824   --inner-iters 3   --train-max-outer-iters 30   --eval-max-outer-iters 30 --batches-per-epoch 100 --rollout-mask-prob 0.1 --rollout-noise-prob 0.1
+docker compose run --rm train   --epochs 1000   --dim 256   --num-blocks 2   --train-batch-size 128 --val-batch-size 256   --num-workers 3   --val-samples 1024   --max-samples 13824   --inner-iters 3   --train-max-outer-iters 30   --eval-max-outer-iters 30 --batches-per-epoch 100 --rollout-mask-prob 0.1 --rollout-noise-prob 0.1
 ```
 
 Quick test (easy sudoku, ~1k train cap):
@@ -113,7 +113,7 @@ scp jetson:<repo>/runs/<run-id>/profile/trace.json ~/Downloads/trace.json
 
 ### Nsight Systems
 
-Requires `nsys` on the **Jetson host** (JetPack dev tools). Run from `jetson/` — the script wraps `docker compose run train` and writes `runs/nsys/<timestamp>.nsys-rep`:
+Requires Nsight Systems on the **Jetson host** at `/opt/nvidia/nsight-systems` (JetPack dev tools). The script profiles **`train` inside the container** (not the docker CLI), mounts host `nsys`, and writes `runs/nsys/<timestamp>.nsys-rep`:
 
 ```bash
 ./nsys-profile.sh
@@ -125,7 +125,9 @@ Custom train args (no `--profile-steps`; PyTorch profiler stays off by default):
 ./nsys-profile.sh --epochs 1 --batches-per-epoch 20 --dim 512 --num-blocks 2 --inner-iters 3 --train-batch-size 64 --max-samples 100 --min-rating 0 --max-rating 0 --val-samples 10 --viz-samples 0
 ```
 
-If `nsys` is not on `PATH`, set `NSYS=/opt/nvidia/nsight-systems/.../target-linux-tegra-armv8/nsys`. Use `sudo` if profiling fails with permission errors.
+If the tegra binary is not found, set `NSYS=/opt/nvidia/nsight-systems/<ver>/target-linux-tegra-armv8/nsys`. The script uses `--privileged`; run with `sudo ./nsys-profile.sh` if profiling fails with permission errors.
+
+In the report you should see a **`python` / `train` process**, **CUDA** rows, and NVTX ranges (`rollout_train_step`, `metrics_and_refill`). If you only see `docker` and no GPU data, the capture failed — check warnings in Nsight.
 
 View on your laptop: install [Nsight Systems macOS Host](https://developer.nvidia.com/nsight-systems/get-started) (Mac version ≥ Jetson `nsys --version`), then:
 
