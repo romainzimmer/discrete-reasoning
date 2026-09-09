@@ -12,6 +12,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from amp import AmpConfig, autocast_context, resolve_amp
 from augment import AugmentConfig
 from dataset import PuzzleDataset, PuzzleTensorCache, collate_puzzles, filter_rows
 from model import MixerNextStateModel
@@ -86,9 +87,6 @@ class TrainEpochStats:
     completions_per_epoch: int = 0
 
 
-_TRAIN_POSTFIX_EVERY = 10
-
-
 @dataclass
 class TrainMetricsAccumulator:
     total_loss: torch.Tensor
@@ -153,23 +151,6 @@ class TrainMetricsAccumulator:
         self.outer_iters_done += (state.outer_count * done.long()).sum()
         self.halted_done += (result.halted & done).sum()
 
-    def snapshot_postfix(self) -> dict[str, str]:
-        n = int(self.n_steps.item())
-        if n == 0:
-            return {}
-        postfix = {
-            "loss": f"{self.total_loss.item() / n:.4f}",
-            "cell_loss": f"{self.total_cell_loss.item() / n:.4f}",
-            "halt_loss": f"{self.total_halt_loss.item() / n:.4f}",
-        }
-        halt_total = int(self.halt_total.item())
-        total_cells = int(self.total_cells.item())
-        if halt_total:
-            postfix["halt_acc"] = f"{self.halt_correct.item() / halt_total:.4f}"
-        if total_cells:
-            postfix["cell_acc"] = f"{self.correct_cells.item() / total_cells:.4f}"
-        return postfix
-
     def finalize(self) -> TrainEpochStats:
         n = int(self.n_steps.item())
         if n == 0:
@@ -202,6 +183,83 @@ class EpochStats:
     halt_acc: float = 0.0
     avg_outer_iters: float = 0.0
     halt_rate: float = 0.0
+
+
+@dataclass
+class EvalMetricsAccumulator:
+    total_loss: torch.Tensor
+    total_cell_loss: torch.Tensor
+    total_halt_loss: torch.Tensor
+    halt_correct: torch.Tensor
+    halt_total: torch.Tensor
+    correct_cells: torch.Tensor
+    total_cells: torch.Tensor
+    correct_puzzles: torch.Tensor
+    outer_iters_sum: torch.Tensor
+    halted_count: torch.Tensor
+    n: torch.Tensor
+
+    @classmethod
+    def empty(cls, device: torch.device) -> EvalMetricsAccumulator:
+        zero = torch.zeros((), device=device)
+        zero_i = torch.zeros((), device=device, dtype=torch.long)
+        return cls(
+            total_loss=zero.clone(),
+            total_cell_loss=zero.clone(),
+            total_halt_loss=zero.clone(),
+            halt_correct=zero_i.clone(),
+            halt_total=zero_i.clone(),
+            correct_cells=zero_i.clone(),
+            total_cells=zero_i.clone(),
+            correct_puzzles=zero_i.clone(),
+            outer_iters_sum=zero.clone(),
+            halted_count=zero_i.clone(),
+            n=zero_i.clone(),
+        )
+
+    def add_batch(
+        self,
+        result,
+        answer: torch.Tensor,
+        clues: torch.Tensor,
+    ) -> None:
+        batch_size = answer.size(0) if answer.dim() == 3 else 1
+        self.n += batch_size
+        self.total_loss += result.loss.detach() * batch_size
+        self.total_cell_loss += result.cell_loss.detach() * batch_size
+        self.total_halt_loss += result.halt_loss.detach() * batch_size
+
+        preds = result.pred.unsqueeze(0) if result.pred.dim() == 2 else result.pred
+        answers = answer.unsqueeze(0) if answer.dim() == 2 else answer
+        clue_rows = clues.unsqueeze(0) if clues.dim() == 2 else clues
+        mask = clue_rows == 0
+        self.correct_cells += (preds[mask] == answers[mask]).sum()
+        self.total_cells += mask.sum()
+        self.correct_puzzles += (preds == answers).all(dim=(-2, -1)).sum()
+
+        self.halt_correct += result.halt_correct_rounds
+        self.halt_total += result.halt_total_rounds
+        outer_steps = result.outer_steps.unsqueeze(0) if result.outer_steps.dim() == 0 else result.outer_steps
+        self.outer_iters_sum += outer_steps.sum()
+        halted = result.halted.unsqueeze(0) if result.halted.dim() == 0 else result.halted
+        self.halted_count += halted.sum()
+
+    def finalize(self) -> EpochStats:
+        n = int(self.n.item())
+        if n == 0:
+            return EpochStats(loss=0.0)
+        halt_total = int(self.halt_total.item())
+        total_cells = int(self.total_cells.item())
+        return EpochStats(
+            loss=self.total_loss.item() / n,
+            cell_loss=self.total_cell_loss.item() / n,
+            halt_loss=self.total_halt_loss.item() / n,
+            cell_acc=self.correct_cells.item() / total_cells if total_cells else 0.0,
+            puzzle_acc=self.correct_puzzles.item() / n,
+            halt_acc=self.halt_correct.item() / halt_total if halt_total else 0.0,
+            avg_outer_iters=self.outer_iters_sum.item() / n,
+            halt_rate=self.halted_count.item() / n,
+        )
 
 
 def make_run_dir(runs_dir: Path) -> Path:
@@ -315,88 +373,6 @@ def save_checkpoint(
     torch.save(payload, path)
 
 
-def _accumulate_eval_stats(
-    result,
-    answer: torch.Tensor,
-    clues: torch.Tensor,
-    *,
-    total_loss: float,
-    total_cell_loss: float,
-    total_halt_loss: float,
-    halt_correct: int,
-    halt_total: int,
-    correct_cells: int,
-    total_cells: int,
-    correct_puzzles: int,
-    outer_iters_sum: float,
-    halted_count: int,
-    n: int,
-) -> tuple[float, float, float, int, int, int, int, int, int, float, int, int]:
-    batch_size = answer.size(0) if answer.dim() == 3 else 1
-    total_loss += result.loss.item() * batch_size
-    total_cell_loss += result.cell_loss.item() * batch_size
-    total_halt_loss += result.halt_loss.item() * batch_size
-    n += batch_size
-
-    preds = result.pred.unsqueeze(0) if result.pred.dim() == 2 else result.pred
-    answers = answer.unsqueeze(0) if answer.dim() == 2 else answer
-    clue_rows = clues.unsqueeze(0) if clues.dim() == 2 else clues
-    mask = clue_rows == 0
-    correct_cells += int((preds[mask] == answers[mask]).sum().item())
-    total_cells += int(mask.sum().item())
-    correct_puzzles += int((preds == answers).all(dim=(-2, -1)).sum().item())
-
-    halt_correct += result.halt_correct_rounds
-    halt_total += result.halt_total_rounds
-
-    outer_steps = result.outer_steps.unsqueeze(0) if result.outer_steps.dim() == 0 else result.outer_steps
-    outer_iters_sum += float(outer_steps.sum().item())
-    halted = result.halted.unsqueeze(0) if result.halted.dim() == 0 else result.halted
-    halted_count += int(halted.sum().item())
-
-    return (
-        total_loss,
-        total_cell_loss,
-        total_halt_loss,
-        halt_correct,
-        halt_total,
-        correct_cells,
-        total_cells,
-        correct_puzzles,
-        outer_iters_sum,
-        halted_count,
-        n,
-    )
-
-
-def _stats_from_accumulators(
-    *,
-    total_loss: float,
-    total_cell_loss: float,
-    total_halt_loss: float,
-    halt_correct: int,
-    halt_total: int,
-    correct_cells: int,
-    total_cells: int,
-    correct_puzzles: int,
-    outer_iters_sum: float,
-    halted_count: int,
-    n: int,
-) -> EpochStats:
-    if n == 0:
-        return EpochStats(loss=0.0)
-    return EpochStats(
-        loss=total_loss / n,
-        cell_loss=total_cell_loss / n,
-        halt_loss=total_halt_loss / n,
-        cell_acc=correct_cells / total_cells if total_cells else 0.0,
-        puzzle_acc=correct_puzzles / n,
-        halt_acc=halt_correct / halt_total if halt_total else 0.0,
-        avg_outer_iters=outer_iters_sum / n,
-        halt_rate=halted_count / n,
-    )
-
-
 def train_epoch(
     model: MixerNextStateModel,
     state: BatchSlotState,
@@ -410,8 +386,10 @@ def train_epoch(
     halt_loss_weight: float,
     refill_generator: torch.Generator,
     profiler: TrainProfiler | None = None,
+    amp: AmpConfig | None = None,
 ) -> TrainEpochStats:
     model.train()
+    amp = amp or AmpConfig(enabled=False, dtype=None, scaler=None)
     acc = TrainMetricsAccumulator.empty(state.digit_id.device)
 
     progress = tqdm(
@@ -420,29 +398,42 @@ def train_epoch(
         leave=False,
         unit="step",
     )
-    for step_i, _ in enumerate(progress, start=1):
+    for _ in progress:
         optimizer.zero_grad(set_to_none=True)
         with torch.profiler.record_function("rollout_train_step"):
-            result = rollout_train_step(
-                model,
-                state,
-                rollout_config,
-                halt_loss_weight=halt_loss_weight,
-            )
+            with autocast_context(state.digit_id.device, amp):
+                result = rollout_train_step(
+                    model,
+                    state,
+                    rollout_config,
+                    halt_loss_weight=halt_loss_weight,
+                    backward=False,
+                )
         with torch.profiler.record_function("optimizer_step"):
-            optimizer.step()
+            if amp.scaler is not None:
+                amp.scaler.scale(result.loss).backward()
+                amp.scaler.step(optimizer)
+                amp.scaler.update()
+            else:
+                result.loss.backward()
+                optimizer.step()
         with torch.profiler.record_function("metrics_and_refill"):
             acc.add_step(result, state)
             assert result.done is not None
             refill_done_slots(state, result.done, cache, generator=refill_generator)
         if profiler is not None:
             profiler.step()
-        if step_i % _TRAIN_POSTFIX_EVERY == 0 or step_i == batches_per_epoch:
-            progress.set_postfix(**acc.snapshot_postfix(), refresh=False)
-    progress.close()
     if profiler is not None:
         profiler.finish()
-    return acc.finalize()
+    stats = acc.finalize()
+    progress.set_postfix(
+        loss=f"{stats.loss:.4f}",
+        cell_loss=f"{stats.cell_loss:.4f}",
+        halt_loss=f"{stats.halt_loss:.4f}",
+        refresh=False,
+    )
+    progress.close()
+    return stats
 
 
 def _seed_all(seed: int) -> None:
@@ -464,21 +455,13 @@ def measure_split(
     halt_loss_weight: float,
     use_cuda: bool,
     seed: int | None = None,
+    amp: AmpConfig | None = None,
 ) -> EpochStats:
     if seed is not None:
         _seed_all(seed)
     model.eval()
-    total_loss = 0.0
-    total_cell_loss = 0.0
-    total_halt_loss = 0.0
-    halt_correct = 0
-    halt_total = 0
-    correct_cells = 0
-    total_cells = 0
-    correct_puzzles = 0
-    outer_iters_sum = 0.0
-    halted_count = 0
-    n = 0
+    amp = amp or AmpConfig(enabled=False, dtype=None, scaler=None)
+    acc = EvalMetricsAccumulator.empty(device)
     progress = tqdm(
         loader,
         desc=_epoch_desc(epoch, epochs, phase),
@@ -487,62 +470,17 @@ def measure_split(
     )
     for batch in progress:
         batch = {k: v.to(device, non_blocking=use_cuda) for k, v in batch.items()}
-        result = rollout_eval_batch(
-            model,
-            batch["clues"],
-            batch["answer"],
-            config=rollout_config,
-            halt_loss_weight=halt_loss_weight,
-        )
-        (
-            total_loss,
-            total_cell_loss,
-            total_halt_loss,
-            halt_correct,
-            halt_total,
-            correct_cells,
-            total_cells,
-            correct_puzzles,
-            outer_iters_sum,
-            halted_count,
-            n,
-        ) = _accumulate_eval_stats(
-            result,
-            batch["answer"],
-            batch["clues"],
-            total_loss=total_loss,
-            total_cell_loss=total_cell_loss,
-            total_halt_loss=total_halt_loss,
-            halt_correct=halt_correct,
-            halt_total=halt_total,
-            correct_cells=correct_cells,
-            total_cells=total_cells,
-            correct_puzzles=correct_puzzles,
-            outer_iters_sum=outer_iters_sum,
-            halted_count=halted_count,
-            n=n,
-        )
-        progress.set_postfix(
-            loss=f"{total_loss / n:.4f}",
-            cell_loss=f"{total_cell_loss / n:.4f}",
-            halt_loss=f"{total_halt_loss / n:.4f}",
-            cell_acc=f"{correct_cells / total_cells:.4f}",
-            refresh=False,
-        )
+        with autocast_context(device, amp):
+            result = rollout_eval_batch(
+                model,
+                batch["clues"],
+                batch["answer"],
+                config=rollout_config,
+                halt_loss_weight=halt_loss_weight,
+            )
+        acc.add_batch(result, batch["answer"], batch["clues"])
     progress.close()
-    return _stats_from_accumulators(
-        total_loss=total_loss,
-        total_cell_loss=total_cell_loss,
-        total_halt_loss=total_halt_loss,
-        halt_correct=halt_correct,
-        halt_total=halt_total,
-        correct_cells=correct_cells,
-        total_cells=total_cells,
-        correct_puzzles=correct_puzzles,
-        outer_iters_sum=outer_iters_sum,
-        halted_count=halted_count,
-        n=n,
-    )
+    return acc.finalize()
 
 
 def main() -> None:
@@ -580,7 +518,7 @@ def main() -> None:
     parser.add_argument(
         "--halt-loss-weight",
         type=float,
-        default=0.1,
+        default=1.0,
         help="Weight for halt BCE loss",
     )
     parser.add_argument(
@@ -634,6 +572,11 @@ def main() -> None:
     parser.add_argument("--profile-wait", type=int, default=1, help="Profiler schedule: steps before warmup")
     parser.add_argument("--profile-warmup", type=int, default=2, help="Profiler schedule: warmup steps")
     parser.add_argument("--profile-epoch", type=int, default=1, help="Epoch to run the profiler in")
+    parser.add_argument(
+        "--no-amp",
+        action="store_true",
+        help="Disable automatic mixed precision (bf16/fp16 on CUDA)",
+    )
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -679,6 +622,8 @@ def main() -> None:
     val_loader = DataLoader(val_ds, batch_size=val_batch_size, **loader_kwargs)
 
     args.model = "mixer-looped"
+    args.amp = not args.no_amp
+    amp = resolve_amp(device, enabled=args.amp)
     model = MixerNextStateModel(dim=args.dim, num_blocks=args.num_blocks).to(device)
     decay_params, no_decay_params = [], []
     for name, param in model.named_parameters():
@@ -760,6 +705,7 @@ def main() -> None:
             halt_loss_weight=args.halt_loss_weight,
             refill_generator=refill_generator,
             profiler=profiler,
+            amp=amp,
         )
         val = measure_split(
             model,
@@ -772,6 +718,7 @@ def main() -> None:
             halt_loss_weight=args.halt_loss_weight,
             use_cuda=use_cuda,
             seed=args.seed,
+            amp=amp,
         )
         save_epoch_checkpoint(run_dir, epoch, model)
         model.eval()

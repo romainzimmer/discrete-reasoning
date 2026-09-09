@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import MixerNextStateModel
+from amp import resolve_amp
 from train import EpochStats, build_rollout_config, measure_split, require_run_args
 
 
@@ -139,7 +140,7 @@ def main() -> None:
     max_outer_iters = (
         args.max_outer_iters if args.max_outer_iters is not None else int(run_args["eval_max_outer_iters"])
     )
-    halt_loss_weight = float(run_args.get("halt_loss_weight", 0.1))
+    halt_loss_weight = float(run_args.get("halt_loss_weight", 1.0))
     rollout_mask_prob = (
         args.rollout_mask_prob
         if args.rollout_mask_prob is not None
@@ -157,6 +158,9 @@ def main() -> None:
         rollout_noise_prob=rollout_noise_prob,
     )
 
+    amp_enabled = bool(run_args.get("amp", True))
+    amp = resolve_amp(device, enabled=amp_enabled)
+
     epoch = int(ckpt["epoch"])
     test = measure_split(
         model,
@@ -169,6 +173,7 @@ def main() -> None:
         halt_loss_weight=halt_loss_weight,
         use_cuda=use_cuda,
         seed=args.seed,
+        amp=amp,
     )
     save_test_metrics(
         run_dir,
