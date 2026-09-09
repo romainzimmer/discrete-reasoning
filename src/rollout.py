@@ -187,11 +187,11 @@ def _apply_rollout_noise(
     clue_pin: torch.Tensor,
     prob: float,
 ) -> torch.Tensor:
-    """Randomly replace committed digits with random digits (clues untouched)."""
+    """Randomly replace committed digits with digits 1-9 (clues untouched)."""
     mutable = ~clue_pin
     replace = mutable & (torch.rand(digit_id.shape, device=digit_id.device) < prob)
     random_digits = torch.randint(
-        0,
+        1,
         NUM_VOCAB,
         digit_id.shape,
         device=digit_id.device,

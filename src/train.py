@@ -638,7 +638,7 @@ def main() -> None:
         "--rollout-noise-prob",
         type=float,
         default=0.0,
-        help="Per-cell prob of random digit noise at each outer step inner-loop input (clues untouched)",
+        help="Per-cell prob of replacing with random digit 1-9 at inner-loop input (clues untouched)",
     )
     parser.add_argument(
         "--val-batch-size",

@@ -93,6 +93,7 @@ def test_rollout_mask_and_noise():
     noisy = _apply_rollout_noise(filled, clue_pin, prob=1.0)
     assert torch.equal(noisy[clue_pin], filled[clue_pin])
     assert not torch.equal(noisy, filled)
+    assert (noisy[~clue_pin] >= 1).all()
     assert torch.equal(
         _digits_for_inner_loop(filled, clue_pin, rollout_mask_prob=0.0, rollout_noise_prob=0.0),
         filled,
