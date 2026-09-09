@@ -13,6 +13,7 @@ Experiments on [sapientinc/sudoku-extreme](https://huggingface.co/datasets/sapie
 - **`--eval-max-outer-iters`**: max outer commits per puzzle during val/test
 - **`--batches-per-epoch`**: optimizer steps per epoch (one outer round per step)
 - **`--halt-loss-weight`**: weight for halt BCE loss
+- **`--ema-alpha`**: outer-loop `cell_embed` EMA blend in `(0, 1]` (default `0.05`; `1` = no memory)
 
 Runs save `args.model: mixer-looped`. Old checkpoints from before this migration cannot be loaded by `eval`.
 

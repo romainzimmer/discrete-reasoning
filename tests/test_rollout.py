@@ -7,6 +7,7 @@ import torch
 
 from dataset import PuzzleDataset, PuzzleTensorCache
 from model import MixerNextStateModel
+from ema import DEFAULT_EMA_ALPHA, ema_combine
 from rollout import (
     DEFAULT_INNER_ITERS,
     DEFAULT_MAX_OUTER_ITERS,
@@ -31,6 +32,11 @@ from rollout import (
 
 def _first_param(model: MixerNextStateModel) -> torch.Tensor:
     return model.encoder.digit_embed.weight
+
+
+def _baseline_config(**kwargs) -> RolloutConfig:
+    kwargs.setdefault("ema_alpha", 1.0)
+    return RolloutConfig(**kwargs)
 
 
 def _tiny_batch():
@@ -80,6 +86,8 @@ def test_rollout_config_validation():
         RolloutConfig(rollout_mask_prob=1.1)
     with pytest.raises(ValueError):
         RolloutConfig(rollout_noise_prob=1.1)
+    with pytest.raises(ValueError):
+        RolloutConfig(ema_alpha=0.0)
 
 
 def test_rollout_mask_and_noise():
@@ -104,6 +112,7 @@ def test_defaults():
     config = RolloutConfig()
     assert config.inner_iters == DEFAULT_INNER_ITERS
     assert config.max_outer_iters == DEFAULT_MAX_OUTER_ITERS
+    assert config.ema_alpha == DEFAULT_EMA_ALPHA
 
 
 def test_one_outer_per_step():
@@ -111,7 +120,7 @@ def test_one_outer_per_step():
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
-    config = RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    config = _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
     count_before = state.outer_count.item()
     rollout_train_step(model, state, config)
     assert state.outer_count.item() == count_before + 1
@@ -122,7 +131,7 @@ def test_state_persists_across_steps():
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
-    config = RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    config = _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
     digit_before = state.digit_id.clone()
     rollout_train_step(model, state, config)
     assert not torch.equal(state.digit_id, digit_before)
@@ -132,8 +141,10 @@ def test_state_persists_across_steps():
 def test_state_persists_across_epochs():
     cache = _tiny_cache()
     gen = torch.Generator().manual_seed(0)
-    state = BatchSlotState.seed(cache, batch_size=1, device=torch.device("cpu"), generator=gen)
-    config = RolloutConfig(inner_iters=2, max_outer_iters=100, halt_threshold=1.1)
+    state = BatchSlotState.seed(
+        cache, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
+    )
+    config = _baseline_config(inner_iters=2, max_outer_iters=100, halt_threshold=1.1)
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     rollout_train_step(model, state, config)
@@ -149,7 +160,9 @@ def test_state_persists_across_epochs():
 def test_always_clues_init():
     cache = _tiny_cache()
     gen = torch.Generator().manual_seed(0)
-    state = BatchSlotState.seed(cache, batch_size=2, device=torch.device("cpu"), generator=gen)
+    state = BatchSlotState.seed(
+        cache, batch_size=2, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
+    )
     assert torch.equal(state.digit_id, state.clues)
 
 
@@ -166,7 +179,7 @@ def test_oracle_halt_model_continues():
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
-    config = RolloutConfig(inner_iters=2, max_outer_iters=10)
+    config = _baseline_config(inner_iters=2, max_outer_iters=10)
     with patch("rollout._predict_halt", return_value=torch.zeros(1, dtype=torch.bool)):
         with patch("rollout._halt_target", return_value=torch.ones(1)):
             result = rollout_train_step(model, state, config)
@@ -177,10 +190,12 @@ def test_oracle_halt_model_continues():
 def test_refill_after_done():
     cache = _tiny_cache()
     gen = torch.Generator().manual_seed(0)
-    state = BatchSlotState.seed(cache, batch_size=1, device=torch.device("cpu"), generator=gen)
+    state = BatchSlotState.seed(
+        cache, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
+    )
     original_clues = state.clues.clone()
     done = torch.tensor([True])
-    refill_done_slots(state, done, cache, generator=gen)
+    refill_done_slots(state, done, cache, generator=gen, dim=32, ema_alpha=1.0)
     assert not torch.equal(state.clues, original_clues)
     assert state.outer_count.item() == 0
     assert torch.equal(state.digit_id, state.clues)
@@ -189,16 +204,18 @@ def test_refill_after_done():
 def test_max_outer_forces_refill():
     cache = _tiny_cache()
     gen = torch.Generator().manual_seed(0)
-    state = BatchSlotState.seed(cache, batch_size=1, device=torch.device("cpu"), generator=gen)
+    state = BatchSlotState.seed(
+        cache, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
+    )
     state.outer_count[0] = 9
-    config = RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    config = _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     result = rollout_train_step(model, state, config)
     assert result.done is not None
     assert result.done.all()
     original_clues = state.clues.clone()
-    refill_done_slots(state, result.done, cache, generator=gen)
+    refill_done_slots(state, result.done, cache, generator=gen, dim=32, ema_alpha=1.0)
     assert not torch.equal(state.clues, original_clues)
 
 
@@ -206,7 +223,7 @@ def test_halt_stops_eval_early():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _tiny_batch()
-    config = RolloutConfig(inner_iters=2, max_outer_iters=100, halt_threshold=0.5)
+    config = _baseline_config(inner_iters=2, max_outer_iters=100, halt_threshold=0.5)
     with patch("rollout._predict_halt", side_effect=[torch.tensor([False]), torch.tensor([True])]):
         result = rollout_eval_batch(model, clues, answer, config=config)
     assert result.outer_steps.item() == 2
@@ -220,7 +237,7 @@ def test_eval_compact_scatter():
     clues2[0, 0, 2] = 4
     clues_b = torch.cat([clues, clues2], dim=0)
     answer_b = torch.cat([answer, answer], dim=0)
-    config = RolloutConfig(inner_iters=2, max_outer_iters=3)
+    config = _baseline_config(inner_iters=2, max_outer_iters=3)
     result = rollout_eval_batch(model, clues_b, answer_b, config=config)
     assert result.pred.shape == (2, 9, 9)
     assert result.outer_steps.shape == (2,)
@@ -231,7 +248,7 @@ def test_no_grad_across_steps():
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
-    config = RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    config = _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
     rollout_train_step(model, state, config)
     assert not state.digit_id.requires_grad
 
@@ -241,7 +258,7 @@ def test_cell_embed_not_persisted():
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
-    config = RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    config = _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
     rollout_train_step(model, state, config)
     # state has no cell_embed field — fresh encode each step
     assert not hasattr(state, "cell_embed")
@@ -251,25 +268,31 @@ def test_seeded_refill():
     cache = _tiny_cache()
     gen1 = torch.Generator().manual_seed(42)
     gen2 = torch.Generator().manual_seed(42)
-    state1 = BatchSlotState.seed(cache, batch_size=1, device=torch.device("cpu"), generator=gen1)
-    state2 = BatchSlotState.seed(cache, batch_size=1, device=torch.device("cpu"), generator=gen2)
+    state1 = BatchSlotState.seed(
+        cache, batch_size=1, device=torch.device("cpu"), generator=gen1, dim=32, ema_alpha=1.0
+    )
+    state2 = BatchSlotState.seed(
+        cache, batch_size=1, device=torch.device("cpu"), generator=gen2, dim=32, ema_alpha=1.0
+    )
     done = torch.tensor([True])
-    refill_done_slots(state1, done, cache, generator=gen1)
-    refill_done_slots(state2, done, cache, generator=gen2)
+    refill_done_slots(state1, done, cache, generator=gen1, dim=32, ema_alpha=1.0)
+    refill_done_slots(state2, done, cache, generator=gen2, dim=32, ema_alpha=1.0)
     assert torch.equal(state1.clues, state2.clues)
 
 
 def test_refill_no_op_when_not_done():
     cache = _tiny_cache()
     gen = torch.Generator().manual_seed(0)
-    state = BatchSlotState.seed(cache, batch_size=2, device=torch.device("cpu"), generator=gen)
+    state = BatchSlotState.seed(
+        cache, batch_size=2, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
+    )
     before = (
         state.digit_id.clone(),
         state.clues.clone(),
         state.answer.clone(),
         state.outer_count.clone(),
     )
-    refill_done_slots(state, torch.tensor([False, False]), cache, generator=gen)
+    refill_done_slots(state, torch.tensor([False, False]), cache, generator=gen, dim=32, ema_alpha=1.0)
     assert torch.equal(state.digit_id, before[0])
     assert torch.equal(state.clues, before[1])
     assert torch.equal(state.answer, before[2])
@@ -280,7 +303,7 @@ def test_eval_pred_matches_rollout_solve():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _tiny_batch()
-    config = RolloutConfig(inner_iters=2, max_outer_iters=3)
+    config = _baseline_config(inner_iters=2, max_outer_iters=3)
     result = rollout_eval_batch(model, clues, answer, config=config)
     for idx in range(clues.size(0)):
         assert torch.equal(result.pred[idx], rollout_solve(model, clues[idx], config=config))
@@ -291,7 +314,7 @@ def test_inner_loop_grad():
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
-    config = RolloutConfig(inner_iters=3, max_outer_iters=10, halt_threshold=1.1)
+    config = _baseline_config(inner_iters=3, max_outer_iters=10, halt_threshold=1.1)
     result = rollout_train_step(model, state, config)
     assert result.loss.item() > 0
     assert _first_param(model).grad is not None
@@ -302,7 +325,7 @@ def test_rollout_fixed_steps_and_clues_pinned():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _tiny_batch()
-    config = RolloutConfig(inner_iters=2, max_outer_iters=4)
+    config = _baseline_config(inner_iters=2, max_outer_iters=4)
     result = rollout_eval_batch(model, clues, answer, config=config)
     assert torch.all(result.pred[clues > 0] == clues[clues > 0])
 
@@ -311,7 +334,7 @@ def test_reproducible_eval():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _tiny_batch()
-    config = RolloutConfig(inner_iters=2, max_outer_iters=3)
+    config = _baseline_config(inner_iters=2, max_outer_iters=3)
     r1 = rollout_eval_batch(model, clues, answer, config=config)
     r2 = rollout_eval_batch(model, clues, answer, config=config)
     assert torch.equal(r1.pred, r2.pred)
@@ -323,7 +346,7 @@ def test_rollout_trace_frame_count():
     model.eval()
     clues, _ = _tiny_batch()
     max_outer_iters = 3
-    config = RolloutConfig(inner_iters=2, max_outer_iters=max_outer_iters)
+    config = _baseline_config(inner_iters=2, max_outer_iters=max_outer_iters)
     grids = rollout_trace(model, clues, config=config)
     assert 2 <= len(grids) <= max_outer_iters + 1
 
@@ -335,7 +358,7 @@ def test_rollout_trace_batch_matches_single():
     clues2 = clues.clone()
     clues2[0, 0, 2] = 4
     clues_b = torch.cat([clues, clues2], dim=0)
-    config = RolloutConfig(inner_iters=2, max_outer_iters=3)
+    config = _baseline_config(inner_iters=2, max_outer_iters=3)
     torch.manual_seed(0)
     single_first = rollout_trace(model, clues, config=config)
     torch.manual_seed(0)
@@ -380,7 +403,7 @@ def test_eval_halt_acc_counts_all_rounds():
     model.eval()
     clues, answer = _tiny_batch()
     max_outer = 4
-    config = RolloutConfig(inner_iters=2, max_outer_iters=max_outer, halt_threshold=1.1)
+    config = _baseline_config(inner_iters=2, max_outer_iters=max_outer, halt_threshold=1.1)
     result = rollout_eval_batch(model, clues, answer, config=config)
     assert result.halt_total_rounds == max_outer
     assert result.outer_steps.item() == max_outer
@@ -390,7 +413,7 @@ def test_trace_includes_halt_metadata():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, _ = _tiny_batch()
-    config = RolloutConfig(inner_iters=2, max_outer_iters=3)
+    config = _baseline_config(inner_iters=2, max_outer_iters=3)
     trace = rollout_trace_batch(model, clues, config=config)[0]
     assert len(trace.states) == trace.outer_steps + 1
     assert isinstance(trace.halted, bool)
@@ -402,12 +425,17 @@ def test_build_rollout_config():
     from train import build_rollout_config
 
     config = build_rollout_config(
-        inner_iters=2, max_outer_iters=3, rollout_mask_prob=0.2, rollout_noise_prob=0.05
+        inner_iters=2,
+        max_outer_iters=3,
+        rollout_mask_prob=0.2,
+        rollout_noise_prob=0.05,
+        ema_alpha=0.05,
     )
     assert config.inner_iters == 2
     assert config.max_outer_iters == 3
     assert config.rollout_mask_prob == 0.2
     assert config.rollout_noise_prob == 0.05
+    assert config.ema_alpha == 0.05
 
 
 def test_train_metrics_done_only_puzzle_acc():
@@ -420,10 +448,83 @@ def test_train_metrics_done_only_puzzle_acc():
     result = rollout_train_step(
         model,
         state,
-        RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1),
+        _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1),
     )
     result.done = torch.tensor([False])
     acc = TrainMetricsAccumulator.empty(torch.device("cpu"))
     acc.add_step(result, state)
     assert int(acc.puzzles_done.item()) == 0
     assert int(acc.correct_puzzles_done.item()) == 0
+
+
+def test_ema_alpha_one_regression():
+    torch.manual_seed(0)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.eval()
+    clues, answer = _tiny_batch()
+    config = _baseline_config(inner_iters=2, max_outer_iters=3, halt_threshold=1.1)
+    result = rollout_eval_batch(model, clues, answer, config=config)
+    assert result.outer_steps.item() == 3
+
+
+def test_ema_alpha_one_state_has_no_ema_embed():
+    clues, answer = _tiny_batch()
+    state = _make_state(clues, answer)
+    config = _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    rollout_train_step(model, state, config)
+    assert state.ema_embed is None
+
+
+def test_ema_embed_updated_after_train_step():
+    clues, answer = _tiny_batch()
+    state = BatchSlotState.seed(
+        _tiny_cache(),
+        batch_size=1,
+        device=torch.device("cpu"),
+        generator=torch.Generator().manual_seed(0),
+        dim=32,
+        ema_alpha=0.05,
+    )
+    config = RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1, ema_alpha=0.05)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    rollout_train_step(model, state, config)
+    assert state.ema_embed is not None
+    assert not state.ema_embed.requires_grad
+    assert state.ema_embed.abs().sum().item() > 0
+
+
+def test_ema_end_of_inner_matches_stored_ema():
+    clues, answer = _tiny_batch()
+    ema_alpha = 0.05
+    state = BatchSlotState.seed(
+        _tiny_cache(),
+        batch_size=1,
+        device=torch.device("cpu"),
+        generator=torch.Generator().manual_seed(0),
+        dim=32,
+        ema_alpha=ema_alpha,
+    )
+    ema_before = state.ema_embed.clone()
+    config = RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1, ema_alpha=ema_alpha)
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    with patch("rollout._inner_loop") as mock_inner:
+        final_cell = torch.randn(1, 9, 9, 32)
+        mock_inner.return_value = (torch.zeros(1, 9, 9, 10), torch.zeros(1), final_cell)
+        rollout_train_step(model, state, config, backward=False)
+    expected = ema_combine(final_cell, ema_before, ema_alpha)
+    assert torch.allclose(state.ema_embed, expected)
+
+
+def test_refill_zeros_ema_embed():
+    cache = _tiny_cache()
+    gen = torch.Generator().manual_seed(0)
+    state = BatchSlotState.seed(
+        cache, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=0.05
+    )
+    state.ema_embed.fill_(1.0)
+    refill_done_slots(state, torch.tensor([True]), cache, generator=gen, dim=32, ema_alpha=0.05)
+    assert state.ema_embed.sum().item() == 0.0

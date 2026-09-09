@@ -16,6 +16,7 @@ from amp import AmpConfig, autocast_context, resolve_amp
 from augment import AugmentConfig
 from dataset import PuzzleDataset, PuzzleTensorCache, collate_puzzles, filter_rows
 from model import MixerNextStateModel
+from ema import DEFAULT_EMA_ALPHA, validate_ema_alpha
 from rollout import (
     DEFAULT_INNER_ITERS,
     DEFAULT_MAX_OUTER_ITERS,
@@ -49,6 +50,7 @@ REQUIRED_RUN_ARGS = (
     "num_workers",
     "min_rating",
     "max_rating",
+    "ema_alpha",
 )
 
 
@@ -59,6 +61,7 @@ def build_rollout_config(
     halt_threshold: float = 0.5,
     rollout_mask_prob: float = 0.0,
     rollout_noise_prob: float = 0.0,
+    ema_alpha: float = DEFAULT_EMA_ALPHA,
 ) -> RolloutConfig:
     return RolloutConfig(
         inner_iters=inner_iters,
@@ -66,6 +69,7 @@ def build_rollout_config(
         halt_threshold=halt_threshold,
         rollout_mask_prob=rollout_mask_prob,
         rollout_noise_prob=rollout_noise_prob,
+        ema_alpha=ema_alpha,
     )
 
 
@@ -420,7 +424,14 @@ def train_epoch(
         with torch.profiler.record_function("metrics_and_refill"):
             acc.add_step(result, state)
             assert result.done is not None
-            refill_done_slots(state, result.done, cache, generator=refill_generator)
+            refill_done_slots(
+                state,
+                result.done,
+                cache,
+                generator=refill_generator,
+                dim=model.dim,
+                ema_alpha=rollout_config.ema_alpha,
+            )
         if profiler is not None:
             profiler.step()
     if profiler is not None:
@@ -534,6 +545,12 @@ def main() -> None:
         help="Per-cell prob of replacing with random digit 1-9 at inner-loop input (clues untouched)",
     )
     parser.add_argument(
+        "--ema-alpha",
+        type=float,
+        default=DEFAULT_EMA_ALPHA,
+        help="Outer-loop cell_embed EMA blend in (0, 1]; 1 = no memory",
+    )
+    parser.add_argument(
         "--val-batch-size",
         type=int,
         default=None,
@@ -578,6 +595,7 @@ def main() -> None:
         help="Disable automatic mixed precision (bf16/fp16 on CUDA)",
     )
     args = parser.parse_args()
+    validate_ema_alpha(args.ema_alpha)
 
     if args.seed is not None:
         torch.manual_seed(args.seed)
@@ -645,12 +663,14 @@ def main() -> None:
         max_outer_iters=args.train_max_outer_iters,
         rollout_mask_prob=args.rollout_mask_prob,
         rollout_noise_prob=args.rollout_noise_prob,
+        ema_alpha=args.ema_alpha,
     )
     eval_rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.eval_max_outer_iters,
         rollout_mask_prob=args.rollout_mask_prob,
         rollout_noise_prob=args.rollout_noise_prob,
+        ema_alpha=args.ema_alpha,
     )
     refill_generator = torch.Generator(device="cpu").manual_seed(args.seed)
     best_val_cell_acc = -1.0
@@ -687,6 +707,8 @@ def main() -> None:
                 args.train_batch_size,
                 device,
                 generator=refill_generator,
+                dim=model.dim,
+                ema_alpha=rollout_config.ema_alpha,
             )
 
         profiler = None

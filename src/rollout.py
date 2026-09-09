@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 from data import tensor_to_string
 from dataset import PuzzleTensorCache
+from ema import DEFAULT_EMA_ALPHA, ema_update, uses_ema, validate_ema_alpha, zero_ema
 from encoding import NUM_VOCAB, decode_logits, target_mask
 from model import MixerNextStateModel
 
@@ -21,6 +22,7 @@ class RolloutConfig:
     halt_threshold: float = 0.5
     rollout_mask_prob: float = 0.0
     rollout_noise_prob: float = 0.0
+    ema_alpha: float = DEFAULT_EMA_ALPHA
 
     def __post_init__(self) -> None:
         if self.inner_iters < 1:
@@ -31,6 +33,7 @@ class RolloutConfig:
             raise ValueError("rollout_mask_prob must be in [0, 1]")
         if not 0.0 <= self.rollout_noise_prob <= 1.0:
             raise ValueError("rollout_noise_prob must be in [0, 1]")
+        validate_ema_alpha(self.ema_alpha)
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,7 @@ class BatchSlotState:
     answer: torch.Tensor
     clue_pin: torch.Tensor
     outer_count: torch.Tensor
+    ema_embed: torch.Tensor | None = None
 
     @classmethod
     def seed(
@@ -60,17 +64,22 @@ class BatchSlotState:
         device: torch.device,
         *,
         generator: torch.Generator,
+        dim: int,
+        ema_alpha: float = DEFAULT_EMA_ALPHA,
     ) -> BatchSlotState:
+        validate_ema_alpha(ema_alpha)
         idx = torch.randint(cache.clues.size(0), (batch_size,), generator=generator)
         clues = cache.clues[idx].to(device, non_blocking=True)
         answers = cache.answers[idx].to(device, non_blocking=True)
         clue_pin = clues > 0
+        ema_embed = zero_ema(batch_size, dim, device) if uses_ema(ema_alpha) else None
         return cls(
             digit_id=clues.clone(),
             clues=clues,
             answer=answers,
             clue_pin=clue_pin,
             outer_count=torch.zeros(batch_size, dtype=torch.long, device=device),
+            ema_embed=ema_embed,
         )
 
 
@@ -224,6 +233,8 @@ def _inner_loop(
     clue_pin: torch.Tensor,
     inner_iters: int,
     *,
+    ema_embed: torch.Tensor | None = None,
+    ema_alpha: float = DEFAULT_EMA_ALPHA,
     rollout_mask_prob: float = 0.0,
     rollout_noise_prob: float = 0.0,
     with_grad: bool = False,
@@ -238,17 +249,29 @@ def _inner_loop(
     cell_embed: torch.Tensor | None = None
     logits: torch.Tensor | None = None
     halt_logit: torch.Tensor | None = None
+    loop_ema = ema_embed
     for _ in range(inner_iters):
         if with_grad:
-            out = model(input_embed=input_embed, cell_embed=cell_embed)
+            out = model(
+                input_embed=input_embed,
+                cell_embed=cell_embed,
+                ema_embed=loop_ema,
+                ema_alpha=ema_alpha,
+            )
         else:
             with torch.no_grad():
-                out = model(input_embed=input_embed, cell_embed=cell_embed)
+                out = model(
+                    input_embed=input_embed,
+                    cell_embed=cell_embed,
+                    ema_embed=loop_ema,
+                    ema_alpha=ema_alpha,
+                )
         logits = out.logits
         halt_logit = out.halt_logit
         cell_embed = out.cell_embed
     assert logits is not None
     assert halt_logit is not None
+    assert cell_embed is not None
     return logits, halt_logit, cell_embed
 
 
@@ -263,11 +286,13 @@ def rollout_train_step(
     if not model.training:
         raise ValueError("rollout_train_step requires model.training")
     ctx = _ClueContext.from_clues(state.clues)
-    logits, halt_logit, _ = _inner_loop(
+    logits, halt_logit, final_cell_embed = _inner_loop(
         model,
         state.digit_id,
         state.clue_pin,
         config.inner_iters,
+        ema_embed=state.ema_embed,
+        ema_alpha=config.ema_alpha,
         rollout_mask_prob=config.rollout_mask_prob,
         rollout_noise_prob=config.rollout_noise_prob,
         with_grad=True,
@@ -286,6 +311,8 @@ def rollout_train_step(
     if backward:
         loss.backward()
     state.digit_id = _outer_commit(logits, ctx)
+    if state.ema_embed is not None:
+        state.ema_embed = ema_update(state.ema_embed, final_cell_embed, config.ema_alpha)
     state.outer_count = state.outer_count + 1
     done = predict_halt | (state.outer_count >= config.max_outer_iters)
     return RolloutResult(
@@ -306,6 +333,8 @@ def refill_done_slots(
     cache: PuzzleTensorCache,
     *,
     generator: torch.Generator,
+    dim: int,
+    ema_alpha: float = DEFAULT_EMA_ALPHA,
 ) -> None:
     b = done.size(0)
     device = state.digit_id.device
@@ -318,6 +347,10 @@ def refill_done_slots(
     state.answer = torch.where(done_mask, new_answers, state.answer)
     state.clue_pin = state.clues > 0
     state.outer_count = torch.where(done, torch.zeros_like(state.outer_count), state.outer_count)
+    if state.ema_embed is not None:
+        done_mask_ema = done.view(b, 1, 1, 1)
+        new_ema = zero_ema(b, dim, device)
+        state.ema_embed = torch.where(done_mask_ema, new_ema, state.ema_embed)
 
 
 @torch.inference_mode()
@@ -353,15 +386,20 @@ def rollout_eval_batch(
     active_clue_pin = clue_pin
     active_outer_count = outer_count
     active_ctx = ctx
+    active_ema_embed = (
+        zero_ema(b, model.dim, device) if uses_ema(config.ema_alpha) else None
+    )
     halt_correct_rounds = torch.zeros((), device=device, dtype=torch.long)
     halt_total_rounds = 0
 
     while slot_idx.numel() > 0:
-        logits, halt_logit, _ = _inner_loop(
+        logits, halt_logit, final_cell_embed = _inner_loop(
             model,
             active_digit_id,
             active_clue_pin,
             config.inner_iters,
+            ema_embed=active_ema_embed,
+            ema_alpha=config.ema_alpha,
             rollout_mask_prob=config.rollout_mask_prob,
             rollout_noise_prob=config.rollout_noise_prob,
             with_grad=False,
@@ -372,6 +410,8 @@ def rollout_eval_batch(
         halt_correct_rounds += (predict_halt == (halt_target_round > 0.5)).sum()
         halt_total_rounds += pre_commit.size(0)
         committed = _outer_commit(logits, active_ctx)
+        if active_ema_embed is not None:
+            active_ema_embed = ema_update(active_ema_embed, final_cell_embed, config.ema_alpha)
         active_outer_count = active_outer_count + 1
         done = predict_halt | (active_outer_count >= config.max_outer_iters)
 
@@ -390,6 +430,8 @@ def rollout_eval_batch(
         active_answer = active_answer[keep]
         active_clue_pin = active_clue_pin[keep]
         active_outer_count = active_outer_count[keep]
+        if active_ema_embed is not None:
+            active_ema_embed = active_ema_embed[keep]
         active_ctx = _ClueContext.from_clues(active_clues)
 
     pre_commit_final = predict_grid(final_logits, clues_b)
@@ -474,18 +516,25 @@ def rollout_trace_batch(
     active_clue_pin = clue_pin
     active_outer_count = outer_count
     active_ctx = ctx
+    active_ema_embed = (
+        zero_ema(b, model.dim, device) if uses_ema(config.ema_alpha) else None
+    )
 
     while slot_idx.numel() > 0:
-        logits, halt_logit, _ = _inner_loop(
+        logits, halt_logit, final_cell_embed = _inner_loop(
             model,
             active_digit_id,
             active_clue_pin,
             config.inner_iters,
+            ema_embed=active_ema_embed,
+            ema_alpha=config.ema_alpha,
             rollout_mask_prob=config.rollout_mask_prob,
             rollout_noise_prob=config.rollout_noise_prob,
             with_grad=False,
         )
         committed = _outer_commit(logits, active_ctx)
+        if active_ema_embed is not None:
+            active_ema_embed = ema_update(active_ema_embed, final_cell_embed, config.ema_alpha)
         predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
         active_outer_count = active_outer_count + 1
         done = predict_halt | (active_outer_count >= config.max_outer_iters)
@@ -506,6 +555,8 @@ def rollout_trace_batch(
         active_clues = active_clues[keep]
         active_clue_pin = active_clue_pin[keep]
         active_outer_count = active_outer_count[keep]
+        if active_ema_embed is not None:
+            active_ema_embed = active_ema_embed[keep]
         active_ctx = _ClueContext.from_clues(active_clues)
 
     return [

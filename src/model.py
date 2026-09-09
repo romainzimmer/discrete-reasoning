@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from ema import ema_combine, validate_ema_alpha
 from encoding import GRID_SIZE, NUM_VOCAB, SEQ_LEN
 
 SWIGLU_EXPANSION = 4
@@ -84,7 +85,7 @@ class ModelOutput:
 
 
 class MixerNextStateModel(nn.Module):
-    """Looped MLP-Mixer: h_{t+1} = M(h_t + P), logits from h."""
+    """Looped MLP-Mixer: h_{t+1} = M(P + state), state = h_t or α·h_t + (1−α)·ema_h."""
 
     def __init__(self, *, dim: int = 512, num_blocks: int = 2):
         super().__init__()
@@ -107,10 +108,20 @@ class MixerNextStateModel(nn.Module):
         *,
         input_embed: torch.Tensor,
         cell_embed: torch.Tensor | None = None,
+        ema_embed: torch.Tensor | None = None,
+        ema_alpha: float = 1.0,
     ) -> ModelOutput:
         b = input_embed.size(0)
         h = cell_embed.reshape(b, SEQ_LEN, self.dim) if cell_embed is not None else 0
-        x = h + input_embed
+        if ema_alpha >= 1.0:
+            state = h
+        else:
+            validate_ema_alpha(ema_alpha)
+            if ema_embed is None:
+                raise ValueError("ema_embed is required when ema_alpha < 1")
+            ema = ema_embed.reshape(b, SEQ_LEN, self.dim)
+            state = ema_combine(h, ema, ema_alpha)
+        x = input_embed + state
         for block in self.blocks:
             x = block(x)
         cell_embed = x.view(b, GRID_SIZE, GRID_SIZE, self.dim)

@@ -24,6 +24,7 @@ def save_test_metrics(
     max_rating: int | None,
     inner_iters: int,
     max_outer_iters: int,
+    ema_alpha: float,
     rollout_mask_prob: float,
     rollout_noise_prob: float,
 ) -> None:
@@ -39,6 +40,7 @@ def save_test_metrics(
         "max_rating": max_rating,
         "inner_iters": inner_iters,
         "max_outer_iters": max_outer_iters,
+        "ema_alpha": ema_alpha,
         "rollout_mask_prob": rollout_mask_prob,
         "rollout_noise_prob": rollout_noise_prob,
         **asdict(test),
@@ -98,6 +100,12 @@ def main() -> None:
         default=None,
         help="Inner-loop input noise prob (default: from checkpoint, else 0)",
     )
+    parser.add_argument(
+        "--ema-alpha",
+        type=float,
+        default=None,
+        help="Outer-loop cell_embed EMA blend (default: from checkpoint, else 1 for legacy runs)",
+    )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducible test metrics")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
@@ -151,11 +159,17 @@ def main() -> None:
         if args.rollout_noise_prob is not None
         else float(run_args.get("rollout_noise_prob", 0.0))
     )
+    ema_alpha = (
+        args.ema_alpha
+        if args.ema_alpha is not None
+        else float(run_args.get("ema_alpha", 1.0))
+    )
     rollout_config = build_rollout_config(
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
         rollout_mask_prob=rollout_mask_prob,
         rollout_noise_prob=rollout_noise_prob,
+        ema_alpha=ema_alpha,
     )
 
     amp_enabled = bool(run_args.get("amp", True))
@@ -184,12 +198,13 @@ def main() -> None:
         max_rating=args.max_rating,
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
+        ema_alpha=ema_alpha,
         rollout_mask_prob=rollout_mask_prob,
         rollout_noise_prob=rollout_noise_prob,
     )
     print(
         f"test (epoch {epoch}, n={len(test_rows)}, inner={inner_iters}, max_outer={max_outer_iters}, "
-        f"mask={rollout_mask_prob}, noise={rollout_noise_prob}): "
+        f"ema={ema_alpha}, mask={rollout_mask_prob}, noise={rollout_noise_prob}): "
         f"loss={test.loss:.4f} cell_acc={test.cell_acc:.4f} "
         f"cell_loss={test.cell_loss:.4f} halt_loss={test.halt_loss:.4f} "
         f"puzzle_acc={test.puzzle_acc:.4f} halt_rate={test.halt_rate:.4f}",
