@@ -131,7 +131,7 @@ def main() -> None:
     max_outer_iters = (
         args.max_outer_iters if args.max_outer_iters is not None else int(run_args["eval_max_outer_iters"])
     )
-    halt_loss_weight = float(run_args.get("halt_loss_weight", 1.0))
+    halt_loss_weight = float(run_args.get("halt_loss_weight", 0.1))
     rollout_mask_prob = (
         args.rollout_mask_prob
         if args.rollout_mask_prob is not None
@@ -171,6 +171,7 @@ def main() -> None:
         f"test (epoch {epoch}, n={len(test_rows)}, inner={inner_iters}, max_outer={max_outer_iters}, "
         f"mask={rollout_mask_prob}): "
         f"loss={test.loss:.4f} cell_acc={test.cell_acc:.4f} "
+        f"cell_loss={test.cell_loss:.4f} halt_loss={test.halt_loss:.4f} "
         f"puzzle_acc={test.puzzle_acc:.4f} halt_rate={test.halt_rate:.4f}",
         flush=True,
     )

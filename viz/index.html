@@ -247,8 +247,26 @@
     <div class="section-title">Metrics</div>
     <div class="charts-grid">
     <div class="chart">
-      <div class="chart-title">Loss</div>
+      <div class="chart-title">Total loss</div>
       <canvas id="lossChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend">
+        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
+        <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
+      </div>
+    </div>
+    <div class="chart">
+      <div class="chart-title">Cell loss</div>
+      <canvas id="cellLossChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend">
+        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
+        <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
+      </div>
+    </div>
+    <div class="chart">
+      <div class="chart-title">Halt loss</div>
+      <canvas id="haltLossChart"></canvas>
       <div class="axis-x-label">epoch</div>
       <div class="legend">
         <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
@@ -715,7 +733,9 @@
           label: "Rating",
           value: formatRatingRange(test.min_rating, test.max_rating),
         },
-        { label: "Loss", value: test.loss, format: v => Number(v).toFixed(4) },
+        { label: "Total loss", value: test.loss, format: v => Number(v).toFixed(4) },
+        { label: "Cell loss", value: test.cell_loss, format: v => Number(v).toFixed(4) },
+        { label: "Halt loss", value: test.halt_loss, format: v => Number(v).toFixed(4) },
         { label: "Cell accuracy", value: test.cell_acc, format: pct },
         { label: "Puzzle accuracy", value: test.puzzle_acc, format: pct },
         { label: "Halt accuracy", value: test.halt_acc, format: pct },
@@ -745,9 +765,18 @@
       const xLabels = epochs.map(e => e.epoch);
       const pct = v => `${(Number(v) * 100).toFixed(0)}%`;
 
+      const lossFormatY = v => Number(v).toFixed(3);
       drawSeries(document.getElementById("lossChart"), metricSeries(epochs, "train_loss", "val_loss"), {
         xLabels,
-        formatY: v => Number(v).toFixed(3),
+        formatY: lossFormatY,
+      });
+      drawSeries(document.getElementById("cellLossChart"), metricSeries(epochs, "train_cell_loss", "val_cell_loss"), {
+        xLabels,
+        formatY: lossFormatY,
+      });
+      drawSeries(document.getElementById("haltLossChart"), metricSeries(epochs, "train_halt_loss", "val_halt_loss"), {
+        xLabels,
+        formatY: lossFormatY,
       });
       drawSeries(document.getElementById("cellAccChart"), accMetricSeries(epochs, "cell_acc"), {
         yMin: 0,

@@ -74,6 +74,8 @@ class BatchSlotState:
 @dataclass
 class RolloutResult:
     loss: torch.Tensor
+    cell_loss: torch.Tensor | None = None
+    halt_loss: torch.Tensor | None = None
     pred: torch.Tensor | None = None
     done: torch.Tensor | None = None
     halted: torch.Tensor | None = None
@@ -87,6 +89,8 @@ class EvalRolloutResult:
     outer_steps: torch.Tensor
     halted: torch.Tensor
     loss: torch.Tensor
+    cell_loss: torch.Tensor
+    halt_loss: torch.Tensor
     halt_target: torch.Tensor
     halt_logit: torch.Tensor
     halt_correct_rounds: int
@@ -144,7 +148,7 @@ def _compute_halt_loss(halt_logit: torch.Tensor, halt_target: torch.Tensor) -> t
     return F.binary_cross_entropy_with_logits(halt_logit, halt_target)
 
 
-def _compute_total_loss(
+def _compute_losses(
     logits: torch.Tensor,
     halt_logit: torch.Tensor,
     *,
@@ -152,10 +156,11 @@ def _compute_total_loss(
     answer: torch.Tensor,
     halt_target: torch.Tensor,
     halt_loss_weight: float,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     cell_loss = _compute_cell_loss(logits, clue_pin=clue_pin, answer=answer)
     halt_loss = _compute_halt_loss(halt_logit, halt_target)
-    return cell_loss + halt_loss_weight * halt_loss
+    total_loss = cell_loss + halt_loss_weight * halt_loss
+    return cell_loss, halt_loss, total_loss
 
 
 def _outer_commit(logits: torch.Tensor, ctx: _ClueContext) -> torch.Tensor:
@@ -209,7 +214,7 @@ def rollout_train_step(
     state: BatchSlotState,
     config: RolloutConfig,
     *,
-    halt_loss_weight: float = 1.0,
+    halt_loss_weight: float = 0.1,
 ) -> RolloutResult:
     if not model.training:
         raise ValueError("rollout_train_step requires model.training")
@@ -225,7 +230,7 @@ def rollout_train_step(
     pre_commit = predict_grid(logits, state.clues)
     halt_target = _halt_target(pre_commit, state.answer)
     predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
-    loss = _compute_total_loss(
+    cell_loss, halt_loss, loss = _compute_losses(
         logits,
         halt_logit,
         clue_pin=ctx.clue_pin,
@@ -239,6 +244,8 @@ def rollout_train_step(
     done = predict_halt | (state.outer_count >= config.max_outer_iters)
     return RolloutResult(
         loss=loss.detach(),
+        cell_loss=cell_loss.detach(),
+        halt_loss=halt_loss.detach(),
         pred=pre_commit.detach(),
         done=done,
         halted=predict_halt,
@@ -276,7 +283,7 @@ def rollout_eval_batch(
     answer: torch.Tensor,
     *,
     config: RolloutConfig | None = None,
-    halt_loss_weight: float = 1.0,
+    halt_loss_weight: float = 0.1,
 ) -> EvalRolloutResult:
     config = config or RolloutConfig()
     clues_b, was_batched = _ensure_batched(clues)
@@ -345,7 +352,7 @@ def rollout_eval_batch(
 
     pre_commit_final = predict_grid(final_logits, clues_b)
     halt_target = _halt_target(pre_commit_final, answer_b)
-    loss = _compute_total_loss(
+    cell_loss, halt_loss, loss = _compute_losses(
         final_logits,
         final_halt_logit,
         clue_pin=ctx.clue_pin,
@@ -360,6 +367,8 @@ def rollout_eval_batch(
             outer_steps=out_steps.squeeze(0),
             halted=out_halted.squeeze(0),
             loss=loss,
+            cell_loss=cell_loss,
+            halt_loss=halt_loss,
             halt_target=halt_target.squeeze(0),
             halt_logit=final_halt_logit.squeeze(0),
             halt_correct_rounds=halt_correct_rounds,
@@ -370,6 +379,8 @@ def rollout_eval_batch(
         outer_steps=out_steps,
         halted=out_halted,
         loss=loss,
+        cell_loss=cell_loss,
+        halt_loss=halt_loss,
         halt_target=halt_target,
         halt_logit=final_halt_logit,
         halt_correct_rounds=halt_correct_rounds,

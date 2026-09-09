@@ -72,6 +72,8 @@ def _epoch_desc(epoch: int, epochs: int, phase: str) -> str:
 @dataclass
 class TrainEpochStats:
     loss: float
+    cell_loss: float = 0.0
+    halt_loss: float = 0.0
     cell_acc: float = 0.0
     puzzle_acc: float = 0.0
     halt_acc: float = 0.0
@@ -84,6 +86,8 @@ class TrainEpochStats:
 @dataclass
 class EpochStats:
     loss: float
+    cell_loss: float = 0.0
+    halt_loss: float = 0.0
     cell_acc: float = 0.0
     puzzle_acc: float = 0.0
     halt_acc: float = 0.0
@@ -207,6 +211,8 @@ def _accumulate_step_metrics(
     state: BatchSlotState,
     *,
     total_loss: float,
+    total_cell_loss: float,
+    total_halt_loss: float,
     halt_correct: int,
     halt_total: int,
     correct_cells: int,
@@ -217,9 +223,13 @@ def _accumulate_step_metrics(
     halted_done: int,
     refills: int,
     n_steps: int,
-) -> tuple[float, int, int, int, int, int, int, float, int, int, int]:
+) -> tuple[float, float, float, int, int, int, int, int, int, int, float, int, int, int]:
     b = state.digit_id.size(0)
     total_loss += result.loss.item()
+    if result.cell_loss is not None:
+        total_cell_loss += result.cell_loss.item()
+    if result.halt_loss is not None:
+        total_halt_loss += result.halt_loss.item()
     n_steps += 1
     refills += int(result.done.sum().item())
 
@@ -245,6 +255,8 @@ def _accumulate_step_metrics(
 
     return (
         total_loss,
+        total_cell_loss,
+        total_halt_loss,
         halt_correct,
         halt_total,
         correct_cells,
@@ -261,6 +273,8 @@ def _accumulate_step_metrics(
 def _train_stats_from_accumulators(
     *,
     total_loss: float,
+    total_cell_loss: float,
+    total_halt_loss: float,
     n_steps: int,
     halt_correct: int,
     halt_total: int,
@@ -276,6 +290,8 @@ def _train_stats_from_accumulators(
         return TrainEpochStats(loss=0.0)
     return TrainEpochStats(
         loss=total_loss / n_steps,
+        cell_loss=total_cell_loss / n_steps,
+        halt_loss=total_halt_loss / n_steps,
         cell_acc=correct_cells / total_cells if total_cells else 0.0,
         puzzle_acc=correct_puzzles_done / puzzles_done if puzzles_done else 0.0,
         halt_acc=halt_correct / halt_total if halt_total else 0.0,
@@ -292,6 +308,8 @@ def _accumulate_eval_stats(
     clues: torch.Tensor,
     *,
     total_loss: float,
+    total_cell_loss: float,
+    total_halt_loss: float,
     halt_correct: int,
     halt_total: int,
     correct_cells: int,
@@ -300,9 +318,11 @@ def _accumulate_eval_stats(
     outer_iters_sum: float,
     halted_count: int,
     n: int,
-) -> tuple[float, int, int, int, int, int, float, int, int]:
+) -> tuple[float, float, float, int, int, int, int, int, int, float, int, int]:
     batch_size = answer.size(0) if answer.dim() == 3 else 1
     total_loss += result.loss.item() * batch_size
+    total_cell_loss += result.cell_loss.item() * batch_size
+    total_halt_loss += result.halt_loss.item() * batch_size
     n += batch_size
 
     preds = result.pred.unsqueeze(0) if result.pred.dim() == 2 else result.pred
@@ -323,6 +343,8 @@ def _accumulate_eval_stats(
 
     return (
         total_loss,
+        total_cell_loss,
+        total_halt_loss,
         halt_correct,
         halt_total,
         correct_cells,
@@ -337,6 +359,8 @@ def _accumulate_eval_stats(
 def _stats_from_accumulators(
     *,
     total_loss: float,
+    total_cell_loss: float,
+    total_halt_loss: float,
     halt_correct: int,
     halt_total: int,
     correct_cells: int,
@@ -350,6 +374,8 @@ def _stats_from_accumulators(
         return EpochStats(loss=0.0)
     return EpochStats(
         loss=total_loss / n,
+        cell_loss=total_cell_loss / n,
+        halt_loss=total_halt_loss / n,
         cell_acc=correct_cells / total_cells if total_cells else 0.0,
         puzzle_acc=correct_puzzles / n,
         halt_acc=halt_correct / halt_total if halt_total else 0.0,
@@ -373,6 +399,8 @@ def train_epoch(
 ) -> TrainEpochStats:
     model.train()
     total_loss = 0.0
+    total_cell_loss = 0.0
+    total_halt_loss = 0.0
     halt_correct = 0
     halt_total = 0
     correct_cells = 0
@@ -401,6 +429,8 @@ def train_epoch(
         optimizer.step()
         (
             total_loss,
+            total_cell_loss,
+            total_halt_loss,
             halt_correct,
             halt_total,
             correct_cells,
@@ -415,6 +445,8 @@ def train_epoch(
             result,
             state,
             total_loss=total_loss,
+            total_cell_loss=total_cell_loss,
+            total_halt_loss=total_halt_loss,
             halt_correct=halt_correct,
             halt_total=halt_total,
             correct_cells=correct_cells,
@@ -428,7 +460,11 @@ def train_epoch(
         )
         assert result.done is not None
         refill_done_slots(state, result.done, cache, generator=refill_generator)
-        postfix = {"loss": f"{total_loss / n_steps:.4f}"}
+        postfix = {
+            "loss": f"{total_loss / n_steps:.4f}",
+            "cell_loss": f"{total_cell_loss / n_steps:.4f}",
+            "halt_loss": f"{total_halt_loss / n_steps:.4f}",
+        }
         if halt_total:
             postfix["halt_acc"] = f"{halt_correct / halt_total:.4f}"
         if total_cells:
@@ -437,6 +473,8 @@ def train_epoch(
     progress.close()
     return _train_stats_from_accumulators(
         total_loss=total_loss,
+        total_cell_loss=total_cell_loss,
+        total_halt_loss=total_halt_loss,
         n_steps=n_steps,
         halt_correct=halt_correct,
         halt_total=halt_total,
@@ -474,6 +512,8 @@ def measure_split(
         _seed_all(seed)
     model.eval()
     total_loss = 0.0
+    total_cell_loss = 0.0
+    total_halt_loss = 0.0
     halt_correct = 0
     halt_total = 0
     correct_cells = 0
@@ -499,6 +539,8 @@ def measure_split(
         )
         (
             total_loss,
+            total_cell_loss,
+            total_halt_loss,
             halt_correct,
             halt_total,
             correct_cells,
@@ -512,6 +554,8 @@ def measure_split(
             batch["answer"],
             batch["clues"],
             total_loss=total_loss,
+            total_cell_loss=total_cell_loss,
+            total_halt_loss=total_halt_loss,
             halt_correct=halt_correct,
             halt_total=halt_total,
             correct_cells=correct_cells,
@@ -523,12 +567,16 @@ def measure_split(
         )
         progress.set_postfix(
             loss=f"{total_loss / n:.4f}",
+            cell_loss=f"{total_cell_loss / n:.4f}",
+            halt_loss=f"{total_halt_loss / n:.4f}",
             cell_acc=f"{correct_cells / total_cells:.4f}",
             refresh=False,
         )
     progress.close()
     return _stats_from_accumulators(
         total_loss=total_loss,
+        total_cell_loss=total_cell_loss,
+        total_halt_loss=total_halt_loss,
         halt_correct=halt_correct,
         halt_total=halt_total,
         correct_cells=correct_cells,
@@ -575,7 +623,7 @@ def main() -> None:
     parser.add_argument(
         "--halt-loss-weight",
         type=float,
-        default=1.0,
+        default=0.1,
         help="Weight for halt BCE loss",
     )
     parser.add_argument(
@@ -767,15 +815,16 @@ def main() -> None:
             args=args,
         )
         train_msg = (
-            f"train_loss={train.loss:.4f} train_halt_acc={train.halt_acc:.4f} "
+            f"train_loss={train.loss:.4f} train_cell_loss={train.cell_loss:.4f} "
+            f"train_halt_loss={train.halt_loss:.4f} train_halt_acc={train.halt_acc:.4f} "
             f"train_cell_acc={train.cell_acc:.4f} train_puzzle_acc={train.puzzle_acc:.4f} "
             f"train_halt_rate={train.halt_rate:.4f} train_refills={train.refills_per_step:.2f}"
         )
         print(
             f"epoch {epoch}/{args.epochs}: "
-            f"{train_msg} val_loss={val.loss:.4f} "
-            f"val_cell_acc={val.cell_acc:.4f} val_puzzle_acc={val.puzzle_acc:.4f} "
-            f"val_halt_rate={val.halt_rate:.4f}",
+            f"{train_msg} val_loss={val.loss:.4f} val_cell_loss={val.cell_loss:.4f} "
+            f"val_halt_loss={val.halt_loss:.4f} val_cell_acc={val.cell_acc:.4f} "
+            f"val_puzzle_acc={val.puzzle_acc:.4f} val_halt_rate={val.halt_rate:.4f}",
             flush=True,
         )
 
