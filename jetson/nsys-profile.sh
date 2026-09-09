@@ -10,23 +10,91 @@ mkdir -p "$OUTPUT_DIR"
 timestamp="$(date +%Y%m%d-%H%M%S)"
 output="/workspace/runs/nsys/${timestamp}"
 
-find_nsys_tegra() {
+find_nsys_bin() {
   if [[ -n "${NSYS:-}" ]]; then
-    echo "$NSYS"
-    return
+    if [[ -x "$NSYS" ]]; then
+      echo "$NSYS"
+      return 0
+    fi
+    echo "NSYS is set but not executable: $NSYS" >&2
+    return 1
   fi
-  find /opt/nvidia/nsight-systems -path '*/target-linux-tegra-armv8/nsys' -type f 2>/dev/null | head -1
+
+  local -a candidates=()
+  local path
+
+  shopt -s nullglob
+  for path in \
+    /usr/local/cuda/bin/nsys \
+    /opt/nvidia/nsight-systems/*/target-linux-tegra-armv8/nsys \
+    /opt/nvidia/nsight-systems-cli/*/target-linux-tegra-armv8/nsys \
+    /opt/nvidia/nsight-systems-cli/*/bin/nsys; do
+    [[ -x "$path" ]] && candidates+=("$path")
+  done
+  shopt -u nullglob
+
+  if ((${#candidates[@]})); then
+    printf '%s\n' "${candidates[0]}"
+    return 0
+  fi
+
+  if command -v nsys >/dev/null 2>&1; then
+    path="$(readlink -f "$(command -v nsys)" 2>/dev/null || command -v nsys)"
+    if [[ -x "$path" ]]; then
+      echo "$path"
+      return 0
+    fi
+  fi
+
+  return 1
 }
 
-nsys_bin="$(find_nsys_tegra || true)"
+nsys_mount_for() {
+  local bin="$1"
+  if [[ "$bin" == /usr/local/cuda/* ]]; then
+    echo /usr/local/cuda
+  elif [[ "$bin" == /opt/nvidia/nsight-systems/* ]]; then
+    echo /opt/nvidia/nsight-systems
+  elif [[ "$bin" == /opt/nvidia/nsight-systems-cli/* ]]; then
+    local rest="${bin#/opt/nvidia/nsight-systems-cli/}"
+    echo "/opt/nvidia/nsight-systems-cli/${rest%%/*}"
+  elif [[ "$bin" == */bin/nsys ]]; then
+    dirname "$(dirname "$bin")"
+  else
+    dirname "$bin"
+  fi
+}
+
+print_install_hint() {
+  cat >&2 <<'EOF'
+Install Nsight Systems on the Jetson host, then re-run:
+
+  sudo apt update
+  apt search nsight-systems          # pick the version matching your JetPack
+  sudo apt install nsight-systems-2026.3   # example for JP 7.x
+
+Verify:
+
+  dpkg -L nsight-systems-* | grep '/nsys$'
+  # or: ls /opt/nvidia/nsight-systems-cli/*/bin/nsys
+
+Override manually:
+
+  NSYS=/path/to/nsys ./nsys-profile.sh
+EOF
+}
+
+nsys_bin="$(find_nsys_bin || true)"
 if [[ -z "$nsys_bin" ]]; then
-  echo "tegra nsys not found under /opt/nvidia/nsight-systems (install Nsight Systems from JetPack)." >&2
-  echo "Or set NSYS=/opt/nvidia/nsight-systems/<ver>/target-linux-tegra-armv8/nsys" >&2
+  echo "nsys not found on this Jetson." >&2
+  print_install_hint
   exit 1
 fi
 
-if [[ ! -d /opt/nvidia/nsight-systems ]]; then
-  echo "/opt/nvidia/nsight-systems missing on host; cannot mount into container." >&2
+nsys_mount="$(nsys_mount_for "$nsys_bin")"
+if [[ ! -d "$nsys_mount" ]]; then
+  echo "nsys mount dir missing: $nsys_mount" >&2
+  print_install_hint
   exit 1
 fi
 
@@ -48,12 +116,13 @@ if [[ $# -eq 0 ]]; then
 fi
 
 host_report="${OUTPUT_DIR}/${timestamp}.nsys-rep"
-echo "nsys (tegra): $nsys_bin"
+echo "nsys: $nsys_bin"
+echo "mount: $nsys_mount"
 echo "report: $host_report"
 echo "train args: $*"
 
 exec docker compose run --rm --privileged \
-  -v /opt/nvidia/nsight-systems:/opt/nvidia/nsight-systems:ro \
+  -v "${nsys_mount}:${nsys_mount}:ro" \
   --entrypoint "$nsys_bin" \
   train \
   profile \
