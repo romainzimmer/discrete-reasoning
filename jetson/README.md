@@ -125,7 +125,7 @@ Custom train args (no `--profile-steps`; PyTorch profiler stays off by default):
 ./nsys-profile.sh --epochs 1 --batches-per-epoch 20 --dim 512 --num-blocks 2 --inner-iters 3 --train-batch-size 64 --max-samples 100 --min-rating 0 --max-rating 0 --val-samples 10 --viz-samples 0
 ```
 
-If auto-detect fails: `NSYS=<path to nsys> ./nsys-profile.sh`. Uses `--privileged`; try `sudo ./nsys-profile.sh` on permission errors.
+If auto-detect fails: `NSYS=/usr/local/cuda/bin/nsys ./nsys-profile.sh`. Uses the `train-profile` compose service (`privileged: true` in `docker-compose.yml`); try `sudo ./nsys-profile.sh` on permission errors.
 
 In the report you should see a **`python` / `train` process**, **CUDA** rows, and NVTX ranges (`rollout_train_step`, `metrics_and_refill`). If you only see `docker` and no GPU data, the capture failed — check warnings in Nsight.
 

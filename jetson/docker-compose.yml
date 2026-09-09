@@ -24,6 +24,12 @@ services:
     runtime: nvidia
     entrypoint: ["train"]
 
+  train-profile:
+    <<: *app-base
+    runtime: nvidia
+    privileged: true
+    entrypoint: ["train"]
+
   eval:
     <<: *app-base
     runtime: nvidia

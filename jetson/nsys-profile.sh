@@ -121,10 +121,10 @@ echo "mount: $nsys_mount"
 echo "report: $host_report"
 echo "train args: $*"
 
-exec docker compose run --rm --privileged \
+exec docker compose run --rm \
   -v "${nsys_mount}:${nsys_mount}:ro" \
   --entrypoint "$nsys_bin" \
-  train \
+  train-profile \
   profile \
   --trace=cuda,nvtx,osrt \
   --sample=none \
