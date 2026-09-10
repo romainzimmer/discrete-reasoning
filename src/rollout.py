@@ -28,6 +28,9 @@ class RolloutConfig:
     ema_alpha: float = DEFAULT_EMA_ALPHA
     curriculum_training: bool = True
     pin_gt: bool = True
+    deep_supervision: bool = False
+    adaptive_curriculum: bool = False
+    curriculum_puzzle_acc: float = 0.0
 
     def __post_init__(self) -> None:
         if self.inner_iters < 1:
@@ -86,6 +89,8 @@ class BatchSlotState:
         ema_alpha: float,
         curriculum_training: bool = True,
         pin_gt: bool = True,
+        adaptive_curriculum: bool = False,
+        curriculum_puzzle_acc: float = 0.0,
     ) -> BatchSlotState:
         validate_ema_alpha(ema_alpha)
         idx = torch.randint(len(dataset), (batch_size,), generator=generator)
@@ -94,7 +99,13 @@ class BatchSlotState:
         answers = answers.to(device, non_blocking=True)
         clue_pin = clues > 0
         if curriculum_training:
-            digit_id, gt_pin = _curriculum_init_digit_id(clues, answers, clue_pin)
+            digit_id, gt_pin = _curriculum_init_digit_id(
+                clues,
+                answers,
+                clue_pin,
+                puzzle_acc=curriculum_puzzle_acc,
+                adaptive=adaptive_curriculum,
+            )
         else:
             digit_id = clues.clone()
             gt_pin = torch.zeros_like(clue_pin)
@@ -212,6 +223,29 @@ def _compute_losses(
     return cell_loss, halt_loss, total_loss
 
 
+def _compute_deep_supervision_losses(
+    step_outputs: list[tuple[torch.Tensor, torch.Tensor]],
+    *,
+    clues: torch.Tensor,
+    clue_pin: torch.Tensor,
+    answer: torch.Tensor,
+    halt_loss_weight: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    cell_losses: list[torch.Tensor] = []
+    halt_losses: list[torch.Tensor] = []
+    for logits, halt_logit in step_outputs:
+        logits = to_loss_dtype(logits)
+        halt_logit = to_loss_dtype(halt_logit)
+        cell_losses.append(_compute_cell_loss(logits, clue_pin=clue_pin, answer=answer))
+        pred = predict_grid(logits, clues)
+        halt_target = to_loss_dtype(_halt_target(pred, answer))
+        halt_losses.append(_compute_halt_loss(halt_logit, halt_target))
+    cell_loss = torch.stack(cell_losses).mean()
+    halt_loss = torch.stack(halt_losses).mean()
+    total_loss = cell_loss + halt_loss_weight * halt_loss
+    return cell_loss, halt_loss, total_loss
+
+
 def _noise_committed_digits(
     committed: torch.Tensor,
     ctx: _PinContext,
@@ -281,6 +315,9 @@ def _curriculum_init_digit_id(
     clues: torch.Tensor,
     answer: torch.Tensor,
     clue_pin: torch.Tensor,
+    *,
+    puzzle_acc: float = 0.0,
+    adaptive: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Training-only puzzle entry: partial GT reveal; unrevealed non-clue cells stay empty."""
     digit_id = clues.clone()
@@ -288,6 +325,9 @@ def _curriculum_init_digit_id(
     b, device = clues.size(0), clues.device
 
     p_gt = torch.rand(b, device=device)
+    if adaptive:
+        upper = max(0.0, 1.0 - puzzle_acc)
+        p_gt = p_gt * upper
     reveal = non_clue & (torch.rand(clues.shape, device=device) < p_gt.view(b, 1, 1))
     digit_id = torch.where(reveal, answer, digit_id)
     return digit_id, reveal
@@ -303,12 +343,17 @@ def _inner_loop(
     ema_embed: torch.Tensor | None,
     ema_alpha: float,
     with_grad: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    collect_steps: bool = False,
+) -> (
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    | tuple[list[tuple[torch.Tensor, torch.Tensor]], torch.Tensor]
+):
     input_embed = model.encode_input(digit_id, clue_pin)
     cell_embed: torch.Tensor | None = memory_embed
     logits: torch.Tensor | None = None
     halt_logit: torch.Tensor | None = None
     loop_ema = ema_embed
+    step_outputs: list[tuple[torch.Tensor, torch.Tensor]] | None = [] if collect_steps else None
     for _ in range(inner_iters):
         if with_grad:
             out = model(
@@ -328,9 +373,13 @@ def _inner_loop(
         logits = out.logits
         halt_logit = out.halt_logit
         cell_embed = out.cell_embed
+        if step_outputs is not None:
+            step_outputs.append((logits, halt_logit))
     assert logits is not None
     assert halt_logit is not None
     assert cell_embed is not None
+    if step_outputs is not None:
+        return step_outputs, cell_embed
     return logits, halt_logit, cell_embed
 
 
@@ -352,27 +401,51 @@ def rollout_train_step(
         transition_prob=config.transition_prob,
         transition_noise_prob=config.transition_noise_prob,
     )
-    logits, halt_logit, final_cell_embed = _inner_loop(
-        model,
-        state.digit_id,
-        state.clue_pin,
-        config.inner_iters,
-        memory_embed=state.memory_embed,
-        ema_embed=state.ema_embed,
-        ema_alpha=config.ema_alpha,
-        with_grad=True,
-    )
-    pred = predict_grid(logits, state.clues)
-    halt_target = _halt_target(pred, state.answer)
+    if config.deep_supervision:
+        step_outputs, final_cell_embed = _inner_loop(
+            model,
+            state.digit_id,
+            state.clue_pin,
+            config.inner_iters,
+            memory_embed=state.memory_embed,
+            ema_embed=state.ema_embed,
+            ema_alpha=config.ema_alpha,
+            with_grad=True,
+            collect_steps=True,
+        )
+        logits, halt_logit = step_outputs[-1]
+        cell_loss, halt_loss, loss = _compute_deep_supervision_losses(
+            step_outputs,
+            clues=state.clues,
+            clue_pin=state.clue_pin,
+            answer=state.answer,
+            halt_loss_weight=halt_loss_weight,
+        )
+    else:
+        logits, halt_logit, final_cell_embed = _inner_loop(
+            model,
+            state.digit_id,
+            state.clue_pin,
+            config.inner_iters,
+            memory_embed=state.memory_embed,
+            ema_embed=state.ema_embed,
+            ema_alpha=config.ema_alpha,
+            with_grad=True,
+        )
+        pred = predict_grid(logits, state.clues)
+        halt_target = _halt_target(pred, state.answer)
+        cell_loss, halt_loss, loss = _compute_losses(
+            logits,
+            halt_logit,
+            clue_pin=state.clue_pin,
+            answer=state.answer,
+            halt_target=halt_target,
+            halt_loss_weight=halt_loss_weight,
+        )
+    if config.deep_supervision:
+        pred = predict_grid(logits, state.clues)
+        halt_target = _halt_target(pred, state.answer)
     predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
-    cell_loss, halt_loss, loss = _compute_losses(
-        logits,
-        halt_logit,
-        clue_pin=state.clue_pin,
-        answer=state.answer,
-        halt_target=halt_target,
-        halt_loss_weight=halt_loss_weight,
-    )
     if backward:
         loss.backward()
     state.pending_candidate = pred.detach()
@@ -404,6 +477,8 @@ def refill_done_slots(
     ema_alpha: float,
     curriculum_training: bool = True,
     pin_gt: bool = True,
+    adaptive_curriculum: bool = False,
+    curriculum_puzzle_acc: float = 0.0,
 ) -> None:
     b = done.size(0)
     device = state.digit_id.device
@@ -415,7 +490,11 @@ def refill_done_slots(
     new_clue_pin = new_clues > 0
     if curriculum_training:
         new_digit_id, new_gt_pin = _curriculum_init_digit_id(
-            new_clues, new_answers, new_clue_pin
+            new_clues,
+            new_answers,
+            new_clue_pin,
+            puzzle_acc=curriculum_puzzle_acc,
+            adaptive=adaptive_curriculum,
         )
     else:
         new_digit_id = new_clues

@@ -4,7 +4,7 @@ import argparse
 import json
 import random
 import secrets
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -67,6 +67,8 @@ def build_rollout_config(
     ema_alpha: float = DEFAULT_EMA_ALPHA,
     curriculum_training: bool = True,
     pin_gt: bool = True,
+    deep_supervision: bool = False,
+    adaptive_curriculum: bool = False,
 ) -> RolloutConfig:
     return RolloutConfig(
         inner_iters=inner_iters,
@@ -77,6 +79,8 @@ def build_rollout_config(
         ema_alpha=ema_alpha,
         curriculum_training=curriculum_training,
         pin_gt=pin_gt,
+        deep_supervision=deep_supervision,
+        adaptive_curriculum=adaptive_curriculum,
     )
 
 
@@ -440,6 +444,8 @@ def train_epoch(
                 ema_alpha=rollout_config.ema_alpha,
                 curriculum_training=rollout_config.curriculum_training,
                 pin_gt=rollout_config.pin_gt,
+                adaptive_curriculum=rollout_config.adaptive_curriculum,
+                curriculum_puzzle_acc=rollout_config.curriculum_puzzle_acc,
             )
         if profiler is not None:
             profiler.step()
@@ -595,6 +601,16 @@ def main() -> None:
         action="store_true",
         help="Disable GT pinning during rollout (curriculum init still reveals GT; commits use model digits)",
     )
+    parser.add_argument(
+        "--deep-supervision",
+        action="store_true",
+        help="Average cell and halt loss over all inner loop steps (default: final step only)",
+    )
+    parser.add_argument(
+        "--adaptive-curriculum",
+        action="store_true",
+        help="Sample curriculum p_gt in U[0, 1 - train puzzle acc] using previous epoch acc",
+    )
     parser.add_argument("--no-augment", action="store_true", help="Disable training data augmentations")
     parser.add_argument("--aug-digit-proba", type=float, default=0.5)
     parser.add_argument("--aug-rot-proba", type=float, default=0.5)
@@ -688,6 +704,8 @@ def main() -> None:
         ema_alpha=args.ema_alpha,
         curriculum_training=curriculum_training,
         pin_gt=pin_gt,
+        deep_supervision=args.deep_supervision,
+        adaptive_curriculum=args.adaptive_curriculum,
     )
     eval_rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
@@ -735,6 +753,8 @@ def main() -> None:
                 ema_alpha=rollout_config.ema_alpha,
                 curriculum_training=rollout_config.curriculum_training,
                 pin_gt=rollout_config.pin_gt,
+                adaptive_curriculum=rollout_config.adaptive_curriculum,
+                curriculum_puzzle_acc=rollout_config.curriculum_puzzle_acc,
             )
 
         profiler = None
@@ -755,6 +775,7 @@ def main() -> None:
             profiler=profiler,
             amp=amp,
         )
+        rollout_config = replace(rollout_config, curriculum_puzzle_acc=train.puzzle_acc)
         val = measure_split(
             model,
             val_loader,

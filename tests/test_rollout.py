@@ -17,6 +17,9 @@ from rollout import (
     RolloutConfig,
     _PinContext,
     _compute_cell_loss,
+    _compute_deep_supervision_losses,
+    _compute_halt_loss,
+    _compute_losses,
     _halt_target,
     _curriculum_init_digit_id,
     _inner_loop,
@@ -117,6 +120,9 @@ def test_defaults():
     assert config.max_outer_iters == DEFAULT_MAX_OUTER_ITERS
     assert config.ema_alpha == DEFAULT_EMA_ALPHA
     assert config.transition_noise_prob == DEFAULT_TRANSITION_NOISE_PROB
+    assert config.deep_supervision is False
+    assert config.adaptive_curriculum is False
+    assert config.curriculum_puzzle_acc == 0.0
 
 
 def test_one_outer_per_step():
@@ -1087,3 +1093,189 @@ def test_refill_zeros_ema_embed():
     state.ema_embed.fill_(1.0)
     refill_done_slots(state, torch.tensor([True]), dataset, generator=gen, dim=32, ema_alpha=0.05)
     assert state.ema_embed.sum().item() == 0.0
+
+
+def test_deep_supervision_affects_loss():
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    clues, answer = _tiny_batch()
+    state = _make_state(clues, answer)
+    config = _baseline_config(inner_iters=3, max_outer_iters=10, halt_threshold=1.1, deep_supervision=True)
+    with patch("rollout._compute_cell_loss", wraps=_compute_cell_loss) as mock_cell:
+        with patch("rollout._compute_halt_loss", wraps=_compute_halt_loss) as mock_halt:
+            rollout_train_step(model, state, config, backward=False)
+    assert mock_cell.call_count == 3
+    assert mock_halt.call_count == 3
+
+
+def test_deep_supervision_off_calls_loss_once():
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    clues, answer = _tiny_batch()
+    state = _make_state(clues, answer)
+    config = _baseline_config(inner_iters=3, max_outer_iters=10, halt_threshold=1.1)
+    with patch("rollout._compute_cell_loss", wraps=_compute_cell_loss) as mock_cell:
+        with patch("rollout._compute_halt_loss", wraps=_compute_halt_loss) as mock_halt:
+            rollout_train_step(model, state, config, backward=False)
+    assert mock_cell.call_count == 1
+    assert mock_halt.call_count == 1
+
+
+def test_deep_supervision_grad_all_steps():
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    clues, answer = _tiny_batch()
+    state = _make_state(clues, answer)
+    config = _baseline_config(inner_iters=3, max_outer_iters=10, halt_threshold=1.1, deep_supervision=True)
+    result = rollout_train_step(model, state, config)
+    assert result.loss.item() > 0
+    assert _first_param(model).grad is not None
+    assert _first_param(model).grad.abs().sum().item() > 0
+
+
+def test_deep_supervision_losses_synthetic():
+    clues, answer = _tiny_batch()
+    clue_pin = clues > 0
+    b = clues.size(0)
+    wrong_logits = torch.zeros(b, 9, 9, 10)
+    wrong_logits[..., 2] = 10.0
+    right_logits = torch.zeros(b, 9, 9, 10)
+    right_logits[..., 1] = 10.0
+    answer = predict_grid(right_logits, clues)
+    halt_logit = torch.full((b,), 2.0)
+    step_outputs = [(wrong_logits, halt_logit), (right_logits, halt_logit)]
+    _, deep_halt, _ = _compute_deep_supervision_losses(
+        step_outputs,
+        clues=clues,
+        clue_pin=clue_pin,
+        answer=answer,
+        halt_loss_weight=1.0,
+    )
+    final_pred = predict_grid(right_logits, clues)
+    final_halt_target = _halt_target(final_pred, answer)
+    _, final_halt, _ = _compute_losses(
+        right_logits,
+        halt_logit,
+        clue_pin=clue_pin,
+        answer=answer,
+        halt_target=final_halt_target,
+        halt_loss_weight=1.0,
+    )
+    assert deep_halt.item() > final_halt.item()
+
+
+def test_deep_supervision_regression_single_step():
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    clues, answer = _tiny_batch()
+    state_off = _make_state(clues, answer)
+    state_on = _make_state(clues, answer)
+    config_off = _baseline_config(inner_iters=1, max_outer_iters=10, halt_threshold=1.1)
+    config_on = _baseline_config(
+        inner_iters=1, max_outer_iters=10, halt_threshold=1.1, deep_supervision=True
+    )
+    torch.manual_seed(0)
+    result_off = rollout_train_step(model, state_off, config_off, backward=False)
+    torch.manual_seed(0)
+    result_on = rollout_train_step(model, state_on, config_on, backward=False)
+    assert result_off.loss.item() == result_on.loss.item()
+
+
+def test_adaptive_curriculum_p_gt_upper_bound():
+    clues, answer = _tiny_batch()
+    clue_pin = clues > 0
+    call_count = 0
+
+    def rand_side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if len(args) == 1 and isinstance(args[0], int):
+            return torch.ones(args[0])
+        shape = args[0] if len(args) == 1 else args
+        return torch.full(shape, 0.5)
+
+    with patch("rollout.torch.rand", side_effect=rand_side_effect):
+        _, gt_pin_adaptive = _curriculum_init_digit_id(
+            clues, answer, clue_pin, puzzle_acc=0.6, adaptive=True
+        )
+        call_count = 0
+        _, gt_pin_fixed = _curriculum_init_digit_id(
+            clues, answer, clue_pin, puzzle_acc=0.6, adaptive=False
+        )
+    assert not gt_pin_adaptive.any()
+    assert gt_pin_fixed.any()
+
+
+def test_adaptive_curriculum_zero_acc_matches_uniform():
+    clues, answer = _tiny_batch()
+    clue_pin = clues > 0
+    torch.manual_seed(42)
+    digit_fixed, gt_fixed = _curriculum_init_digit_id(clues, answer, clue_pin, adaptive=False)
+    torch.manual_seed(42)
+    digit_adaptive, gt_adaptive = _curriculum_init_digit_id(
+        clues, answer, clue_pin, puzzle_acc=0.0, adaptive=True
+    )
+    assert torch.equal(digit_fixed, digit_adaptive)
+    assert torch.equal(gt_fixed, gt_adaptive)
+
+
+def test_adaptive_curriculum_full_acc_no_reveal():
+    clues, answer = _tiny_batch()
+    clue_pin = clues > 0
+    digit_id, gt_pin = _curriculum_init_digit_id(
+        clues, answer, clue_pin, puzzle_acc=1.0, adaptive=True
+    )
+    assert torch.equal(digit_id, clues)
+    assert not gt_pin.any()
+
+
+def test_adaptive_curriculum_config_update():
+    from dataclasses import replace
+
+    clues, answer = _tiny_batch()
+    clue_pin = clues > 0
+    config = replace(RolloutConfig(), curriculum_puzzle_acc=0.8, adaptive_curriculum=True)
+
+    def rand_reveal(*args, **kwargs):
+        if len(args) == 1 and isinstance(args[0], int):
+            return torch.ones(args[0])
+        shape = args[0] if len(args) == 1 else args
+        return torch.full(shape, 0.15)
+
+    def rand_no_reveal(*args, **kwargs):
+        if len(args) == 1 and isinstance(args[0], int):
+            return torch.ones(args[0])
+        shape = args[0] if len(args) == 1 else args
+        return torch.full(shape, 0.25)
+
+    with patch("rollout.torch.rand", side_effect=rand_reveal):
+        _, gt_pin = _curriculum_init_digit_id(
+            clues,
+            answer,
+            clue_pin,
+            puzzle_acc=config.curriculum_puzzle_acc,
+            adaptive=config.adaptive_curriculum,
+        )
+    with patch("rollout.torch.rand", side_effect=rand_no_reveal):
+        _, gt_pin_tight = _curriculum_init_digit_id(
+            clues,
+            answer,
+            clue_pin,
+            puzzle_acc=config.curriculum_puzzle_acc,
+            adaptive=config.adaptive_curriculum,
+        )
+    assert gt_pin.any()
+    assert not gt_pin_tight.any()
+
+
+def test_build_rollout_config_new_flags():
+    from train import build_rollout_config
+
+    config = build_rollout_config(
+        inner_iters=2,
+        max_outer_iters=3,
+        deep_supervision=True,
+        adaptive_curriculum=True,
+    )
+    assert config.deep_supervision is True
+    assert config.adaptive_curriculum is True
