@@ -17,7 +17,6 @@ from augment import AugmentConfig
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from encoding import cell_acc_mask
 from model import MixerNextStateModel
-from ema import DEFAULT_EMA_ALPHA, validate_ema_alpha
 from rollout import (
     DEFAULT_INNER_ITERS,
     DEFAULT_MAX_OUTER_ITERS,
@@ -42,6 +41,25 @@ DEFAULT_RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
 ADAPTIVE_CURRICULUM_ACC_EMA_ALPHA = 0.5
 
 
+def optimizer_param_groups(
+    model: MixerNextStateModel,
+    *,
+    weight_decay: float,
+) -> list[dict[str, object]]:
+    decay_params, no_decay_params = [], []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if name.endswith(".bias") or name == "ema_alpha_logit":
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+    return [
+        {"params": decay_params, "weight_decay": weight_decay},
+        {"params": no_decay_params, "weight_decay": 0.0},
+    ]
+
+
 def update_curriculum_puzzle_acc(prev: float, epoch_puzzle_acc: float) -> float:
     """EMA of done-only train puzzle acc for adaptive curriculum p_gt upper bound."""
     a = ADAPTIVE_CURRICULUM_ACC_EMA_ALPHA
@@ -60,7 +78,6 @@ REQUIRED_RUN_ARGS = (
     "num_workers",
     "min_rating",
     "max_rating",
-    "ema_alpha",
 )
 
 
@@ -71,7 +88,6 @@ def build_rollout_config(
     halt_threshold: float = 0.5,
     transition_prob: float = DEFAULT_TRANSITION_PROB,
     transition_noise_prob: float = DEFAULT_TRANSITION_NOISE_PROB,
-    ema_alpha: float = DEFAULT_EMA_ALPHA,
     curriculum_training: bool = True,
     pin_gt: bool = True,
     deep_supervision: bool = True,
@@ -83,7 +99,6 @@ def build_rollout_config(
         halt_threshold=halt_threshold,
         transition_prob=transition_prob,
         transition_noise_prob=transition_noise_prob,
-        ema_alpha=ema_alpha,
         curriculum_training=curriculum_training,
         pin_gt=pin_gt,
         deep_supervision=deep_supervision,
@@ -346,6 +361,7 @@ def save_epoch_metrics(
     train: TrainEpochStats,
     val: EpochStats,
     args: argparse.Namespace,
+    ema_alpha: float,
 ) -> None:
     history_path = run_dir / "history.json"
     if history_path.exists():
@@ -358,6 +374,7 @@ def save_epoch_metrics(
     history["epochs"].append(
         {
             "epoch": epoch,
+            "ema_alpha": ema_alpha,
             **{f"train_{k}": v for k, v in asdict(train).items()},
             **{f"val_{k}": v for k, v in asdict(val).items()},
         }
@@ -448,7 +465,6 @@ def train_epoch(
                 train_ds,
                 generator=refill_generator,
                 dim=model.dim,
-                ema_alpha=rollout_config.ema_alpha,
                 curriculum_training=rollout_config.curriculum_training,
                 pin_gt=rollout_config.pin_gt,
                 adaptive_curriculum=rollout_config.adaptive_curriculum,
@@ -567,12 +583,6 @@ def main() -> None:
         help="Per unpinned cell prob of randomizing committed digit after masked transition (0-9 incl. empty)",
     )
     parser.add_argument(
-        "--ema-alpha",
-        type=float,
-        default=DEFAULT_EMA_ALPHA,
-        help="Outer-loop cell_embed EMA blend in (0, 1]; 1 = no memory",
-    )
-    parser.add_argument(
         "--val-batch-size",
         type=int,
         default=None,
@@ -637,7 +647,6 @@ def main() -> None:
         help="Disable automatic mixed precision (bf16/fp16 on CUDA)",
     )
     args = parser.parse_args()
-    validate_ema_alpha(args.ema_alpha)
 
     if args.seed is not None:
         torch.manual_seed(args.seed)
@@ -686,19 +695,8 @@ def main() -> None:
     save_run_config(run_dir, args)
     amp = resolve_amp(device, enabled=args.amp)
     model = MixerNextStateModel(dim=args.dim, num_blocks=args.num_blocks).to(device)
-    decay_params, no_decay_params = [], []
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        if name.endswith(".bias"):
-            no_decay_params.append(param)
-        else:
-            decay_params.append(param)
     optimizer = torch.optim.AdamW(
-        [
-            {"params": decay_params, "weight_decay": args.weight_decay},
-            {"params": no_decay_params, "weight_decay": 0.0},
-        ],
+        optimizer_param_groups(model, weight_decay=args.weight_decay),
         lr=args.lr,
     )
     curriculum_training = not args.no_curriculum_training
@@ -710,7 +708,6 @@ def main() -> None:
         max_outer_iters=args.train_max_outer_iters,
         transition_prob=args.transition_prob,
         transition_noise_prob=args.transition_noise_prob,
-        ema_alpha=args.ema_alpha,
         curriculum_training=curriculum_training,
         pin_gt=pin_gt,
         deep_supervision=deep_supervision,
@@ -721,7 +718,6 @@ def main() -> None:
         max_outer_iters=args.eval_max_outer_iters,
         transition_prob=args.transition_prob,
         transition_noise_prob=args.transition_noise_prob,
-        ema_alpha=args.ema_alpha,
         curriculum_training=False,
     )
     refill_generator = torch.Generator(device="cpu").manual_seed(args.seed)
@@ -759,7 +755,6 @@ def main() -> None:
                 device,
                 generator=refill_generator,
                 dim=model.dim,
-                ema_alpha=rollout_config.ema_alpha,
                 curriculum_training=rollout_config.curriculum_training,
                 pin_gt=rollout_config.pin_gt,
                 adaptive_curriculum=rollout_config.adaptive_curriculum,
@@ -835,12 +830,14 @@ def main() -> None:
         if val.cell_acc > best_val_cell_acc:
             best_val_cell_acc = val.cell_acc
             save_checkpoint(run_dir / "best.pt", **ckpt_kwargs)
+        ema_alpha = float(model.ema_alpha().item())
         save_epoch_metrics(
             run_dir,
             epoch=epoch,
             train=train,
             val=val,
             args=args,
+            ema_alpha=ema_alpha,
         )
         train_msg = (
             f"train_loss={train.loss:.4f} train_cell_loss={train.cell_loss:.4f} "
@@ -853,7 +850,7 @@ def main() -> None:
             f"{train_msg} val_loss={val.loss:.4f} val_cell_loss={val.cell_loss:.4f} "
             f"val_halt_loss={val.halt_loss:.4f} val_halt_acc={val.halt_acc:.4f} "
             f"val_cell_acc={val.cell_acc:.4f} val_puzzle_acc={val.puzzle_acc:.4f} "
-            f"val_halt_rate={val.halt_rate:.4f}",
+            f"val_halt_rate={val.halt_rate:.4f} ema_alpha={ema_alpha:.4f}",
             flush=True,
         )
 

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import pytest
 import torch
 
-from ema import ema_combine, ema_update, memory_init, validate_ema_alpha, zero_ema
-from rollout import RolloutConfig
+from ema import ema_combine, ema_update, memory_init, zero_ema
 
 
 def test_ema_combine_alpha_point_three():
@@ -51,13 +49,3 @@ def test_ema_update_stores_float32_from_bf16():
     updated = ema_update(ema, value, 0.1)
     assert updated.dtype == torch.float32
 
-
-@pytest.mark.parametrize("alpha", [0.0, -0.1, 1.1])
-def test_validate_ema_alpha_rejects_invalid(alpha: float):
-    with pytest.raises(ValueError):
-        validate_ema_alpha(alpha)
-
-
-def test_rollout_config_rejects_invalid_ema_alpha():
-    with pytest.raises(ValueError):
-        RolloutConfig(ema_alpha=0.0)

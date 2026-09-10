@@ -25,7 +25,7 @@ def save_test_metrics(
     max_rating: int | None,
     inner_iters: int,
     max_outer_iters: int,
-    ema_alpha: float,
+    learned_ema_alpha: float,
     transition_prob: float,
     transition_noise_prob: float,
 ) -> None:
@@ -41,7 +41,7 @@ def save_test_metrics(
         "max_rating": max_rating,
         "inner_iters": inner_iters,
         "max_outer_iters": max_outer_iters,
-        "ema_alpha": ema_alpha,
+        "learned_ema_alpha": learned_ema_alpha,
         "transition_prob": transition_prob,
         "transition_noise_prob": transition_noise_prob,
         **asdict(test),
@@ -101,12 +101,6 @@ def main() -> None:
         default=None,
         help="Per unpinned committed-cell noise prob after transition (default: from checkpoint, else 0.05)",
     )
-    parser.add_argument(
-        "--ema-alpha",
-        type=float,
-        default=None,
-        help="Outer-loop cell_embed EMA blend (default: from checkpoint, else 1 for legacy runs)",
-    )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducible test metrics")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
@@ -160,17 +154,12 @@ def main() -> None:
         if args.transition_noise_prob is not None
         else float(run_args.get("transition_noise_prob", DEFAULT_TRANSITION_NOISE_PROB))
     )
-    ema_alpha = (
-        args.ema_alpha
-        if args.ema_alpha is not None
-        else float(run_args.get("ema_alpha", 1.0))
-    )
+    learned_ema_alpha = float(model.ema_alpha().item())
     rollout_config = build_rollout_config(
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
         transition_prob=transition_prob,
         transition_noise_prob=transition_noise_prob,
-        ema_alpha=ema_alpha,
     )
 
     amp_enabled = bool(run_args.get("amp", True))
@@ -199,13 +188,13 @@ def main() -> None:
         max_rating=args.max_rating,
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
-        ema_alpha=ema_alpha,
+        learned_ema_alpha=learned_ema_alpha,
         transition_prob=transition_prob,
         transition_noise_prob=transition_noise_prob,
     )
     print(
         f"test (epoch {epoch}, n={len(test_rows)}, inner={inner_iters}, max_outer={max_outer_iters}, "
-        f"ema={ema_alpha}, transition={transition_prob}, transition_noise={transition_noise_prob}): "
+        f"ema={learned_ema_alpha:.4f}, transition={transition_prob}, transition_noise={transition_noise_prob}): "
         f"loss={test.loss:.4f} cell_acc={test.cell_acc:.4f} "
         f"cell_loss={test.cell_loss:.4f} halt_loss={test.halt_loss:.4f} "
         f"puzzle_acc={test.puzzle_acc:.4f} halt_rate={test.halt_rate:.4f}",

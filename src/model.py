@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from ema import ema_combine, validate_ema_alpha
+from ema import ema_combine
 from encoding import GRID_SIZE, NUM_VOCAB, SEQ_LEN
 
 SWIGLU_EXPANSION = 4
@@ -100,7 +100,11 @@ class MixerNextStateModel(nn.Module):
         self.unembed = UnembedHead(dim)
         self.norm_halt = RMSNorm(dim)
         self.halt_head = nn.Linear(dim, 1, bias=True)
+        self.ema_alpha_logit = nn.Parameter(torch.tensor(0.0))
         self.dim = dim
+
+    def ema_alpha(self) -> torch.Tensor:
+        return torch.sigmoid(self.ema_alpha_logit)
 
     def encode_input(self, digit_id: torch.Tensor, clue_pin: torch.Tensor) -> torch.Tensor:
         return self.encoder.encode_input(digit_id, clue_pin)
@@ -111,18 +115,14 @@ class MixerNextStateModel(nn.Module):
         input_embed: torch.Tensor,
         cell_embed: torch.Tensor | None = None,
         ema_embed: torch.Tensor | None,
-        ema_alpha: float,
     ) -> ModelOutput:
         b = input_embed.size(0)
         h = cell_embed.reshape(b, SEQ_LEN, self.dim) if cell_embed is not None else 0
-        if ema_alpha >= 1.0:
+        if ema_embed is None:
             state = h
         else:
-            validate_ema_alpha(ema_alpha)
-            if ema_embed is None:
-                raise ValueError("ema_embed is required when ema_alpha < 1")
             ema = ema_embed.reshape(b, SEQ_LEN, self.dim)
-            state = ema_combine(h, ema, ema_alpha)
+            state = ema_combine(h, ema, self.ema_alpha())
         z = input_embed + state
         for block in self.blocks:
             z = block(z)

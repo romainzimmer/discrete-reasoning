@@ -4,19 +4,12 @@ import torch
 
 from amp import STORAGE_DTYPE, to_storage_dtype
 
-DEFAULT_EMA_ALPHA = 0.5
 
-
-def validate_ema_alpha(alpha: float) -> None:
-    if alpha <= 0.0 or alpha > 1.0:
-        raise ValueError("ema_alpha must be in (0, 1]")
-
-
-def uses_ema(alpha: float) -> bool:
-    return alpha < 1.0
-
-
-def ema_combine(h: torch.Tensor, ema: torch.Tensor, alpha: float) -> torch.Tensor:
+def ema_combine(
+    h: torch.Tensor,
+    ema: torch.Tensor,
+    alpha: float | torch.Tensor,
+) -> torch.Tensor:
     """Convex blend: α·h + (1−α)·ema."""
     return alpha * h + (1.0 - alpha) * ema
 

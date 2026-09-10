@@ -344,6 +344,14 @@
         <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
       </div>
     </div>
+    <div class="chart">
+      <div class="chart-title">Learned EMA α</div>
+      <canvas id="emaAlphaChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend" id="emaAlphaLegend">
+        <div class="legend-item"><span class="dot" style="background:#7c3aed"></span> learned</div>
+      </div>
+    </div>
     </div>
   </div>
 
@@ -466,7 +474,6 @@
       "train_max_outer_iters",
       "eval_max_outer_iters",
       "halt_loss_weight",
-      "ema_alpha",
       "transition_prob",
       "no_curriculum_training",
       "no_pin_gt",
@@ -738,6 +745,11 @@
       return [{ color: "#2563eb", values: epochs.map(e => e[trainKey] ?? null) }];
     }
 
+    function scalarSeries(epochs, metricKey, color = "#7c3aed") {
+      if (!epochs.some(e => e[metricKey] != null)) return [];
+      return [{ color, values: epochs.map(e => e[metricKey] ?? null) }];
+    }
+
     function renderTrainOnlyLegend(elementId, epochs, metricKey) {
       const el = document.getElementById(elementId);
       const trainKey = `train_${metricKey}`;
@@ -810,6 +822,12 @@
         formatY: v => Number(v).toFixed(0),
       });
       renderTrainOnlyLegend("completionsLegend", epochs, "completions_per_epoch");
+      drawSeries(document.getElementById("emaAlphaChart"), scalarSeries(epochs, "ema_alpha"), {
+        yMin: 0,
+        yMax: 1,
+        xLabels,
+        formatY: v => Number(v).toFixed(3),
+      });
       renderAccLegend("cellAccLegend", epochs, "cell_acc");
       renderAccLegend("puzzleAccLegend", epochs, "puzzle_acc");
     }
