@@ -48,34 +48,51 @@
       padding-top: 0.85rem;
       border-top: 1px solid #eee;
     }
+    .run-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 0.75rem;
+    }
     .run-heading {
       font-size: 0.95rem;
       font-weight: 600;
-      margin-bottom: 0.75rem;
     }
-    .run-stat-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
-      gap: 0.5rem;
+    .run-id {
+      font-size: 0.85rem;
+      color: #555;
+      text-align: right;
+      flex-shrink: 0;
     }
-    .run-stat {
+    .run-config-details summary {
+      cursor: pointer;
+      font-size: 0.85rem;
+      color: #555;
+      user-select: none;
+      list-style: none;
+    }
+    .run-config-details summary::-webkit-details-marker {
+      display: none;
+    }
+    .run-config-details summary::before {
+      content: "▸ ";
+    }
+    .run-config-details[open] summary::before {
+      content: "▾ ";
+    }
+    .run-config {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.8rem;
+      line-height: 1.55;
       background: #f9fafb;
       border: 1px solid #eee;
       border-radius: 6px;
-      padding: 0.55rem 0.7rem;
-    }
-    .run-stat-label {
-      display: block;
-      font-size: 0.68rem;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      color: #888;
-      margin-bottom: 0.2rem;
-    }
-    .run-stat-value {
-      font-size: 0.92rem;
-      font-weight: 500;
-      color: #111;
+      padding: 0.75rem 1rem;
+      margin: 0.5rem 0 0;
+      overflow-x: auto;
+      white-space: pre;
+      color: #333;
     }
     .section-title {
       font-size: 0.95rem;
@@ -119,16 +136,6 @@
       width: 0.65rem;
       height: 0.65rem;
       border-radius: 50%;
-    }
-    .test-note {
-      font-size: 0.85rem;
-      color: #555;
-      margin-bottom: 0.75rem;
-    }
-    .test-stat-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
-      gap: 0.5rem;
     }
     .trajectory-controls {
       display: grid;
@@ -332,12 +339,6 @@
     </div>
   </div>
 
-  <div class="panel" id="testPanel">
-    <div class="section-title">Test results</div>
-    <div class="test-note" id="testSectionNote"></div>
-    <div class="test-stat-grid" id="testSummary"></div>
-  </div>
-
   <div class="panel">
     <div class="section-title">Trajectory</div>
     <div class="trajectory-controls">
@@ -418,18 +419,6 @@
       return parts.join(" · ");
     }
 
-    function formatRatingRange(minRating, maxRating) {
-      if (minRating == null && maxRating == null) return "all";
-      const lo = minRating ?? "…";
-      const hi = maxRating ?? "…";
-      return `${lo} – ${hi}`;
-    }
-
-    function formatRating(args) {
-      if (args.min_rating == null && args.max_rating == null) return null;
-      return formatRatingRange(args.min_rating, args.max_rating);
-    }
-
     function formatDuration(seconds) {
       const s = Number(seconds);
       if (!Number.isFinite(s)) return "—";
@@ -452,61 +441,100 @@
       return (history?.epochs || []).reduce((sum, e) => sum + (e.epoch_seconds ?? 0), 0);
     }
 
-    function formatHiddenSizes(args) {
-      if (args.dim != null && args.num_blocks != null) {
-        return `${args.dim} x${args.num_blocks}`;
+    const CONFIG_PARAM_ORDER = [
+      "model",
+      "dim",
+      "num_blocks",
+      "lr",
+      "weight_decay",
+      "amp",
+      "device",
+      "inner_iters",
+      "train_max_outer_iters",
+      "eval_max_outer_iters",
+      "halt_loss_weight",
+      "ema_alpha",
+      "transition_prob",
+      "no_curriculum_training",
+      "no_pin_gt",
+      "epochs",
+      "train_batch_size",
+      "batches_per_epoch",
+      "val_batch_size",
+      "num_workers",
+      "seed",
+      "min_rating",
+      "max_rating",
+      "max_samples",
+      "val_samples",
+      "train_samples",
+      "val_samples_count",
+      "viz_samples",
+      "viz_batch_size",
+      "no_augment",
+      "aug_digit_proba",
+      "aug_rot_proba",
+      "aug_band_proba",
+    ];
+
+    const CONFIG_PARAM_HIDDEN = new Set(["runs_dir"]);
+
+    function isHiddenConfigKey(key) {
+      return CONFIG_PARAM_HIDDEN.has(key) || key.startsWith("profile_");
+    }
+
+    function formatConfigValue(key, value, args) {
+      if (value === null || value === undefined) {
+        if (key === "val_batch_size" || key === "viz_batch_size") {
+          return `null (= ${args.train_batch_size ?? "train batch size"})`;
+        }
+        if (key === "min_rating" || key === "max_rating" || key === "max_samples") {
+          return "null (no filter)";
+        }
+        return "null";
       }
-      return "—";
+      if (typeof value === "boolean") return value ? "true" : "false";
+      if (typeof value === "number") {
+        if (Number.isInteger(value)) return String(value);
+        if (Math.abs(value) >= 0.001 && Math.abs(value) < 1000) return String(value);
+        return value.toExponential(3);
+      }
+      return String(value);
     }
 
-    function buildRunStats(args, history) {
-      const trainN = args.train_samples ?? args.max_samples;
-      const valN = args.val_samples_count ?? args.val_samples;
-      const testN = args.test_samples_count ?? args.test_samples ?? args.max_samples;
-      const stats = [
-        { label: "Model", value: args.model ?? "—" },
-        { label: "Learning rate", value: args.lr },
-        { label: "Weight decay", value: args.weight_decay ?? 0 },
-        { label: "Mixer (D × blocks)", value: formatHiddenSizes(args) },
-        { label: "Inner iters", value: args.inner_iters ?? "?" },
-        {
-          label: "Train max outer iters",
-          value: args.train_max_outer_iters ?? "?",
-        },
-        {
-          label: "Eval max outer iters",
-          value: args.eval_max_outer_iters ?? "?",
-        },
-        { label: "Batch size / steps per epoch", value: `${args.train_batch_size ?? "?"} / ${args.batches_per_epoch ?? "?"}` },
-        { label: "Halt loss weight", value: args.halt_loss_weight ?? "—" },
-        {
-          label: "Rollout mask prob",
-          value: args.rollout_mask_prob ?? 0,
-        },
-        {
-          label: "Rollout noise prob",
-          value: args.rollout_noise_prob ?? 0,
-        },
-        { label: "Epochs", value: args.epochs },
-      ];
+    function yamlScalar(key, value, args) {
+      const raw = args[key];
+      if (raw === null || raw === undefined) return "null";
+      if (typeof raw === "boolean") return raw ? "true" : "false";
+      if (typeof raw === "number") return formatConfigValue(key, raw, args);
+      const text = String(raw);
+      if (/[:#\[\]{}]|^\s|\s$/.test(text)) return JSON.stringify(text);
+      return text;
+    }
+
+    function escapeHtml(text) {
+      return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+
+    function orderedConfigKeys(args) {
+      const keys = Object.keys(args || {}).filter(key => !isHiddenConfigKey(key));
+      const ordered = CONFIG_PARAM_ORDER.filter(key => keys.includes(key));
+      const extras = keys.filter(key => !CONFIG_PARAM_ORDER.includes(key)).sort();
+      return [...ordered, ...extras];
+    }
+
+    function renderConfigYaml(args, history) {
+      const lines = orderedConfigKeys(args).map(
+        key => `${key}: ${yamlScalar(key, args[key], args)}`
+      );
       const totalSeconds = totalRunSeconds(history);
-      if (totalSeconds > 0) stats.push({ label: "Total time", value: formatDuration(totalSeconds) });
-      const rating = formatRating(args);
-      if (rating) stats.push({ label: "Rating", value: rating });
-      if (trainN != null) stats.push({ label: "Train", value: trainN });
-      if (valN != null) stats.push({ label: "Validation", value: valN });
-      if (testN != null) stats.push({ label: "Test", value: testN });
-      if (args.device) stats.push({ label: "Device", value: args.device });
-      return stats;
-    }
-
-    function renderStatGrid(stats) {
-      return stats.map(stat => `
-        <div class="run-stat">
-          <span class="run-stat-label">${stat.label}</span>
-          <span class="run-stat-value">${stat.value}</span>
-        </div>
-      `).join("");
+      if (totalSeconds > 0) {
+        lines.push(`total_time: ${formatDuration(totalSeconds)}`);
+      }
+      return lines.join("\n");
     }
 
     function epochValMetric(epoch, trainKey, valKey) {
@@ -716,58 +744,6 @@
       renderAccLegend(legendId, epochs, metricKey);
     }
 
-    function renderTestSummary() {
-      const gridEl = document.getElementById("testSummary");
-      const noteEl = document.getElementById("testSectionNote");
-      const panelEl = document.getElementById("testPanel");
-      const test = metrics?.test;
-      if (!test) {
-        gridEl.innerHTML = "";
-        noteEl.textContent = "";
-        panelEl.hidden = true;
-        return;
-      }
-      panelEl.hidden = false;
-      const epoch = test.best_epoch ?? metrics?.epochs?.at(-1)?.epoch;
-      noteEl.textContent = `Held-out test split · best validation epoch ${epoch}`;
-      const pct = v => `${(Number(v) * 100).toFixed(1)}%`;
-      const stats = [
-        { label: "Puzzles", value: test.test_samples_count },
-        {
-          label: "Rating",
-          value: formatRatingRange(test.min_rating, test.max_rating),
-        },
-        { label: "Total loss", value: test.loss, format: v => Number(v).toFixed(4) },
-        { label: "Cell loss", value: test.cell_loss, format: v => Number(v).toFixed(4) },
-        { label: "Halt loss", value: test.halt_loss, format: v => Number(v).toFixed(4) },
-        { label: "Cell accuracy", value: test.cell_acc, format: pct },
-        { label: "Puzzle accuracy", value: test.puzzle_acc, format: pct },
-        { label: "Halt accuracy", value: test.halt_acc, format: pct },
-        { label: "Halt rate", value: test.halt_rate, format: pct },
-        { label: "Avg outer iters", value: test.avg_outer_iters, format: v => Number(v).toFixed(2) },
-        {
-          label: "Inner / max outer iters",
-          value: `${test.inner_iters ?? "?"}/${test.max_outer_iters ?? "?"}`,
-        },
-        {
-          label: "Rollout mask prob",
-          value: test.rollout_mask_prob,
-          format: v => Number(v).toFixed(3),
-        },
-        {
-          label: "Rollout noise prob",
-          value: test.rollout_noise_prob,
-          format: v => Number(v).toFixed(3),
-        },
-      ]
-        .filter(stat => stat.value != null)
-        .map(stat => ({
-          label: stat.label,
-          value: stat.format ? stat.format(stat.value) : stat.value,
-        }));
-      gridEl.innerHTML = renderStatGrid(stats);
-    }
-
     function renderCharts() {
       if (!metrics?.epochs?.length) return;
       const epochs = metrics.epochs;
@@ -821,21 +797,31 @@
       renderTrainOnlyLegend("completionsLegend", epochs, "completions_per_epoch");
       renderAccLegend("cellAccLegend", epochs, "cell_acc");
       renderAccLegend("puzzleAccLegend", epochs, "puzzle_acc");
-      renderTestSummary();
     }
 
     function renderRunMeta() {
       const container = document.getElementById("runMeta");
+      const runId = document.getElementById("runSelect").value;
       const args = metrics?.args;
-      if (!args) {
+      if (!runId) {
         container.innerHTML = "";
         return;
       }
-      const runId = document.getElementById("runSelect").value;
       const parsed = parseRunId(runId);
+      const config = args
+        ? `
+          <details class="run-config-details">
+            <summary>Config</summary>
+            <pre class="run-config">${escapeHtml(renderConfigYaml(args, metrics))}</pre>
+          </details>
+        `
+        : "";
       container.innerHTML = `
-        <div class="run-heading">${parsed.label}</div>
-        <div class="run-stat-grid">${renderStatGrid(buildRunStats(args, metrics))}</div>
+        <div class="run-header">
+          <div class="run-heading">${parsed.label}</div>
+          <div class="run-id">${runId}</div>
+        </div>
+        ${config}
       `;
     }
 
@@ -991,7 +977,6 @@
         manifest = await manifestRes.json();
         renderRunMeta();
         renderCharts();
-        renderTestSummary();
 
         const splits = manifest.splits
           ? Object.keys(manifest.splits).filter(s => TRAJECTORY_SPLITS.includes(s))
@@ -1005,7 +990,6 @@
         trajectory = null;
         renderRunMeta();
         renderCharts();
-        renderTestSummary();
         renderTrajectory();
         errorEl.textContent = `${e.message}. Train a run first: uv run train`;
       }

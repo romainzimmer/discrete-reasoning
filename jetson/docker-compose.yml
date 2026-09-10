@@ -33,7 +33,7 @@ services:
   eval:
     <<: *app-base
     runtime: nvidia
-    entrypoint: ["eval"]
+    entrypoint: ["python3", "-m", "eval"]
 
   viz:
     <<: *app-base

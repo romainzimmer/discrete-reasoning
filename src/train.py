@@ -20,6 +20,7 @@ from ema import DEFAULT_EMA_ALPHA, validate_ema_alpha
 from rollout import (
     DEFAULT_INNER_ITERS,
     DEFAULT_MAX_OUTER_ITERS,
+    DEFAULT_TRANSITION_PROB,
     BatchSlotState,
     RolloutConfig,
     RolloutResult,
@@ -59,19 +60,19 @@ def build_rollout_config(
     inner_iters: int,
     max_outer_iters: int,
     halt_threshold: float = 0.5,
-    rollout_mask_prob: float = 0.0,
-    rollout_noise_prob: float = 0.0,
+    transition_prob: float = DEFAULT_TRANSITION_PROB,
     ema_alpha: float = DEFAULT_EMA_ALPHA,
     curriculum_training: bool = True,
+    pin_gt: bool = True,
 ) -> RolloutConfig:
     return RolloutConfig(
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
         halt_threshold=halt_threshold,
-        rollout_mask_prob=rollout_mask_prob,
-        rollout_noise_prob=rollout_noise_prob,
+        transition_prob=transition_prob,
         ema_alpha=ema_alpha,
         curriculum_training=curriculum_training,
+        pin_gt=pin_gt,
     )
 
 
@@ -435,6 +436,7 @@ def train_epoch(
                 dim=model.dim,
                 ema_alpha=rollout_config.ema_alpha,
                 curriculum_training=rollout_config.curriculum_training,
+                pin_gt=rollout_config.pin_gt,
             )
         if profiler is not None:
             profiler.step()
@@ -537,16 +539,10 @@ def main() -> None:
         help="Weight for halt BCE loss",
     )
     parser.add_argument(
-        "--rollout-mask-prob",
+        "--transition-prob",
         type=float,
-        default=0.0,
-        help="Per-cell prob of masking to empty at each outer step inner-loop input (clues untouched)",
-    )
-    parser.add_argument(
-        "--rollout-noise-prob",
-        type=float,
-        default=0.0,
-        help="Per-cell prob of replacing with random digit 1-9 at inner-loop input (clues untouched)",
+        default=DEFAULT_TRANSITION_PROB,
+        help="Per-cell prob of committing decoded digit each outer step (clues/GT pins always commit; 1 = full grid update)",
     )
     parser.add_argument(
         "--ema-alpha",
@@ -584,6 +580,11 @@ def main() -> None:
         "--no-curriculum-training",
         action="store_true",
         help="Disable curriculum puzzle init (partial GT reveal) during training seed/refill",
+    )
+    parser.add_argument(
+        "--no-pin-gt",
+        action="store_true",
+        help="Disable GT pinning during rollout (curriculum init still reveals GT; commits use model digits)",
     )
     parser.add_argument("--no-augment", action="store_true", help="Disable training data augmentations")
     parser.add_argument("--aug-digit-proba", type=float, default=0.5)
@@ -637,7 +638,6 @@ def main() -> None:
     val_ds = PuzzleDataset(rows=val_rows)
     args.train_samples = len(train_rows)
     args.val_samples_count = len(val_rows)
-    save_run_config(run_dir, args)
 
     use_cuda = device.type == "cuda"
     loader_kwargs = {
@@ -648,8 +648,9 @@ def main() -> None:
     val_batch_size = args.val_batch_size or args.train_batch_size
     val_loader = DataLoader(val_ds, batch_size=val_batch_size, **loader_kwargs)
 
-    args.model = "mixer-looped"
+    args.model = "looped-mixer"
     args.amp = not args.no_amp
+    save_run_config(run_dir, args)
     amp = resolve_amp(device, enabled=args.amp)
     model = MixerNextStateModel(dim=args.dim, num_blocks=args.num_blocks).to(device)
     decay_params, no_decay_params = [], []
@@ -668,19 +669,19 @@ def main() -> None:
         lr=args.lr,
     )
     curriculum_training = not args.no_curriculum_training
+    pin_gt = not args.no_pin_gt
     rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.train_max_outer_iters,
-        rollout_mask_prob=args.rollout_mask_prob,
-        rollout_noise_prob=args.rollout_noise_prob,
+        transition_prob=args.transition_prob,
         ema_alpha=args.ema_alpha,
         curriculum_training=curriculum_training,
+        pin_gt=pin_gt,
     )
     eval_rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.eval_max_outer_iters,
-        rollout_mask_prob=args.rollout_mask_prob,
-        rollout_noise_prob=args.rollout_noise_prob,
+        transition_prob=args.transition_prob,
         ema_alpha=args.ema_alpha,
         curriculum_training=False,
     )
@@ -722,6 +723,7 @@ def main() -> None:
                 dim=model.dim,
                 ema_alpha=rollout_config.ema_alpha,
                 curriculum_training=rollout_config.curriculum_training,
+                pin_gt=rollout_config.pin_gt,
             )
 
         profiler = None

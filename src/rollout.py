@@ -9,11 +9,12 @@ from data import tensor_to_string
 from dataset import PuzzleTensorCache
 from amp import LOSS_DTYPE, to_loss_dtype
 from ema import DEFAULT_EMA_ALPHA, ema_update, memory_init, uses_ema, validate_ema_alpha, zero_ema
-from encoding import NUM_VOCAB, decode_logits, target_mask
+from encoding import decode_logits, target_mask
 from model import MixerNextStateModel
 
 DEFAULT_INNER_ITERS = 5
 DEFAULT_MAX_OUTER_ITERS = 10
+DEFAULT_TRANSITION_PROB = 0.5
 
 
 @dataclass(frozen=True)
@@ -21,20 +22,18 @@ class RolloutConfig:
     inner_iters: int = DEFAULT_INNER_ITERS
     max_outer_iters: int = DEFAULT_MAX_OUTER_ITERS
     halt_threshold: float = 0.5
-    rollout_mask_prob: float = 0.0
-    rollout_noise_prob: float = 0.0
+    transition_prob: float = DEFAULT_TRANSITION_PROB
     ema_alpha: float = DEFAULT_EMA_ALPHA
     curriculum_training: bool = True
+    pin_gt: bool = True
 
     def __post_init__(self) -> None:
         if self.inner_iters < 1:
             raise ValueError("inner_iters must be >= 1")
         if self.max_outer_iters < 1:
             raise ValueError("max_outer_iters must be >= 1")
-        if not 0.0 <= self.rollout_mask_prob <= 1.0:
-            raise ValueError("rollout_mask_prob must be in [0, 1]")
-        if not 0.0 <= self.rollout_noise_prob <= 1.0:
-            raise ValueError("rollout_noise_prob must be in [0, 1]")
+        if not 0.0 < self.transition_prob <= 1.0:
+            raise ValueError("transition_prob must be in (0, 1]")
         validate_ema_alpha(self.ema_alpha)
 
 
@@ -45,10 +44,15 @@ class _PinContext:
 
     @classmethod
     def from_state(
-        cls, clues: torch.Tensor, answer: torch.Tensor, gt_pin: torch.Tensor
+        cls,
+        clues: torch.Tensor,
+        answer: torch.Tensor,
+        gt_pin: torch.Tensor,
+        *,
+        pin_gt: bool = True,
     ) -> _PinContext:
         clue_pin = clues > 0
-        pin = clue_pin | gt_pin
+        pin = clue_pin | (gt_pin if pin_gt else False)
         pin_digit_ids = torch.where(clue_pin, clues, answer)
         return cls(pin=pin, pin_digit_ids=pin_digit_ids)
 
@@ -76,6 +80,7 @@ class BatchSlotState:
         dim: int,
         ema_alpha: float,
         curriculum_training: bool = True,
+        pin_gt: bool = True,
     ) -> BatchSlotState:
         validate_ema_alpha(ema_alpha)
         idx = torch.randint(cache.clues.size(0), (batch_size,), generator=generator)
@@ -87,7 +92,7 @@ class BatchSlotState:
         else:
             digit_id = clues.clone()
             gt_pin = torch.zeros_like(clue_pin)
-        pin_ctx = _PinContext.from_state(clues, answers, gt_pin)
+        pin_ctx = _PinContext.from_state(clues, answers, gt_pin, pin_gt=pin_gt)
         ema_embed = zero_ema(batch_size, dim, device) if uses_ema(ema_alpha) else None
         return cls(
             digit_id=digit_id,
@@ -197,9 +202,30 @@ def _compute_losses(
     return cell_loss, halt_loss, total_loss
 
 
-def _outer_commit(logits: torch.Tensor, ctx: _PinContext) -> torch.Tensor:
+def _commit_candidate(logits: torch.Tensor, ctx: _PinContext) -> torch.Tensor:
     decoded = decode_logits(logits).detach()
     return torch.where(ctx.pin, ctx.pin_digit_ids, decoded)
+
+
+def _outer_commit(
+    logits: torch.Tensor,
+    ctx: _PinContext,
+    prev_digit_id: torch.Tensor,
+    *,
+    transition_prob: float,
+    halt: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Commit decoded digits; partial transitions except on halt (full commit)."""
+    candidate = _commit_candidate(logits, ctx)
+    if transition_prob >= 1.0:
+        return candidate
+    transition_mask = ~ctx.pin & (
+        torch.rand(prev_digit_id.shape, device=prev_digit_id.device) < transition_prob
+    )
+    partial = torch.where(ctx.pin | transition_mask, candidate, prev_digit_id)
+    if halt is None or not halt.any():
+        return partial
+    return torch.where(halt.view(-1, 1, 1), candidate, partial)
 
 
 def _curriculum_init_digit_id(
@@ -218,82 +244,18 @@ def _curriculum_init_digit_id(
     return digit_id, reveal
 
 
-def _apply_rollout_mask(
-    digit_id: torch.Tensor,
-    clue_pin: torch.Tensor,
-    gt_pin: torch.Tensor,
-    prob: float,
-) -> torch.Tensor:
-    """Randomly mask committed digits to empty for inner-loop input only (clues untouched)."""
-    mutable = ~(clue_pin | gt_pin)
-    mask = mutable & (torch.rand(digit_id.shape, device=digit_id.device) < prob)
-    return torch.where(mask, torch.zeros_like(digit_id), digit_id)
-
-
-def _apply_rollout_noise(
-    digit_id: torch.Tensor,
-    clue_pin: torch.Tensor,
-    gt_pin: torch.Tensor,
-    prob: float,
-) -> torch.Tensor:
-    """Randomly replace committed digits with digits 1-9 (clues untouched)."""
-    mutable = ~(clue_pin | gt_pin)
-    replace = mutable & (torch.rand(digit_id.shape, device=digit_id.device) < prob)
-    random_digits = torch.randint(
-        1,
-        NUM_VOCAB,
-        digit_id.shape,
-        device=digit_id.device,
-        dtype=digit_id.dtype,
-    )
-    return torch.where(replace, random_digits, digit_id)
-
-
-def _digits_for_inner_loop(
-    digit_id: torch.Tensor,
-    clue_pin: torch.Tensor,
-    gt_pin: torch.Tensor,
-    *,
-    rollout_mask_prob: float,
-    rollout_noise_prob: float,
-) -> torch.Tensor:
-    """Perturb committed digits for inner-loop input only; commit/decode stay clean."""
-    if rollout_mask_prob <= 0.0 and rollout_noise_prob <= 0.0:
-        return digit_id
-    loop_digit_id = digit_id
-    if rollout_mask_prob > 0.0:
-        loop_digit_id = _apply_rollout_mask(
-            loop_digit_id, clue_pin, gt_pin, rollout_mask_prob
-        )
-    if rollout_noise_prob > 0.0:
-        loop_digit_id = _apply_rollout_noise(
-            loop_digit_id, clue_pin, gt_pin, rollout_noise_prob
-        )
-    return loop_digit_id
-
-
 def _inner_loop(
     model: MixerNextStateModel,
     digit_id: torch.Tensor,
     clue_pin: torch.Tensor,
-    gt_pin: torch.Tensor,
     inner_iters: int,
     *,
     memory_embed: torch.Tensor | None,
     ema_embed: torch.Tensor | None,
     ema_alpha: float,
-    rollout_mask_prob: float = 0.0,
-    rollout_noise_prob: float = 0.0,
     with_grad: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    loop_digit_id = _digits_for_inner_loop(
-        digit_id,
-        clue_pin,
-        gt_pin,
-        rollout_mask_prob=rollout_mask_prob,
-        rollout_noise_prob=rollout_noise_prob,
-    )
-    input_embed = model.encode_input(loop_digit_id, clue_pin)
+    input_embed = model.encode_input(digit_id, clue_pin)
     cell_embed: torch.Tensor | None = memory_embed
     logits: torch.Tensor | None = None
     halt_logit: torch.Tensor | None = None
@@ -337,13 +299,10 @@ def rollout_train_step(
         model,
         state.digit_id,
         state.clue_pin,
-        state.gt_pin,
         config.inner_iters,
         memory_embed=state.memory_embed,
         ema_embed=state.ema_embed,
         ema_alpha=config.ema_alpha,
-        rollout_mask_prob=config.rollout_mask_prob,
-        rollout_noise_prob=config.rollout_noise_prob,
         with_grad=True,
     )
     pred_raw = decode_logits(logits)
@@ -360,7 +319,13 @@ def rollout_train_step(
     )
     if backward:
         loss.backward()
-    state.digit_id = _outer_commit(logits, state.pin_ctx)
+    state.digit_id = _outer_commit(
+        logits,
+        state.pin_ctx,
+        state.digit_id,
+        transition_prob=config.transition_prob,
+        halt=predict_halt,
+    )
     state.memory_embed = memory_init(final_cell_embed)
     if state.ema_embed is not None:
         state.ema_embed = ema_update(state.ema_embed, final_cell_embed, config.ema_alpha)
@@ -388,6 +353,7 @@ def refill_done_slots(
     dim: int,
     ema_alpha: float,
     curriculum_training: bool = True,
+    pin_gt: bool = True,
 ) -> None:
     b = done.size(0)
     device = state.digit_id.device
@@ -408,7 +374,9 @@ def refill_done_slots(
     state.answer = torch.where(done_mask, new_answers, state.answer)
     state.clue_pin = state.clues > 0
     state.gt_pin = torch.where(done_mask, new_gt_pin, state.gt_pin)
-    state.pin_ctx = _PinContext.from_state(state.clues, state.answer, state.gt_pin)
+    state.pin_ctx = _PinContext.from_state(
+        state.clues, state.answer, state.gt_pin, pin_gt=pin_gt
+    )
     state.outer_count = torch.where(done, torch.zeros_like(state.outer_count), state.outer_count)
     done_mask_mem = done.view(b, 1, 1, 1)
     if state.memory_embed is not None:
@@ -466,13 +434,10 @@ def rollout_eval_batch(
             model,
             active_digit_id,
             active_clue_pin,
-            active_gt_pin,
             config.inner_iters,
             memory_embed=active_memory_embed,
             ema_embed=active_ema_embed,
             ema_alpha=config.ema_alpha,
-            rollout_mask_prob=config.rollout_mask_prob,
-            rollout_noise_prob=config.rollout_noise_prob,
             with_grad=False,
         )
         pre_commit = predict_grid(logits, active_clues)
@@ -480,7 +445,13 @@ def rollout_eval_batch(
         predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
         halt_correct_rounds += (predict_halt == (halt_target_round > 0.5)).sum()
         halt_total_rounds += pre_commit.size(0)
-        committed = _outer_commit(logits, active_ctx)
+        committed = _outer_commit(
+            logits,
+            active_ctx,
+            active_digit_id,
+            transition_prob=config.transition_prob,
+            halt=predict_halt,
+        )
         active_memory_embed = memory_init(final_cell_embed)
         if active_ema_embed is not None:
             active_ema_embed = ema_update(active_ema_embed, final_cell_embed, config.ema_alpha)
@@ -491,7 +462,7 @@ def rollout_eval_batch(
         final_halt_logit[slot_idx] = to_loss_dtype(halt_logit)
 
         done_idx = slot_idx[done]
-        out_pred[done_idx] = pre_commit[done]
+        out_pred[done_idx] = committed[done]
         out_steps[done_idx] = active_outer_count[done]
         out_halted[done_idx] = predict_halt[done]
 
@@ -602,20 +573,23 @@ def rollout_trace_batch(
             model,
             active_digit_id,
             active_clue_pin,
-            active_gt_pin,
             config.inner_iters,
             memory_embed=active_memory_embed,
             ema_embed=active_ema_embed,
             ema_alpha=config.ema_alpha,
-            rollout_mask_prob=config.rollout_mask_prob,
-            rollout_noise_prob=config.rollout_noise_prob,
             with_grad=False,
         )
-        committed = _outer_commit(logits, active_ctx)
+        predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
+        committed = _outer_commit(
+            logits,
+            active_ctx,
+            active_digit_id,
+            transition_prob=config.transition_prob,
+            halt=predict_halt,
+        )
         active_memory_embed = memory_init(final_cell_embed)
         if active_ema_embed is not None:
             active_ema_embed = ema_update(active_ema_embed, final_cell_embed, config.ema_alpha)
-        predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
         active_outer_count = active_outer_count + 1
         done = predict_halt | (active_outer_count >= config.max_outer_iters)
 

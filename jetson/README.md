@@ -10,7 +10,7 @@ cd jetson
 
 ## Model
 
-Training uses a **mixer-looped** model: embed the grid → looped MLP-Mixer updates `h_{t+1} = M(h_t + P)` → unembed to 10-way logits.
+Training uses a **looped-mixer** model: embed the grid → looped MLP-Mixer updates `h_{t+1} = M(h_t + P)` → unembed to 10-way logits.
 
 - **`--dim`**: embedding / mixer hidden dimension (D); SwiGLU channel-mix width `H = round(4·D·2/3)` rounded to 256 (TRM)
 - **`--num-blocks`**: mixer layers inside each inner step (depth of M)
@@ -18,7 +18,7 @@ Training uses a **mixer-looped** model: embed the grid → looped MLP-Mixer upda
 - **`--train-max-outer-iters` / `--eval-max-outer-iters`**: max outer commits per puzzle (halt or cap)
 - **`--batches-per-epoch`**: optimizer steps per epoch (one outer round per step)
 
-Runs save `args.model: mixer-looped` in `history.json`. **Old checkpoints from before this migration cannot be loaded by `eval`.**
+Runs save `args.model: looped-mixer` in `history.json`. **Old checkpoints from before this migration cannot be loaded by `eval`.**
 
 Training keeps a persistent grid state per batch slot (`digit_id`, `outer_count`); `cell_embed` is re-encoded each step. If you hit OOM, lower `--train-batch-size` (512 may need tuning on Jetson).
 
@@ -56,10 +56,10 @@ Writes `data/train.csv` and `data/test.csv` (~798 MB).
 
 ## Train
 
-Main run (mixer-looped; reduce `--train-batch-size` if OOM):
+Main run (looped-mixer; reduce `--train-batch-size` if OOM):
 
 ```bash
-docker compose run --rm train   --epochs 1000   --dim 256   --num-blocks 2   --train-batch-size 128 --val-batch-size 256   --num-workers 3   --val-samples 512   --max-samples 13312   --inner-iters 3   --train-max-outer-iters 5   --eval-max-outer-iters 30 --batches-per-epoch 100 --rollout-mask-prob 0 --rollout-noise-prob 0 --weight-decay 0.01
+docker compose run --rm train   --epochs 1000   --dim 256   --num-blocks 2   --train-batch-size 128 --val-batch-size 256   --num-workers 3   --val-samples 512   --max-samples 100000   --inner-iters 3   --train-max-outer-iters 30   --eval-max-outer-iters 30 --batches-per-epoch 100 --weight-decay 0.01 --no-pin-gt
 ```
 
 Quick test (easy sudoku, ~1k train cap):
@@ -139,7 +139,7 @@ Open the file in **NVIDIA Nsight Systems** (File → Open).
 
 ## Test
 
-Evaluate `best.pt` from a run trained after the mixer migration (`args.model: mixer-looped` in `history.json`). Reuses model and rollout settings from the checkpoint; test rating filters are independent of training:
+Evaluate `best.pt` from a run trained after the mixer migration (`args.model: looped-mixer` in `history.json`). Reuses model and rollout settings from the checkpoint; test rating filters are independent of training:
 
 ```bash
 docker compose run --rm eval runs/<run-id>
