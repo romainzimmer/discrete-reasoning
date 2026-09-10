@@ -74,7 +74,7 @@ def build_rollout_config(
     ema_alpha: float = DEFAULT_EMA_ALPHA,
     curriculum_training: bool = True,
     pin_gt: bool = True,
-    deep_supervision: bool = False,
+    deep_supervision: bool = True,
     adaptive_curriculum: bool = True,
 ) -> RolloutConfig:
     return RolloutConfig(
@@ -609,9 +609,9 @@ def main() -> None:
         help="Disable GT pinning during rollout (curriculum init still reveals GT; commits use model digits)",
     )
     parser.add_argument(
-        "--deep-supervision",
+        "--no-deep-supervision",
         action="store_true",
-        help="Average cell and halt loss over all inner loop steps (default: final step only)",
+        help="Use final inner loop step only for cell and halt loss (default: average all steps)",
     )
     parser.add_argument(
         "--no-adaptive-curriculum",
@@ -704,6 +704,7 @@ def main() -> None:
     curriculum_training = not args.no_curriculum_training
     pin_gt = not args.no_pin_gt
     adaptive_curriculum = not args.no_adaptive_curriculum
+    deep_supervision = not args.no_deep_supervision
     rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.train_max_outer_iters,
@@ -712,7 +713,7 @@ def main() -> None:
         ema_alpha=args.ema_alpha,
         curriculum_training=curriculum_training,
         pin_gt=pin_gt,
-        deep_supervision=args.deep_supervision,
+        deep_supervision=deep_supervision,
         adaptive_curriculum=adaptive_curriculum,
     )
     eval_rollout_config = build_rollout_config(

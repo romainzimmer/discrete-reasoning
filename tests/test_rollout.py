@@ -120,7 +120,7 @@ def test_defaults():
     assert config.max_outer_iters == DEFAULT_MAX_OUTER_ITERS
     assert config.ema_alpha == DEFAULT_EMA_ALPHA
     assert config.transition_noise_prob == DEFAULT_TRANSITION_NOISE_PROB
-    assert config.deep_supervision is False
+    assert config.deep_supervision is True
     assert config.adaptive_curriculum is True
     assert config.curriculum_puzzle_acc == 0.0
 
@@ -1113,7 +1113,9 @@ def test_deep_supervision_off_calls_loss_once():
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
-    config = _baseline_config(inner_iters=3, max_outer_iters=10, halt_threshold=1.1)
+    config = _baseline_config(
+        inner_iters=3, max_outer_iters=10, halt_threshold=1.1, deep_supervision=False
+    )
     with patch("rollout._compute_cell_loss", wraps=_compute_cell_loss) as mock_cell:
         with patch("rollout._compute_halt_loss", wraps=_compute_halt_loss) as mock_halt:
             rollout_train_step(model, state, config, backward=False)
@@ -1170,7 +1172,9 @@ def test_deep_supervision_regression_single_step():
     clues, answer = _tiny_batch()
     state_off = _make_state(clues, answer)
     state_on = _make_state(clues, answer)
-    config_off = _baseline_config(inner_iters=1, max_outer_iters=10, halt_threshold=1.1)
+    config_off = _baseline_config(
+        inner_iters=1, max_outer_iters=10, halt_threshold=1.1, deep_supervision=False
+    )
     config_on = _baseline_config(
         inner_iters=1, max_outer_iters=10, halt_threshold=1.1, deep_supervision=True
     )

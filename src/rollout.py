@@ -28,7 +28,7 @@ class RolloutConfig:
     ema_alpha: float = DEFAULT_EMA_ALPHA
     curriculum_training: bool = True
     pin_gt: bool = True
-    deep_supervision: bool = False
+    deep_supervision: bool = True
     adaptive_curriculum: bool = True
     curriculum_puzzle_acc: float = 0.0
 
