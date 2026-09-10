@@ -99,7 +99,7 @@ def main() -> None:
         "--transition-noise-prob",
         type=float,
         default=None,
-        help="Per unpinned committed-cell noise prob after transition (default: from checkpoint, else 0.1)",
+        help="Per unpinned committed-cell noise prob after transition (default: from checkpoint, else 0.05)",
     )
     parser.add_argument(
         "--ema-alpha",
