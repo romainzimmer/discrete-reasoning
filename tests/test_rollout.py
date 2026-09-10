@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from dataset import PuzzleDataset, PuzzleTensorCache
+from dataset import PuzzleDataset
 from model import MixerNextStateModel
 from ema import DEFAULT_EMA_ALPHA, ema_combine
 from rollout import (
@@ -81,11 +81,14 @@ def _make_state(
     )
 
 
-def _tiny_cache() -> PuzzleTensorCache:
+def _tiny_dataset() -> PuzzleDataset:
     clues, answer = _tiny_batch()
     clues2 = clues.clone()
     clues2[0, 0, 2] = 4
-    return PuzzleTensorCache(clues=torch.cat([clues, clues2]), answers=torch.cat([answer, answer]))
+    return PuzzleDataset.from_tensors(
+        torch.cat([clues, clues2]),
+        torch.cat([answer, answer]),
+    )
 
 
 def test_rollout_config_validation():
@@ -132,10 +135,10 @@ def test_state_persists_across_steps():
 
 
 def test_state_persists_across_epochs():
-    cache = _tiny_cache()
+    dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
-        cache, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
+        dataset, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
     )
     config = _baseline_config(inner_iters=2, max_outer_iters=100, halt_threshold=1.1)
     model = MixerNextStateModel(dim=32, num_blocks=1)
@@ -143,8 +146,8 @@ def test_state_persists_across_epochs():
     rollout_train_step(model, state, config)
     assert state.outer_count.item() == 1
     memory_after_step = state.memory_embed.clone()
-    # epoch boundary: new cache object, no re-seed
-    PuzzleTensorCache(clues=cache.clues, answers=cache.answers)
+    # epoch boundary: same dataset, no re-seed
+    dataset.set_epoch(2)
     rollout_train_step(model, state, config)
     assert state.outer_count.item() == 2
     assert state.memory_embed is not None
@@ -152,10 +155,10 @@ def test_state_persists_across_epochs():
 
 
 def test_clues_init_without_curriculum():
-    cache = _tiny_cache()
+    dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
-        cache,
+        dataset,
         batch_size=2,
         device=torch.device("cpu"),
         generator=gen,
@@ -188,15 +191,15 @@ def test_oracle_halt_model_continues():
 
 
 def test_refill_after_done():
-    cache = _tiny_cache()
+    dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
-        cache, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
+        dataset, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
     )
     original_clues = state.clues.clone()
     done = torch.tensor([True])
     refill_done_slots(
-        state, done, cache, generator=gen, dim=32, ema_alpha=1.0, curriculum_training=False
+        state, done, dataset, generator=gen, dim=32, ema_alpha=1.0, curriculum_training=False
     )
     assert not torch.equal(state.clues, original_clues)
     assert state.outer_count.item() == 0
@@ -204,10 +207,10 @@ def test_refill_after_done():
 
 
 def test_max_outer_forces_refill():
-    cache = _tiny_cache()
+    dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
-        cache, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
+        dataset, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
     )
     state.outer_count[0] = 9
     config = _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
@@ -218,7 +221,7 @@ def test_max_outer_forces_refill():
     assert result.done.all()
     original_clues = state.clues.clone()
     refill_done_slots(
-        state, result.done, cache, generator=gen, dim=32, ema_alpha=1.0, curriculum_training=False
+        state, result.done, dataset, generator=gen, dim=32, ema_alpha=1.0, curriculum_training=False
     )
     assert not torch.equal(state.clues, original_clues)
 
@@ -286,21 +289,21 @@ def test_curriculum_init_empty_when_no_reveal():
 
 
 def test_curriculum_seed_fills_cells():
-    cache = _tiny_cache()
+    dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     torch.manual_seed(42)
     state = BatchSlotState.seed(
-        cache, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
+        dataset, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
     )
     assert not torch.equal(state.digit_id, state.clues)
     assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
 
 
 def test_curriculum_refill_fills_cells():
-    cache = _tiny_cache()
+    dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
-        cache,
+        dataset,
         batch_size=1,
         device=torch.device("cpu"),
         generator=gen,
@@ -309,7 +312,7 @@ def test_curriculum_refill_fills_cells():
         curriculum_training=False,
     )
     torch.manual_seed(42)
-    refill_done_slots(state, torch.tensor([True]), cache, generator=gen, dim=32, ema_alpha=1.0)
+    refill_done_slots(state, torch.tensor([True]), dataset, generator=gen, dim=32, ema_alpha=1.0)
     assert not torch.equal(state.digit_id, state.clues)
     assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
 
@@ -421,26 +424,26 @@ def test_memory_embed_persisted_detached():
 
 
 def test_seeded_refill():
-    cache = _tiny_cache()
+    dataset = _tiny_dataset()
     gen1 = torch.Generator().manual_seed(42)
     gen2 = torch.Generator().manual_seed(42)
     state1 = BatchSlotState.seed(
-        cache, batch_size=1, device=torch.device("cpu"), generator=gen1, dim=32, ema_alpha=1.0
+        dataset, batch_size=1, device=torch.device("cpu"), generator=gen1, dim=32, ema_alpha=1.0
     )
     state2 = BatchSlotState.seed(
-        cache, batch_size=1, device=torch.device("cpu"), generator=gen2, dim=32, ema_alpha=1.0
+        dataset, batch_size=1, device=torch.device("cpu"), generator=gen2, dim=32, ema_alpha=1.0
     )
     done = torch.tensor([True])
-    refill_done_slots(state1, done, cache, generator=gen1, dim=32, ema_alpha=1.0)
-    refill_done_slots(state2, done, cache, generator=gen2, dim=32, ema_alpha=1.0)
+    refill_done_slots(state1, done, dataset, generator=gen1, dim=32, ema_alpha=1.0)
+    refill_done_slots(state2, done, dataset, generator=gen2, dim=32, ema_alpha=1.0)
     assert torch.equal(state1.clues, state2.clues)
 
 
 def test_refill_no_op_when_not_done():
-    cache = _tiny_cache()
+    dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
-        cache, batch_size=2, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
+        dataset, batch_size=2, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
     )
     before = (
         state.digit_id.clone(),
@@ -448,7 +451,7 @@ def test_refill_no_op_when_not_done():
         state.answer.clone(),
         state.outer_count.clone(),
     )
-    refill_done_slots(state, torch.tensor([False, False]), cache, generator=gen, dim=32, ema_alpha=1.0)
+    refill_done_slots(state, torch.tensor([False, False]), dataset, generator=gen, dim=32, ema_alpha=1.0)
     assert torch.equal(state.digit_id, before[0])
     assert torch.equal(state.clues, before[1])
     assert torch.equal(state.answer, before[2])
@@ -720,7 +723,7 @@ def test_gt_pin_not_in_encode_clue_pin():
 
 
 def test_train_seed_without_pin_gt_keeps_curriculum_init():
-    cache = _tiny_cache()
+    dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     calls = 0
 
@@ -734,7 +737,7 @@ def test_train_seed_without_pin_gt_keeps_curriculum_init():
 
     with patch("rollout.torch.rand", side_effect=_rand):
         state = BatchSlotState.seed(
-            cache, 1, torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0, pin_gt=False
+            dataset, 1, torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0, pin_gt=False
         )
     assert state.gt_pin.any()
     assert torch.equal(state.pin_ctx.pin, state.clue_pin)
@@ -742,7 +745,7 @@ def test_train_seed_without_pin_gt_keeps_curriculum_init():
 
 
 def test_train_seed_sets_gt_pin():
-    cache = _tiny_cache()
+    dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     calls = 0
 
@@ -756,7 +759,7 @@ def test_train_seed_sets_gt_pin():
 
     with patch("rollout.torch.rand", side_effect=_rand):
         state = BatchSlotState.seed(
-            cache, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
+            dataset, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
         )
     assert state.gt_pin.any()
     assert state.gt_pin.sum() == (~state.clue_pin).sum()
@@ -764,10 +767,10 @@ def test_train_seed_sets_gt_pin():
 
 
 def test_train_seed_without_curriculum_has_no_gt_pin():
-    cache = _tiny_cache()
+    dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
-        cache,
+        dataset,
         batch_size=1,
         device=torch.device("cpu"),
         generator=gen,
@@ -839,10 +842,10 @@ def test_curriculum_partial_reveal_gt_pin():
 
 
 def test_refill_updates_gt_pin_and_pin_ctx():
-    cache = _tiny_cache()
+    dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
-        cache,
+        dataset,
         batch_size=1,
         device=torch.device("cpu"),
         generator=gen,
@@ -862,7 +865,7 @@ def test_refill_updates_gt_pin_and_pin_ctx():
         return torch.zeros(size, device=device)
 
     with patch("rollout.torch.rand", side_effect=_rand):
-        refill_done_slots(state, torch.tensor([True]), cache, generator=gen, dim=32, ema_alpha=1.0)
+        refill_done_slots(state, torch.tensor([True]), dataset, generator=gen, dim=32, ema_alpha=1.0)
     assert state.gt_pin.any()
     assert torch.equal(state.pin_ctx.pin, state.clue_pin | state.gt_pin)
     assert torch.equal(state.digit_id[state.gt_pin], state.answer[state.gt_pin])
@@ -978,7 +981,7 @@ def test_ema_alpha_one_state_has_no_ema_embed():
 def test_ema_embed_updated_after_train_step():
     clues, answer = _tiny_batch()
     state = BatchSlotState.seed(
-        _tiny_cache(),
+        _tiny_dataset(),
         batch_size=1,
         device=torch.device("cpu"),
         generator=torch.Generator().manual_seed(0),
@@ -998,7 +1001,7 @@ def test_ema_end_of_inner_matches_stored_ema():
     clues, answer = _tiny_batch()
     ema_alpha = 0.05
     state = BatchSlotState.seed(
-        _tiny_cache(),
+        _tiny_dataset(),
         batch_size=1,
         device=torch.device("cpu"),
         generator=torch.Generator().manual_seed(0),
@@ -1018,23 +1021,23 @@ def test_ema_end_of_inner_matches_stored_ema():
 
 
 def test_refill_zeros_memory_embed():
-    cache = _tiny_cache()
+    dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
-        cache, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
+        dataset, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=1.0
     )
     state.memory_embed = torch.randn(1, 9, 9, 32)
-    refill_done_slots(state, torch.tensor([True]), cache, generator=gen, dim=32, ema_alpha=1.0)
+    refill_done_slots(state, torch.tensor([True]), dataset, generator=gen, dim=32, ema_alpha=1.0)
     assert state.memory_embed is not None
     assert state.memory_embed.sum().item() == 0.0
 
 
 def test_refill_zeros_ema_embed():
-    cache = _tiny_cache()
+    dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
-        cache, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=0.05
+        dataset, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32, ema_alpha=0.05
     )
     state.ema_embed.fill_(1.0)
-    refill_done_slots(state, torch.tensor([True]), cache, generator=gen, dim=32, ema_alpha=0.05)
+    refill_done_slots(state, torch.tensor([True]), dataset, generator=gen, dim=32, ema_alpha=0.05)
     assert state.ema_embed.sum().item() == 0.0

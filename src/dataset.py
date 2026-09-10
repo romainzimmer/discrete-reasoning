@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import torch
 from torch.utils.data import Dataset
 
@@ -27,7 +25,7 @@ def filter_rows(
 
 
 class PuzzleDataset(Dataset):
-    """Clues and answer pairs."""
+    """Clues and answer pairs with cached base tensors for random rollout sampling."""
 
     def __init__(
         self,
@@ -40,6 +38,7 @@ class PuzzleDataset(Dataset):
         augment: bool = False,
         aug_config: AugmentConfig | None = None,
         aug_seed: int | None = None,
+        pin_memory: bool = False,
     ):
         if rows is not None:
             self.rows = rows
@@ -54,6 +53,42 @@ class PuzzleDataset(Dataset):
         self.aug_config = aug_config
         self.aug_seed = aug_seed
         self._epoch = 0
+        self._materialize_base_tensors(pin_memory=pin_memory)
+
+    @classmethod
+    def from_tensors(
+        cls,
+        clues: torch.Tensor,
+        answers: torch.Tensor,
+        *,
+        augment: bool = False,
+        aug_config: AugmentConfig | None = None,
+        aug_seed: int | None = None,
+    ) -> PuzzleDataset:
+        """Test helper: dataset backed by pre-built tensors instead of row strings."""
+        if clues.dim() == 2:
+            clues = clues.unsqueeze(0)
+            answers = answers.unsqueeze(0)
+        n = clues.size(0)
+        placeholder = {"question": "0" * 81, "answer": "1" * 81, "source": "test", "rating": 0}
+        ds = cls.__new__(cls)
+        ds.rows = [placeholder] * n
+        ds.augment = augment
+        ds.aug_config = aug_config
+        ds.aug_seed = aug_seed
+        ds._epoch = 0
+        ds._base_clues = clues
+        ds._base_answers = answers
+        return ds
+
+    def _materialize_base_tensors(self, *, pin_memory: bool = False) -> None:
+        clues = torch.stack([puzzle_to_tensor(row["question"]) for row in self.rows])
+        answers = torch.stack([answer_to_tensor(row["answer"]) for row in self.rows])
+        if pin_memory:
+            clues = clues.pin_memory()
+            answers = answers.pin_memory()
+        self._base_clues = clues
+        self._base_answers = answers
 
     def set_epoch(self, epoch: int) -> None:
         self._epoch = epoch
@@ -68,17 +103,36 @@ class PuzzleDataset(Dataset):
     def __len__(self) -> int:
         return len(self.rows)
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        row = self.rows[idx]
-        clues = puzzle_to_tensor(row["question"])
-        answer = answer_to_tensor(row["answer"])
+    def augment_pair(
+        self,
+        idx: int,
+        clues: torch.Tensor,
+        answer: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.augment and self.aug_config is not None:
-            clues, answer = apply_augment(
+            return apply_augment(
                 clues,
                 answer,
                 self.aug_config,
                 generator=self._aug_generator(idx),
             )
+        return clues, answer
+
+    def sample(self, indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        clues = self._base_clues[indices]
+        answers = self._base_answers[indices]
+        if not self.augment or self.aug_config is None:
+            return clues, answers
+        aug_clues: list[torch.Tensor] = []
+        aug_answers: list[torch.Tensor] = []
+        for offset, idx in enumerate(indices.tolist()):
+            c, a = self.augment_pair(idx, clues[offset], answers[offset])
+            aug_clues.append(c)
+            aug_answers.append(a)
+        return torch.stack(aug_clues), torch.stack(aug_answers)
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        clues, answer = self.augment_pair(idx, self._base_clues[idx], self._base_answers[idx])
         return {
             "clues": clues,
             "answer": answer,
@@ -90,25 +144,3 @@ def collate_puzzles(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Ten
         "clues": torch.stack([item["clues"] for item in batch]),
         "answer": torch.stack([item["answer"] for item in batch]),
     }
-
-
-@dataclass
-class PuzzleTensorCache:
-    clues: torch.Tensor
-    answers: torch.Tensor
-
-    @classmethod
-    def build(cls, dataset: PuzzleDataset, *, pin_memory: bool = False) -> PuzzleTensorCache:
-        clues_list: list[torch.Tensor] = []
-        answers_list: list[torch.Tensor] = []
-        for idx in range(len(dataset)):
-            item = dataset[idx]
-            clues_list.append(item["clues"])
-            answers_list.append(item["answer"])
-        clues = torch.stack(clues_list)
-        answers = torch.stack(answers_list)
-        if pin_memory:
-            clues = clues.pin_memory()
-            answers = answers.pin_memory()
-        return cls(clues=clues, answers=answers)
-

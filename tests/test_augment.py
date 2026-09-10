@@ -163,6 +163,33 @@ class TestApplyAugment:
         ds_b.set_epoch(3)
         assert torch.equal(ds_a[0]["clues"], ds_b[0]["clues"])
 
+    def test_cache_sample_matches_getitem(self) -> None:
+        rows = [_sample_row()]
+        ds = PuzzleDataset(
+            rows=rows,
+            augment=True,
+            aug_config=AugmentConfig(p_digit=1.0, p_rot=1.0, p_band=1.0),
+            aug_seed=7,
+        )
+        ds.set_epoch(2)
+        clues, answers = ds.sample(torch.tensor([0]))
+        assert torch.equal(clues[0], ds[0]["clues"])
+        assert torch.equal(answers[0], ds[0]["answer"])
+
+    def test_cache_sample_varies_by_epoch(self) -> None:
+        rows = [_sample_row()]
+        ds = PuzzleDataset(
+            rows=rows,
+            augment=True,
+            aug_config=AugmentConfig(p_digit=1.0, p_rot=1.0, p_band=1.0),
+            aug_seed=7,
+        )
+        ds.set_epoch(1)
+        clues_one, _ = ds.sample(torch.tensor([0]))
+        ds.set_epoch(2)
+        clues_two, _ = ds.sample(torch.tensor([0]))
+        assert not torch.equal(clues_one, clues_two)
+
 
 class TestEncodingSync:
     def test_clue_cells_match_answer(self) -> None:

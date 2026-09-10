@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from amp import AmpConfig, autocast_context, resolve_amp
 from augment import AugmentConfig
-from dataset import PuzzleDataset, PuzzleTensorCache, collate_puzzles, filter_rows
+from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import MixerNextStateModel
 from ema import DEFAULT_EMA_ALPHA, validate_ema_alpha
 from rollout import (
@@ -384,7 +384,7 @@ def save_checkpoint(
 def train_epoch(
     model: MixerNextStateModel,
     state: BatchSlotState,
-    cache: PuzzleTensorCache,
+    train_ds: PuzzleDataset,
     optimizer: torch.optim.Optimizer,
     *,
     epoch: int,
@@ -431,7 +431,7 @@ def train_epoch(
             refill_done_slots(
                 state,
                 result.done,
-                cache,
+                train_ds,
                 generator=refill_generator,
                 dim=model.dim,
                 ema_alpha=rollout_config.ema_alpha,
@@ -624,6 +624,7 @@ def main() -> None:
         max_samples=args.max_samples,
         seed=args.seed,
     )
+    use_cuda = device.type == "cuda"
     aug_config = AugmentConfig(
         p_digit=args.aug_digit_proba,
         p_rot=args.aug_rot_proba,
@@ -634,12 +635,11 @@ def main() -> None:
         augment=not args.no_augment,
         aug_config=aug_config,
         aug_seed=args.seed,
+        pin_memory=use_cuda,
     )
-    val_ds = PuzzleDataset(rows=val_rows)
+    val_ds = PuzzleDataset(rows=val_rows, pin_memory=use_cuda)
     args.train_samples = len(train_rows)
     args.val_samples_count = len(val_rows)
-
-    use_cuda = device.type == "cuda"
     loader_kwargs = {
         "collate_fn": collate_puzzles,
         "pin_memory": use_cuda,
@@ -713,10 +713,9 @@ def main() -> None:
 
     for epoch in range(1, args.epochs + 1):
         train_ds.set_epoch(epoch)
-        cache = PuzzleTensorCache.build(train_ds, pin_memory=use_cuda)
         if state is None:
             state = BatchSlotState.seed(
-                cache,
+                train_ds,
                 args.train_batch_size,
                 device,
                 generator=refill_generator,
@@ -733,7 +732,7 @@ def main() -> None:
         train = train_epoch(
             model,
             state,
-            cache,
+            train_ds,
             optimizer,
             epoch=epoch,
             epochs=args.epochs,

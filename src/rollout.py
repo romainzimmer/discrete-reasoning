@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from data import tensor_to_string
-from dataset import PuzzleTensorCache
+from dataset import PuzzleDataset
 from amp import LOSS_DTYPE, to_loss_dtype
 from ema import DEFAULT_EMA_ALPHA, ema_update, memory_init, uses_ema, validate_ema_alpha, zero_ema
 from encoding import decode_logits, target_mask
@@ -72,7 +72,7 @@ class BatchSlotState:
     @classmethod
     def seed(
         cls,
-        cache: PuzzleTensorCache,
+        dataset: PuzzleDataset,
         batch_size: int,
         device: torch.device,
         *,
@@ -83,9 +83,10 @@ class BatchSlotState:
         pin_gt: bool = True,
     ) -> BatchSlotState:
         validate_ema_alpha(ema_alpha)
-        idx = torch.randint(cache.clues.size(0), (batch_size,), generator=generator)
-        clues = cache.clues[idx].to(device, non_blocking=True)
-        answers = cache.answers[idx].to(device, non_blocking=True)
+        idx = torch.randint(len(dataset), (batch_size,), generator=generator)
+        clues, answers = dataset.sample(idx)
+        clues = clues.to(device, non_blocking=True)
+        answers = answers.to(device, non_blocking=True)
         clue_pin = clues > 0
         if curriculum_training:
             digit_id, gt_pin = _curriculum_init_digit_id(clues, answers, clue_pin)
@@ -347,7 +348,7 @@ def rollout_train_step(
 def refill_done_slots(
     state: BatchSlotState,
     done: torch.Tensor,
-    cache: PuzzleTensorCache,
+    dataset: PuzzleDataset,
     *,
     generator: torch.Generator,
     dim: int,
@@ -357,9 +358,10 @@ def refill_done_slots(
 ) -> None:
     b = done.size(0)
     device = state.digit_id.device
-    idx = torch.randint(cache.clues.size(0), (b,), generator=generator)
-    new_clues = cache.clues[idx].to(device, non_blocking=True)
-    new_answers = cache.answers[idx].to(device, non_blocking=True)
+    idx = torch.randint(len(dataset), (b,), generator=generator)
+    new_clues, new_answers = dataset.sample(idx)
+    new_clues = new_clues.to(device, non_blocking=True)
+    new_answers = new_answers.to(device, non_blocking=True)
     done_mask = done.view(b, 1, 1)
     new_clue_pin = new_clues > 0
     if curriculum_training:
