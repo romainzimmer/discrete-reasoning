@@ -98,7 +98,7 @@ class BatchSlotState:
                 adaptive=adaptive_curriculum,
             )
         else:
-            digit_id = clues.clone()
+            digit_id = _init_digit_id_from_clues(clues, clue_pin)
             gt_pin = torch.zeros_like(clue_pin)
         pin_ctx = _PinContext.from_state(clues, answers, gt_pin, pin_gt=pin_gt)
         return cls(
@@ -275,6 +275,57 @@ def _begin_outer_step(
     return torch.where(commit_mask, committed, digit_id)
 
 
+def _puzzle_init_seed(clues_row: torch.Tensor, base_seed: int) -> int:
+    mixed = base_seed & 0x7FFFFFFF
+    for value in clues_row.reshape(-1).tolist():
+        mixed = (mixed * 31 + int(value)) & 0x7FFFFFFF
+    return mixed
+
+
+def _random_fill_unpinned(
+    digit_id: torch.Tensor,
+    unpinned: torch.Tensor,
+    *,
+    init_seed: int | None = None,
+) -> torch.Tensor:
+    """Fill unpinned cells with uniform random digits 0-9 (0 = empty)."""
+    if not unpinned.any():
+        return digit_id
+    if init_seed is None:
+        random_digits = torch.randint(
+            0, 10, digit_id.shape, device=digit_id.device, dtype=digit_id.dtype
+        )
+        return torch.where(unpinned, random_digits, digit_id)
+    b = digit_id.size(0)
+    for i in range(b):
+        row_unpinned = unpinned[i]
+        if not row_unpinned.any():
+            continue
+        gen = torch.Generator(device=digit_id.device).manual_seed(
+            _puzzle_init_seed(digit_id[i], init_seed)
+        )
+        random_digits = torch.randint(
+            0,
+            10,
+            digit_id[i].shape,
+            device=digit_id.device,
+            dtype=digit_id.dtype,
+            generator=gen,
+        )
+        digit_id[i] = torch.where(row_unpinned, random_digits, digit_id[i])
+    return digit_id
+
+
+def _init_digit_id_from_clues(
+    clues: torch.Tensor,
+    clue_pin: torch.Tensor,
+    *,
+    init_seed: int | None = None,
+) -> torch.Tensor:
+    """Clues pinned; other cells get random digits 0-9."""
+    return _random_fill_unpinned(clues.clone(), ~clue_pin, init_seed=init_seed)
+
+
 def _curriculum_init_digit_id(
     clues: torch.Tensor,
     answer: torch.Tensor,
@@ -283,7 +334,7 @@ def _curriculum_init_digit_id(
     puzzle_acc: float = 0.0,
     adaptive: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Training-only puzzle entry: partial GT reveal; unrevealed non-clue cells stay empty."""
+    """Training-only puzzle entry: partial GT reveal; unrevealed non-clue cells are random."""
     digit_id = clues.clone()
     non_clue = ~clue_pin
     b, device = clues.size(0), clues.device
@@ -294,6 +345,7 @@ def _curriculum_init_digit_id(
         p_gt = p_gt * upper
     reveal = non_clue & (torch.rand(clues.shape, device=device) < p_gt.view(b, 1, 1))
     digit_id = torch.where(reveal, answer, digit_id)
+    digit_id = _random_fill_unpinned(digit_id, non_clue & ~reveal)
     return digit_id, reveal
 
 
@@ -446,7 +498,7 @@ def refill_done_slots(
             adaptive=adaptive_curriculum,
         )
     else:
-        new_digit_id = new_clues
+        new_digit_id = _init_digit_id_from_clues(new_clues, new_clue_pin)
         new_gt_pin = torch.zeros_like(new_clue_pin)
     state.digit_id = torch.where(done_mask, new_digit_id, state.digit_id)
     state.clues = torch.where(done_mask, new_clues, state.clues)
@@ -512,15 +564,16 @@ def _iter_compact_outer_rollout(
     answer: torch.Tensor,
     *,
     config: RolloutConfig,
+    init_seed: int | None = 0,
 ):
     clues, _ = _ensure_batched(clues)
     answer, _ = _ensure_batched(answer)
     b = clues.size(0)
     device = clues.device
 
-    digit_id = clues.clone()
     clue_pin = clues > 0
     gt_pin = torch.zeros_like(clue_pin)
+    digit_id = _init_digit_id_from_clues(clues, clue_pin, init_seed=init_seed)
 
     slot_idx = torch.arange(b, device=device)
     active_digit_id = digit_id
@@ -598,6 +651,7 @@ def rollout_eval_batch(
     *,
     config: RolloutConfig | None = None,
     halt_loss_weight: float = 1.0,
+    init_seed: int | None = 0,
 ) -> EvalRolloutResult:
     config = config or RolloutConfig()
     clues_b, was_batched = _ensure_batched(clues)
@@ -614,7 +668,9 @@ def rollout_eval_batch(
     halt_correct_rounds = torch.zeros((), device=device, dtype=torch.long)
     halt_total_rounds = 0
 
-    for step in _iter_compact_outer_rollout(model, clues_b, answer_b, config=config):
+    for step in _iter_compact_outer_rollout(
+        model, clues_b, answer_b, config=config, init_seed=init_seed
+    ):
         halt_target_round = _halt_target(step.pre_commit, step.active_answer)
         halt_correct_rounds += (step.predict_halt == (halt_target_round > 0.5)).sum()
         halt_total_rounds += step.pre_commit.size(0)
@@ -669,11 +725,12 @@ def rollout_solve(
     clues: torch.Tensor,
     *,
     config: RolloutConfig | None = None,
+    init_seed: int | None = 0,
 ) -> torch.Tensor:
     config = config or RolloutConfig()
     clues_b, was_batched = _ensure_batched(clues)
     answer = clues_b.clone()
-    result = rollout_eval_batch(model, clues_b, answer, config=config)
+    result = rollout_eval_batch(model, clues_b, answer, config=config, init_seed=init_seed)
     pred = result.pred
     if not was_batched:
         pred = pred.squeeze(0)
@@ -686,6 +743,7 @@ def rollout_trace_batch(
     clues: torch.Tensor,
     *,
     config: RolloutConfig | None = None,
+    init_seed: int | None = 0,
 ) -> list[PuzzleTrace]:
     """Rollout for viz; one frame per outer step: model input + clean prediction."""
     config = config or RolloutConfig()
@@ -698,7 +756,9 @@ def rollout_trace_batch(
     out_halted = torch.zeros(b, dtype=torch.bool, device=device)
     out_steps = torch.zeros(b, dtype=torch.long, device=device)
 
-    for step in _iter_compact_outer_rollout(model, clues, clues, config=config):
+    for step in _iter_compact_outer_rollout(
+        model, clues, clues, config=config, init_seed=init_seed
+    ):
         for local_i, global_i in enumerate(step.slot_idx.tolist()):
             input_frames[global_i].append(tensor_to_string(step.model_input[local_i]))
             pred_frames[global_i].append(tensor_to_string(step.pre_commit[local_i]))
@@ -724,6 +784,7 @@ def rollout_trace(
     clues: torch.Tensor,
     *,
     config: RolloutConfig | None = None,
+    init_seed: int | None = 0,
 ) -> list[str]:
     clues_b, _ = _ensure_batched(clues)
-    return rollout_trace_batch(model, clues_b, config=config)[0].states
+    return rollout_trace_batch(model, clues_b, config=config, init_seed=init_seed)[0].states

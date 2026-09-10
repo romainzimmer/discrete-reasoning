@@ -167,6 +167,7 @@ def test_state_persists_across_epochs():
 def test_clues_init_without_curriculum():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
+    torch.manual_seed(42)
     state = BatchSlotState.seed(
         dataset,
         batch_size=2,
@@ -175,7 +176,8 @@ def test_clues_init_without_curriculum():
         dim=32,
         curriculum_training=False,
     )
-    assert torch.equal(state.digit_id, state.clues)
+    assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
+    assert not torch.equal(state.digit_id[~state.clue_pin], state.clues[~state.clue_pin])
 
 
 def test_halt_target_matches_grid():
@@ -224,7 +226,8 @@ def test_refill_after_done():
     )
     assert not torch.equal(state.clues, original_clues)
     assert state.outer_count.item() == 0
-    assert torch.equal(state.digit_id, state.clues)
+    assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
+    assert not torch.equal(state.digit_id[~state.clue_pin], state.clues[~state.clue_pin])
 
 
 def test_max_outer_forces_refill():
@@ -289,7 +292,7 @@ def test_curriculum_init_gt_reveal():
     assert torch.equal(gt_pin, ~clue_pin)
 
 
-def test_curriculum_init_empty_when_no_reveal():
+def test_curriculum_init_random_when_no_reveal():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
     calls = 0
@@ -303,8 +306,13 @@ def test_curriculum_init_empty_when_no_reveal():
         return torch.zeros(size, device=device)
 
     with patch("rollout.torch.rand", side_effect=_rand):
-        digit_id, gt_pin = _curriculum_init_digit_id(clues, answer, clue_pin)
-    assert torch.equal(digit_id, clues)
+        with patch(
+            "rollout.torch.randint",
+            return_value=torch.full(clues.shape, 7, dtype=clues.dtype),
+        ):
+            digit_id, gt_pin = _curriculum_init_digit_id(clues, answer, clue_pin)
+    assert torch.equal(digit_id[clue_pin], clues[clue_pin])
+    assert torch.equal(digit_id[~clue_pin], torch.full_like(clues, 7)[~clue_pin])
     assert not gt_pin.any()
 
 
@@ -335,19 +343,25 @@ def test_curriculum_refill_fills_cells():
     assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
 
 
-def test_eval_starts_from_clues():
+def test_eval_starts_from_random_non_clue():
     clues, answer = _tiny_batch()
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
+    clue_pin = clues > 0
     with patch("rollout._inner_loop") as mock_inner:
         mock_inner.return_value = (
             torch.zeros(1, 9, 9, 10),
             torch.zeros(1),
             torch.zeros(1, 9, 9, 32),
         )
-        rollout_eval_batch(model, clues, answer, config=_baseline_config(inner_iters=1, max_outer_iters=1))
+        with patch(
+            "rollout.torch.randint",
+            return_value=torch.full(clues.shape, 4, dtype=clues.dtype),
+        ):
+            rollout_eval_batch(model, clues, answer, config=_baseline_config(inner_iters=1, max_outer_iters=1))
     call_digit_id = mock_inner.call_args.args[1]
-    assert torch.equal(call_digit_id, clues)
+    assert torch.equal(call_digit_id[clue_pin], clues[clue_pin])
+    assert torch.equal(call_digit_id[~clue_pin], torch.full_like(clues, 4)[~clue_pin])
 
 
 def test_halt_stops_eval_early():
@@ -1151,7 +1165,8 @@ def test_adaptive_curriculum_full_acc_no_reveal():
     digit_id, gt_pin = _curriculum_init_digit_id(
         clues, answer, clue_pin, puzzle_acc=1.0, adaptive=True
     )
-    assert torch.equal(digit_id, clues)
+    assert torch.equal(digit_id[clue_pin], clues[clue_pin])
+    assert not torch.equal(digit_id[~clue_pin], clues[~clue_pin])
     assert not gt_pin.any()
 
 

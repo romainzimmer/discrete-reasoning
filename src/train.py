@@ -521,6 +521,7 @@ def measure_split(
                 batch["answer"],
                 config=rollout_config,
                 halt_loss_weight=halt_loss_weight,
+                init_seed=seed,
             )
         acc.add_batch(result, batch["answer"], batch["clues"])
     progress.close()
