@@ -385,7 +385,8 @@ def rollout_train_step(
     if state.ema_embed is not None:
         state.ema_embed = ema_update(state.ema_embed, final_cell_embed, config.ema_alpha)
     state.outer_count = state.outer_count + 1
-    done = predict_halt | (state.outer_count >= config.max_outer_iters)
+    solved = halt_target > 0.5
+    done = (predict_halt & solved) | (state.outer_count >= config.max_outer_iters)
     return RolloutResult(
         loss=loss.detach() if backward else loss,
         cell_loss=cell_loss.detach(),

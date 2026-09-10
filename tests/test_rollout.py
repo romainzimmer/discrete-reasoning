@@ -199,6 +199,19 @@ def test_oracle_halt_model_continues():
             assert not result.done.any()
 
 
+def test_wrong_predict_halt_does_not_finish():
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.train()
+    clues, answer = _tiny_batch()
+    state = _make_state(clues, answer)
+    config = _baseline_config(inner_iters=2, max_outer_iters=10)
+    with patch("rollout._predict_halt", return_value=torch.ones(1, dtype=torch.bool)):
+        with patch("rollout._halt_target", return_value=torch.zeros(1)):
+            result = rollout_train_step(model, state, config)
+            assert result.done is not None
+            assert not result.done.any()
+
+
 def test_refill_after_done():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
