@@ -551,7 +551,7 @@ def main() -> None:
         "--transition-noise-prob",
         type=float,
         default=DEFAULT_TRANSITION_NOISE_PROB,
-        help="Per unpinned cell prob of randomizing prev digit before masked transition (0-9 incl. empty)",
+        help="Per unpinned cell prob of randomizing committed digit after masked transition (0-9 incl. empty)",
     )
     parser.add_argument(
         "--ema-alpha",

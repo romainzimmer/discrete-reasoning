@@ -609,8 +609,8 @@ def test_outer_commit_transition_noise():
         patch(
             "rollout.torch.rand",
             side_effect=[
+                torch.tensor([[[0.2] + [1.0] * 8] * 9]),  # transition on [0,0,0] -> 5
                 torch.tensor([[[0.0] + [1.0] * 8] * 9]),  # noise on [0,0,0]
-                torch.tensor([[[0.8] + [0.0] * 8] * 9]),  # no transition on [0,0,0]
             ],
         ),
         patch(

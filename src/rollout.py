@@ -212,22 +212,22 @@ def _commit_candidate(logits: torch.Tensor, ctx: _PinContext) -> torch.Tensor:
     return torch.where(ctx.pin, ctx.pin_digit_ids, decoded)
 
 
-def _noise_prev_digits(
-    prev_digit_id: torch.Tensor,
+def _noise_committed_digits(
+    committed: torch.Tensor,
     ctx: _PinContext,
     *,
     transition_noise_prob: float,
 ) -> torch.Tensor:
-    """Randomly replace unpinned prev cells with digits 0-9 (incl. empty)."""
+    """Randomly replace unpinned committed cells with digits 0-9 (incl. empty)."""
     if transition_noise_prob <= 0.0:
-        return prev_digit_id
+        return committed
     noise_mask = ~ctx.pin & (
-        torch.rand(prev_digit_id.shape, device=prev_digit_id.device) < transition_noise_prob
+        torch.rand(committed.shape, device=committed.device) < transition_noise_prob
     )
     noisy = torch.randint(
-        0, 10, prev_digit_id.shape, device=prev_digit_id.device, dtype=prev_digit_id.dtype
+        0, 10, committed.shape, device=committed.device, dtype=committed.dtype
     )
-    return torch.where(noise_mask, noisy, prev_digit_id)
+    return torch.where(noise_mask, noisy, committed)
 
 
 def _outer_commit(
@@ -239,20 +239,22 @@ def _outer_commit(
     transition_noise_prob: float = DEFAULT_TRANSITION_NOISE_PROB,
     halt: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """prev -> noise -> masked transition; full commit on halt."""
-    noised_prev = _noise_prev_digits(
-        prev_digit_id, ctx, transition_noise_prob=transition_noise_prob
-    )
+    """prev -> masked transition -> noise; full commit on halt."""
     candidate = _commit_candidate(logits, ctx)
     if transition_prob >= 1.0:
-        return candidate
-    transition_mask = ~ctx.pin & (
-        torch.rand(prev_digit_id.shape, device=prev_digit_id.device) < transition_prob
+        committed = candidate
+    else:
+        transition_mask = ~ctx.pin & (
+            torch.rand(prev_digit_id.shape, device=prev_digit_id.device) < transition_prob
+        )
+        partial = torch.where(ctx.pin | transition_mask, candidate, prev_digit_id)
+        if halt is None or not halt.any():
+            committed = partial
+        else:
+            committed = torch.where(halt.view(-1, 1, 1), candidate, partial)
+    return _noise_committed_digits(
+        committed, ctx, transition_noise_prob=transition_noise_prob
     )
-    partial = torch.where(ctx.pin | transition_mask, candidate, noised_prev)
-    if halt is None or not halt.any():
-        return partial
-    return torch.where(halt.view(-1, 1, 1), candidate, partial)
 
 
 def _curriculum_init_digit_id(
