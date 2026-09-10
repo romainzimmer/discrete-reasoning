@@ -90,6 +90,7 @@ def build_rollout_config(
     pin_gt: bool = True,
     deep_supervision: bool = True,
     adaptive_curriculum: bool = True,
+    use_ema: bool = True,
 ) -> RolloutConfig:
     return RolloutConfig(
         inner_iters=inner_iters,
@@ -100,6 +101,7 @@ def build_rollout_config(
         pin_gt=pin_gt,
         deep_supervision=deep_supervision,
         adaptive_curriculum=adaptive_curriculum,
+        use_ema=use_ema,
     )
 
 
@@ -533,7 +535,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train rollout sudoku model")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--weight-decay", type=float, default=1.0, help="L2 regularization on weights only (not bias)")
+    parser.add_argument("--weight-decay", type=float, default=0.01, help="L2 regularization on weights only (not bias)")
     parser.add_argument("--dim", type=int, default=512, help="Embedding / mixer hidden dimension D")
     parser.add_argument("--num-blocks", type=int, default=2, help="Mixer blocks per inner step (layers in M)")
     parser.add_argument(
@@ -619,6 +621,11 @@ def main() -> None:
         action="store_true",
         help="Disable adaptive curriculum (use fixed U[0, 1] for p_gt instead of U[0, 1 - puzzle_acc])",
     )
+    parser.add_argument(
+        "--no-ema",
+        action="store_true",
+        help="Disable outer-loop EMA memory (use current cell_embed only; equivalent to alpha=1)",
+    )
     parser.add_argument("--no-augment", action="store_true", help="Disable training data augmentations")
     parser.add_argument("--aug-digit-proba", type=float, default=0.5)
     parser.add_argument("--aug-rot-proba", type=float, default=0.5)
@@ -694,6 +701,7 @@ def main() -> None:
     pin_gt = not args.no_pin_gt
     adaptive_curriculum = not args.no_adaptive_curriculum
     deep_supervision = not args.no_deep_supervision
+    use_ema = not args.no_ema
     rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.train_max_outer_iters,
@@ -702,12 +710,14 @@ def main() -> None:
         pin_gt=pin_gt,
         deep_supervision=deep_supervision,
         adaptive_curriculum=adaptive_curriculum,
+        use_ema=use_ema,
     )
     eval_rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.eval_max_outer_iters,
         transition_prob=args.transition_prob,
         curriculum_training=False,
+        use_ema=use_ema,
     )
     refill_generator = torch.Generator(device="cpu").manual_seed(args.seed)
     best_val_cell_acc = -1.0
@@ -748,6 +758,7 @@ def main() -> None:
                 pin_gt=rollout_config.pin_gt,
                 adaptive_curriculum=rollout_config.adaptive_curriculum,
                 curriculum_puzzle_acc=rollout_config.curriculum_puzzle_acc,
+                use_ema=rollout_config.use_ema,
             )
 
         profiler = None

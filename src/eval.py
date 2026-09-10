@@ -142,10 +142,12 @@ def main() -> None:
         else float(run_args.get("transition_prob", DEFAULT_TRANSITION_PROB))
     )
     learned_ema_alpha = float(model.ema_alpha().item())
+    use_ema = not bool(run_args.get("no_ema", False))
     rollout_config = build_rollout_config(
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
         transition_prob=transition_prob,
+        use_ema=use_ema,
     )
 
     amp_enabled = bool(run_args.get("amp", True))

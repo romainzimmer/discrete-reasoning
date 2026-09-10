@@ -988,7 +988,7 @@ def test_eval_rollout_reaches_max_outer_iters():
     assert result.outer_steps.item() == 3
 
 
-def test_seed_always_allocates_ema_embed():
+def test_seed_allocates_ema_embed_by_default():
     state = BatchSlotState.seed(
         _tiny_dataset(),
         batch_size=1,
@@ -997,6 +997,18 @@ def test_seed_always_allocates_ema_embed():
         dim=32,
     )
     assert state.ema_embed is not None
+
+
+def test_seed_skips_ema_embed_when_disabled():
+    state = BatchSlotState.seed(
+        _tiny_dataset(),
+        batch_size=1,
+        device=torch.device("cpu"),
+        generator=torch.Generator().manual_seed(0),
+        dim=32,
+        use_ema=False,
+    )
+    assert state.ema_embed is None
 
 
 def test_ema_embed_updated_after_train_step():

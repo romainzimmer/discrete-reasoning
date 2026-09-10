@@ -28,6 +28,7 @@ class RolloutConfig:
     deep_supervision: bool = True
     adaptive_curriculum: bool = True
     curriculum_puzzle_acc: float = 0.0
+    use_ema: bool = True
 
     def __post_init__(self) -> None:
         if self.inner_iters < 1:
@@ -84,6 +85,7 @@ class BatchSlotState:
         pin_gt: bool = True,
         adaptive_curriculum: bool = True,
         curriculum_puzzle_acc: float = 0.0,
+        use_ema: bool = True,
     ) -> BatchSlotState:
         idx = torch.randint(len(dataset), (batch_size,), generator=generator)
         clues, answers = dataset.sample(idx)
@@ -102,7 +104,7 @@ class BatchSlotState:
             digit_id = clues.clone()
             gt_pin = torch.zeros_like(clue_pin)
         pin_ctx = _PinContext.from_state(clues, answers, gt_pin, pin_gt=pin_gt)
-        ema_embed = zero_ema(batch_size, dim, device)
+        ema_embed = zero_ema(batch_size, dim, device) if use_ema else None
         return cls(
             digit_id=digit_id,
             clues=clues,
@@ -548,7 +550,7 @@ def _iter_compact_outer_rollout(
     active_outer_count = torch.zeros(b, dtype=torch.long, device=device)
     active_ctx = _PinContext.from_state(clues, answer, gt_pin)
     active_memory_embed: torch.Tensor | None = None
-    active_ema_embed = zero_ema(b, model.dim, device)
+    active_ema_embed = zero_ema(b, model.dim, device) if config.use_ema else None
     pending_candidate: torch.Tensor | None = None
 
     while slot_idx.numel() > 0:
