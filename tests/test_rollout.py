@@ -12,7 +12,6 @@ from ema import ema_combine
 from rollout import (
     DEFAULT_INNER_ITERS,
     DEFAULT_MAX_OUTER_ITERS,
-    DEFAULT_TRANSITION_NOISE_PROB,
     BatchSlotState,
     RolloutConfig,
     _PinContext,
@@ -41,7 +40,6 @@ def _first_param(model: MixerNextStateModel) -> torch.Tensor:
 
 def _baseline_config(**kwargs) -> RolloutConfig:
     kwargs.setdefault("transition_prob", 1.0)
-    kwargs.setdefault("transition_noise_prob", 0.0)
     return RolloutConfig(**kwargs)
 
 
@@ -117,17 +115,12 @@ def test_rollout_config_validation():
         RolloutConfig(transition_prob=0.0)
     with pytest.raises(ValueError):
         RolloutConfig(transition_prob=1.1)
-    with pytest.raises(ValueError):
-        RolloutConfig(transition_noise_prob=-0.1)
-    with pytest.raises(ValueError):
-        RolloutConfig(transition_noise_prob=1.1)
 
 
 def test_defaults():
     config = RolloutConfig()
     assert config.inner_iters == DEFAULT_INNER_ITERS
     assert config.max_outer_iters == DEFAULT_MAX_OUTER_ITERS
-    assert config.transition_noise_prob == DEFAULT_TRANSITION_NOISE_PROB
     assert config.deep_supervision is True
     assert config.adaptive_curriculum is True
     assert config.curriculum_puzzle_acc == 0.0
@@ -579,9 +572,7 @@ def test_transition_board_matches_full_decode():
     ctx = _PinContext.from_state(prev, prev, gt_pin.unsqueeze(0))
     logits = torch.zeros(1, 9, 9, 10)
     logits[0, 0, 0, 5] = 10.0
-    committed = _transition_from_logits(
-        logits, ctx, prev, transition_prob=1.0, transition_noise_prob=0.0
-    )
+    committed = _transition_from_logits(logits, ctx, prev, transition_prob=1.0)
     assert committed[0, 0, 0] == 5
 
 
@@ -593,9 +584,7 @@ def test_transition_board_pins_gt():
     ctx = _PinContext.from_state(clues, answer, gt_pin)
     logits = torch.zeros(1, 9, 9, 10)
     logits[0, 0, 0, 7] = 10.0
-    committed = _transition_from_logits(
-        logits, ctx, clues, transition_prob=1.0, transition_noise_prob=0.0
-    )
+    committed = _transition_from_logits(logits, ctx, clues, transition_prob=1.0)
     assert committed[0, 0, 0] == 3
 
 
@@ -607,9 +596,7 @@ def test_transition_board_unpins_gt_when_disabled():
     ctx = _PinContext.from_state(clues, answer, gt_pin, pin_gt=False)
     logits = torch.zeros(1, 9, 9, 10)
     logits[0, 0, 0, 7] = 10.0
-    committed = _transition_from_logits(
-        logits, ctx, clues, transition_prob=1.0, transition_noise_prob=0.0
-    )
+    committed = _transition_from_logits(logits, ctx, clues, transition_prob=1.0)
     assert committed[0, 0, 0] == 7
 
 
@@ -627,37 +614,9 @@ def test_transition_board_partial_transition():
         "rollout.torch.rand",
         return_value=torch.tensor([[[0.2, 0.8] + [0.0] * 7] * 9]),
     ):
-        committed = _transition_from_logits(
-            logits, ctx, prev, transition_prob=0.5, transition_noise_prob=0.0
-        )
+        committed = _transition_from_logits(logits, ctx, prev, transition_prob=0.5)
     assert committed[0, 0, 0] == 5
     assert committed[0, 0, 1] == 3
-
-
-def test_transition_board_transition_noise():
-    clues = torch.zeros(1, 9, 9, dtype=torch.long)
-    gt_pin = torch.zeros(1, 9, 9, dtype=torch.bool)
-    prev = clues.clone()
-    ctx = _PinContext.from_state(clues, clues, gt_pin)
-    logits = torch.zeros(1, 9, 9, 10)
-    logits[0, 0, 0, 5] = 10.0
-    with (
-        patch(
-            "rollout.torch.rand",
-            side_effect=[
-                torch.tensor([[[0.2] + [1.0] * 8] * 9]),  # transition on [0,0,0] -> 5
-                torch.tensor([[[0.0] + [1.0] * 8] * 9]),  # noise on [0,0,0]
-            ],
-        ),
-        patch(
-            "rollout.torch.randint",
-            return_value=torch.full((1, 9, 9), 7, dtype=torch.long),
-        ),
-    ):
-        committed = _transition_from_logits(
-            logits, ctx, prev, transition_prob=0.5, transition_noise_prob=0.5
-        )
-    assert committed[0, 0, 0] == 7
 
 
 def test_predict_grid_gt_unpinned():
@@ -983,12 +942,10 @@ def test_build_rollout_config():
         inner_iters=2,
         max_outer_iters=3,
         transition_prob=0.75,
-        transition_noise_prob=0.2,
     )
     assert config.inner_iters == 2
     assert config.max_outer_iters == 3
     assert config.transition_prob == 0.75
-    assert config.transition_noise_prob == 0.2
     assert config.curriculum_training is True
     assert config.pin_gt is True
 

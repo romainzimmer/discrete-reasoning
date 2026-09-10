@@ -15,7 +15,6 @@ from model import MixerNextStateModel
 DEFAULT_INNER_ITERS = 5
 DEFAULT_MAX_OUTER_ITERS = 10
 DEFAULT_TRANSITION_PROB = 0.5
-DEFAULT_TRANSITION_NOISE_PROB = 0.0
 
 
 @dataclass(frozen=True)
@@ -24,7 +23,6 @@ class RolloutConfig:
     max_outer_iters: int = DEFAULT_MAX_OUTER_ITERS
     halt_threshold: float = 0.5
     transition_prob: float = DEFAULT_TRANSITION_PROB
-    transition_noise_prob: float = DEFAULT_TRANSITION_NOISE_PROB
     curriculum_training: bool = True
     pin_gt: bool = True
     deep_supervision: bool = True
@@ -38,8 +36,6 @@ class RolloutConfig:
             raise ValueError("max_outer_iters must be >= 1")
         if not 0.0 < self.transition_prob <= 1.0:
             raise ValueError("transition_prob must be in (0, 1]")
-        if not 0.0 <= self.transition_noise_prob <= 1.0:
-            raise ValueError("transition_noise_prob must be in [0, 1]")
 
 
 @dataclass(frozen=True)
@@ -242,44 +238,21 @@ def _compute_deep_supervision_losses(
     return cell_loss, halt_loss, total_loss
 
 
-def _noise_committed_digits(
-    committed: torch.Tensor,
-    ctx: _PinContext,
-    *,
-    transition_noise_prob: float,
-) -> torch.Tensor:
-    """Randomly replace unpinned committed cells with digits 0-9 (incl. empty)."""
-    if transition_noise_prob <= 0.0:
-        return committed
-    noise_mask = ~ctx.pin & (
-        torch.rand(committed.shape, device=committed.device) < transition_noise_prob
-    )
-    noisy = torch.randint(
-        0, 10, committed.shape, device=committed.device, dtype=committed.dtype
-    )
-    return torch.where(noise_mask, noisy, committed)
-
-
 def _transition_board(
     candidate: torch.Tensor,
     ctx: _PinContext,
     prev_digit_id: torch.Tensor,
     *,
     transition_prob: float,
-    transition_noise_prob: float,
 ) -> torch.Tensor:
-    """Apply masked transition + noise; candidate is clean pred with pins reapplied."""
+    """Apply masked transition; candidate is clean pred with pins reapplied."""
     candidate = torch.where(ctx.pin, ctx.pin_digit_ids, candidate)
     if transition_prob >= 1.0:
-        committed = candidate
-    else:
-        transition_mask = ~ctx.pin & (
-            torch.rand(prev_digit_id.shape, device=prev_digit_id.device) < transition_prob
-        )
-        committed = torch.where(ctx.pin | transition_mask, candidate, prev_digit_id)
-    return _noise_committed_digits(
-        committed, ctx, transition_noise_prob=transition_noise_prob
+        return candidate
+    transition_mask = ~ctx.pin & (
+        torch.rand(prev_digit_id.shape, device=prev_digit_id.device) < transition_prob
     )
+    return torch.where(ctx.pin | transition_mask, candidate, prev_digit_id)
 
 
 def _begin_outer_step(
@@ -289,9 +262,8 @@ def _begin_outer_step(
     pending_candidate: torch.Tensor | None,
     outer_count: torch.Tensor,
     transition_prob: float,
-    transition_noise_prob: float,
 ) -> torch.Tensor:
-    """Apply deferred transition+noise from the prior outer step before inner loop."""
+    """Apply deferred transition from the prior outer step before inner loop."""
     if pending_candidate is None:
         return digit_id
     commit_mask = (outer_count > 0).view(-1, 1, 1)
@@ -302,7 +274,6 @@ def _begin_outer_step(
         pin_ctx,
         digit_id,
         transition_prob=transition_prob,
-        transition_noise_prob=transition_noise_prob,
     )
     return torch.where(commit_mask, committed, digit_id)
 
@@ -392,7 +363,6 @@ def rollout_train_step(
         pending_candidate=state.pending_candidate,
         outer_count=state.outer_count,
         transition_prob=config.transition_prob,
-        transition_noise_prob=config.transition_noise_prob,
     )
     if config.deep_supervision:
         step_outputs, final_cell_embed = _inner_loop(
@@ -589,7 +559,6 @@ def _iter_compact_outer_rollout(
             pending_candidate=_pending_for_active(pending_candidate, slot_idx),
             outer_count=active_outer_count,
             transition_prob=config.transition_prob,
-            transition_noise_prob=config.transition_noise_prob,
         )
         model_input = active_digit_id
         logits, halt_logit, final_cell_embed = _inner_loop(
