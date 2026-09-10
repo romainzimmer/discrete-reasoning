@@ -99,7 +99,7 @@ def main() -> None:
         "--transition-noise-prob",
         type=float,
         default=None,
-        help="Per unpinned committed-cell noise prob after transition (default: from checkpoint, else 0.05)",
+        help="Per unpinned committed-cell noise prob after transition (default: from checkpoint, else 0)",
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducible test metrics")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
