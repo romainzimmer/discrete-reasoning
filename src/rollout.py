@@ -15,6 +15,7 @@ from model import MixerNextStateModel
 DEFAULT_INNER_ITERS = 5
 DEFAULT_MAX_OUTER_ITERS = 10
 DEFAULT_TRANSITION_PROB = 0.5
+DEFAULT_TRANSITION_NOISE_PROB = 0.1
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,7 @@ class RolloutConfig:
     max_outer_iters: int = DEFAULT_MAX_OUTER_ITERS
     halt_threshold: float = 0.5
     transition_prob: float = DEFAULT_TRANSITION_PROB
+    transition_noise_prob: float = DEFAULT_TRANSITION_NOISE_PROB
     ema_alpha: float = DEFAULT_EMA_ALPHA
     curriculum_training: bool = True
     pin_gt: bool = True
@@ -34,6 +36,8 @@ class RolloutConfig:
             raise ValueError("max_outer_iters must be >= 1")
         if not 0.0 < self.transition_prob <= 1.0:
             raise ValueError("transition_prob must be in (0, 1]")
+        if not 0.0 <= self.transition_noise_prob <= 1.0:
+            raise ValueError("transition_noise_prob must be in [0, 1]")
         validate_ema_alpha(self.ema_alpha)
 
 
@@ -208,22 +212,44 @@ def _commit_candidate(logits: torch.Tensor, ctx: _PinContext) -> torch.Tensor:
     return torch.where(ctx.pin, ctx.pin_digit_ids, decoded)
 
 
+def _noise_prev_digits(
+    prev_digit_id: torch.Tensor,
+    ctx: _PinContext,
+    *,
+    transition_noise_prob: float,
+) -> torch.Tensor:
+    """Randomly replace unpinned prev cells with digits 0-9 (incl. empty)."""
+    if transition_noise_prob <= 0.0:
+        return prev_digit_id
+    noise_mask = ~ctx.pin & (
+        torch.rand(prev_digit_id.shape, device=prev_digit_id.device) < transition_noise_prob
+    )
+    noisy = torch.randint(
+        0, 10, prev_digit_id.shape, device=prev_digit_id.device, dtype=prev_digit_id.dtype
+    )
+    return torch.where(noise_mask, noisy, prev_digit_id)
+
+
 def _outer_commit(
     logits: torch.Tensor,
     ctx: _PinContext,
     prev_digit_id: torch.Tensor,
     *,
     transition_prob: float,
+    transition_noise_prob: float = DEFAULT_TRANSITION_NOISE_PROB,
     halt: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Commit decoded digits; partial transitions except on halt (full commit)."""
+    """prev -> noise -> masked transition; full commit on halt."""
+    noised_prev = _noise_prev_digits(
+        prev_digit_id, ctx, transition_noise_prob=transition_noise_prob
+    )
     candidate = _commit_candidate(logits, ctx)
     if transition_prob >= 1.0:
         return candidate
     transition_mask = ~ctx.pin & (
         torch.rand(prev_digit_id.shape, device=prev_digit_id.device) < transition_prob
     )
-    partial = torch.where(ctx.pin | transition_mask, candidate, prev_digit_id)
+    partial = torch.where(ctx.pin | transition_mask, candidate, noised_prev)
     if halt is None or not halt.any():
         return partial
     return torch.where(halt.view(-1, 1, 1), candidate, partial)
@@ -325,6 +351,7 @@ def rollout_train_step(
         state.pin_ctx,
         state.digit_id,
         transition_prob=config.transition_prob,
+        transition_noise_prob=config.transition_noise_prob,
         halt=predict_halt,
     )
     state.memory_embed = memory_init(final_cell_embed)
@@ -452,6 +479,7 @@ def rollout_eval_batch(
             active_ctx,
             active_digit_id,
             transition_prob=config.transition_prob,
+            transition_noise_prob=config.transition_noise_prob,
             halt=predict_halt,
         )
         active_memory_embed = memory_init(final_cell_embed)
@@ -587,6 +615,7 @@ def rollout_trace_batch(
             active_ctx,
             active_digit_id,
             transition_prob=config.transition_prob,
+            transition_noise_prob=config.transition_noise_prob,
             halt=predict_halt,
         )
         active_memory_embed = memory_init(final_cell_embed)

@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
 from model import MixerNextStateModel
 from amp import resolve_amp
-from rollout import DEFAULT_TRANSITION_PROB
+from rollout import DEFAULT_TRANSITION_NOISE_PROB, DEFAULT_TRANSITION_PROB
 from train import EpochStats, build_rollout_config, measure_split, require_run_args
 
 
@@ -27,6 +27,7 @@ def save_test_metrics(
     max_outer_iters: int,
     ema_alpha: float,
     transition_prob: float,
+    transition_noise_prob: float,
 ) -> None:
     history_path = run_dir / "history.json"
     if history_path.exists():
@@ -42,6 +43,7 @@ def save_test_metrics(
         "max_outer_iters": max_outer_iters,
         "ema_alpha": ema_alpha,
         "transition_prob": transition_prob,
+        "transition_noise_prob": transition_noise_prob,
         **asdict(test),
     }
     history_path.write_text(json.dumps(history, indent=2))
@@ -92,6 +94,12 @@ def main() -> None:
         type=float,
         default=None,
         help="Outer commit transition prob (default: from checkpoint, else 0.5)",
+    )
+    parser.add_argument(
+        "--transition-noise-prob",
+        type=float,
+        default=None,
+        help="Per unpinned prev-cell noise prob before transition (default: from checkpoint, else 0.1)",
     )
     parser.add_argument(
         "--ema-alpha",
@@ -147,6 +155,11 @@ def main() -> None:
         if args.transition_prob is not None
         else float(run_args.get("transition_prob", DEFAULT_TRANSITION_PROB))
     )
+    transition_noise_prob = (
+        args.transition_noise_prob
+        if args.transition_noise_prob is not None
+        else float(run_args.get("transition_noise_prob", DEFAULT_TRANSITION_NOISE_PROB))
+    )
     ema_alpha = (
         args.ema_alpha
         if args.ema_alpha is not None
@@ -156,6 +169,7 @@ def main() -> None:
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
         transition_prob=transition_prob,
+        transition_noise_prob=transition_noise_prob,
         ema_alpha=ema_alpha,
     )
 
@@ -187,10 +201,11 @@ def main() -> None:
         max_outer_iters=max_outer_iters,
         ema_alpha=ema_alpha,
         transition_prob=transition_prob,
+        transition_noise_prob=transition_noise_prob,
     )
     print(
         f"test (epoch {epoch}, n={len(test_rows)}, inner={inner_iters}, max_outer={max_outer_iters}, "
-        f"ema={ema_alpha}, transition={transition_prob}): "
+        f"ema={ema_alpha}, transition={transition_prob}, transition_noise={transition_noise_prob}): "
         f"loss={test.loss:.4f} cell_acc={test.cell_acc:.4f} "
         f"cell_loss={test.cell_loss:.4f} halt_loss={test.halt_loss:.4f} "
         f"puzzle_acc={test.puzzle_acc:.4f} halt_rate={test.halt_rate:.4f}",

@@ -20,6 +20,7 @@ from ema import DEFAULT_EMA_ALPHA, validate_ema_alpha
 from rollout import (
     DEFAULT_INNER_ITERS,
     DEFAULT_MAX_OUTER_ITERS,
+    DEFAULT_TRANSITION_NOISE_PROB,
     DEFAULT_TRANSITION_PROB,
     BatchSlotState,
     RolloutConfig,
@@ -61,6 +62,7 @@ def build_rollout_config(
     max_outer_iters: int,
     halt_threshold: float = 0.5,
     transition_prob: float = DEFAULT_TRANSITION_PROB,
+    transition_noise_prob: float = DEFAULT_TRANSITION_NOISE_PROB,
     ema_alpha: float = DEFAULT_EMA_ALPHA,
     curriculum_training: bool = True,
     pin_gt: bool = True,
@@ -70,6 +72,7 @@ def build_rollout_config(
         max_outer_iters=max_outer_iters,
         halt_threshold=halt_threshold,
         transition_prob=transition_prob,
+        transition_noise_prob=transition_noise_prob,
         ema_alpha=ema_alpha,
         curriculum_training=curriculum_training,
         pin_gt=pin_gt,
@@ -545,6 +548,12 @@ def main() -> None:
         help="Per-cell prob of committing decoded digit each outer step (clues/GT pins always commit; 1 = full grid update)",
     )
     parser.add_argument(
+        "--transition-noise-prob",
+        type=float,
+        default=DEFAULT_TRANSITION_NOISE_PROB,
+        help="Per unpinned cell prob of randomizing prev digit before masked transition (0-9 incl. empty)",
+    )
+    parser.add_argument(
         "--ema-alpha",
         type=float,
         default=DEFAULT_EMA_ALPHA,
@@ -675,6 +684,7 @@ def main() -> None:
         inner_iters=args.inner_iters,
         max_outer_iters=args.train_max_outer_iters,
         transition_prob=args.transition_prob,
+        transition_noise_prob=args.transition_noise_prob,
         ema_alpha=args.ema_alpha,
         curriculum_training=curriculum_training,
         pin_gt=pin_gt,
@@ -683,6 +693,7 @@ def main() -> None:
         inner_iters=args.inner_iters,
         max_outer_iters=args.eval_max_outer_iters,
         transition_prob=args.transition_prob,
+        transition_noise_prob=args.transition_noise_prob,
         ema_alpha=args.ema_alpha,
         curriculum_training=False,
     )
