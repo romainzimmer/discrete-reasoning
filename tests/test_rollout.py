@@ -121,7 +121,7 @@ def test_defaults():
     assert config.ema_alpha == DEFAULT_EMA_ALPHA
     assert config.transition_noise_prob == DEFAULT_TRANSITION_NOISE_PROB
     assert config.deep_supervision is False
-    assert config.adaptive_curriculum is False
+    assert config.adaptive_curriculum is True
     assert config.curriculum_puzzle_acc == 0.0
 
 

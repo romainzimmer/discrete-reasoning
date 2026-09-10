@@ -39,6 +39,13 @@ from viz_data import (
 )
 
 DEFAULT_RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
+ADAPTIVE_CURRICULUM_ACC_EMA_ALPHA = 0.5
+
+
+def update_curriculum_puzzle_acc(prev: float, epoch_puzzle_acc: float) -> float:
+    """EMA of done-only train puzzle acc for adaptive curriculum p_gt upper bound."""
+    a = ADAPTIVE_CURRICULUM_ACC_EMA_ALPHA
+    return a * epoch_puzzle_acc + (1.0 - a) * prev
 
 REQUIRED_RUN_ARGS = (
     "model",
@@ -68,7 +75,7 @@ def build_rollout_config(
     curriculum_training: bool = True,
     pin_gt: bool = True,
     deep_supervision: bool = False,
-    adaptive_curriculum: bool = False,
+    adaptive_curriculum: bool = True,
 ) -> RolloutConfig:
     return RolloutConfig(
         inner_iters=inner_iters,
@@ -607,9 +614,9 @@ def main() -> None:
         help="Average cell and halt loss over all inner loop steps (default: final step only)",
     )
     parser.add_argument(
-        "--adaptive-curriculum",
+        "--no-adaptive-curriculum",
         action="store_true",
-        help="Sample curriculum p_gt in U[0, 1 - train puzzle acc] using previous epoch acc",
+        help="Disable adaptive curriculum (use fixed U[0, 1] for p_gt instead of U[0, 1 - puzzle_acc])",
     )
     parser.add_argument("--no-augment", action="store_true", help="Disable training data augmentations")
     parser.add_argument("--aug-digit-proba", type=float, default=0.5)
@@ -696,6 +703,7 @@ def main() -> None:
     )
     curriculum_training = not args.no_curriculum_training
     pin_gt = not args.no_pin_gt
+    adaptive_curriculum = not args.no_adaptive_curriculum
     rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.train_max_outer_iters,
@@ -705,7 +713,7 @@ def main() -> None:
         curriculum_training=curriculum_training,
         pin_gt=pin_gt,
         deep_supervision=args.deep_supervision,
-        adaptive_curriculum=args.adaptive_curriculum,
+        adaptive_curriculum=adaptive_curriculum,
     )
     eval_rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
@@ -775,7 +783,14 @@ def main() -> None:
             profiler=profiler,
             amp=amp,
         )
-        rollout_config = replace(rollout_config, curriculum_puzzle_acc=train.puzzle_acc)
+        if rollout_config.adaptive_curriculum:
+            rollout_config = replace(
+                rollout_config,
+                curriculum_puzzle_acc=update_curriculum_puzzle_acc(
+                    rollout_config.curriculum_puzzle_acc,
+                    train.puzzle_acc,
+                ),
+            )
         val = measure_split(
             model,
             val_loader,

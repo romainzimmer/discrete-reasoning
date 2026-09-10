@@ -16,7 +16,7 @@ Experiments on [sapientinc/sudoku-extreme](https://huggingface.co/datasets/sapie
 - **`--ema-alpha`**: outer-loop `cell_embed` EMA blend in `(0, 1]` (default `0.5`; `1` = no memory)
 - **Curriculum training** (on by default): at training puzzle entry (batch seed and slot refill), sample per-puzzle `p_gt` in `U[0, 1]` and reveal ground-truth on non-clue cells with probability `p_gt`; remaining non-clue cells stay empty. GT-revealed cells are pinned on commit (board stays correct) but are not encoded as clues; loss and halt still require correct model predictions on those cells. Val, test, and viz always start from clues only. Pass **`--no-curriculum-training`** to disable. Pass **`--no-pin-gt`** to keep curriculum init but commit model predictions on GT-revealed cells instead of pinning them.
 - **`--deep-supervision`** (off by default): average cell and halt loss over all inner loop steps during training; halt accuracy and done logic still use the final step. Logged halt loss is step-averaged when enabled.
-- **`--adaptive-curriculum`** (off by default): sample `p_gt` in `U[0, 1 - puzzle_acc]` using done-only train puzzle accuracy from the previous epoch.
+- **Adaptive curriculum** (on by default): sample `p_gt` in `U[0, 1 - acc]` where `acc` is an EMA (α=½) of done-only train puzzle accuracy (starts at 0 → epoch 1 uses `U[0, 1]`). Pass **`--no-adaptive-curriculum`** to use fixed `U[0, 1]` every epoch.
 
 Runs save `args.model: looped-mixer`. Old checkpoints from before this migration cannot be loaded by `eval`.
 
@@ -48,7 +48,7 @@ uv run train \
 # Add --no-curriculum-training to start training puzzles from clues only
 # Add --no-pin-gt to disable GT pinning during rollout (curriculum init unchanged)
 # Add --deep-supervision for per-inner-step cell + halt loss
-# Add --adaptive-curriculum to shrink GT reveal as train puzzle acc rises
+# Add --no-adaptive-curriculum to keep fixed U[0, 1] p_gt every epoch
 uv run python -m http.server 8000
 ```
 

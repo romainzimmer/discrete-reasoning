@@ -29,7 +29,7 @@ class RolloutConfig:
     curriculum_training: bool = True
     pin_gt: bool = True
     deep_supervision: bool = False
-    adaptive_curriculum: bool = False
+    adaptive_curriculum: bool = True
     curriculum_puzzle_acc: float = 0.0
 
     def __post_init__(self) -> None:
@@ -89,7 +89,7 @@ class BatchSlotState:
         ema_alpha: float,
         curriculum_training: bool = True,
         pin_gt: bool = True,
-        adaptive_curriculum: bool = False,
+        adaptive_curriculum: bool = True,
         curriculum_puzzle_acc: float = 0.0,
     ) -> BatchSlotState:
         validate_ema_alpha(ema_alpha)
@@ -477,7 +477,7 @@ def refill_done_slots(
     ema_alpha: float,
     curriculum_training: bool = True,
     pin_gt: bool = True,
-    adaptive_curriculum: bool = False,
+    adaptive_curriculum: bool = True,
     curriculum_puzzle_acc: float = 0.0,
 ) -> None:
     b = done.size(0)

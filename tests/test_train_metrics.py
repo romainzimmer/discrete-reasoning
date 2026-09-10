@@ -4,6 +4,7 @@ import json
 from argparse import Namespace
 from pathlib import Path
 
+import pytest
 import torch
 
 from rollout import BatchSlotState, _PinContext
@@ -12,6 +13,7 @@ from train import (
     EpochStats,
     TrainMetricsAccumulator,
     save_epoch_metrics,
+    update_curriculum_puzzle_acc,
 )
 
 
@@ -121,3 +123,9 @@ def test_save_epoch_metrics_includes_train_acc(tmp_path: Path) -> None:
     epoch = json.loads((run_dir / "history.json").read_text())["epochs"][0]
     assert epoch["train_cell_acc"] == 0.9
     assert epoch["train_puzzle_acc"] == 0.4
+
+
+def test_update_curriculum_puzzle_acc_ema() -> None:
+    assert update_curriculum_puzzle_acc(0.0, 0.0) == 0.0
+    assert update_curriculum_puzzle_acc(0.0, 0.8) == 0.4
+    assert update_curriculum_puzzle_acc(0.4, 0.8) == pytest.approx(0.6)
