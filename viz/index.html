@@ -151,7 +151,7 @@
     }
     .trajectory-layout {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(220px, 0.75fr);
       gap: 1rem;
       align-items: stretch;
     }
@@ -164,8 +164,16 @@
     }
     .trajectory-panel-grid {
       display: flex;
+      flex-direction: column;
       align-items: center;
       justify-content: center;
+      gap: 0.5rem;
+    }
+    .grid-panel-title {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #444;
+      text-align: center;
     }
     .trajectory-panel-controls {
       display: flex;
@@ -355,7 +363,12 @@
     <div class="trajectory-meta" id="trajectoryMeta">Select a puzzle</div>
     <div class="trajectory-layout">
       <div class="trajectory-panel trajectory-panel-grid">
-        <div class="grid" id="grid"></div>
+        <div class="grid-panel-title">Model input</div>
+        <div class="grid" id="inputGrid"></div>
+      </div>
+      <div class="trajectory-panel trajectory-panel-grid">
+        <div class="grid-panel-title">Model output</div>
+        <div class="grid" id="predGrid"></div>
       </div>
       <div class="trajectory-panel trajectory-panel-controls">
         <div class="step-controls">
@@ -825,46 +838,13 @@
       `;
     }
 
-    function renderTrajectory() {
-      const gridEl = document.getElementById("grid");
-      const metaEl = document.getElementById("trajectoryMeta");
-      const stepIndexEl = document.getElementById("stepIndex");
-      const slider = document.getElementById("stepSlider");
+    function trajectoryFrameCount(tr) {
+      const preds = tr.predictions || tr.states || [];
+      const inputs = tr.inputs || preds;
+      return Math.min(inputs.length, preds.length);
+    }
 
-      if (!trajectory) {
-        gridEl.innerHTML = "";
-        metaEl.textContent = "Select a puzzle";
-        stepIndexEl.textContent = "";
-        document.getElementById("stepPlay").disabled = true;
-        return;
-      }
-
-      const clues = parseGrid(trajectory.question);
-      const answer = parseGrid(trajectory.answer);
-      const grid = parseGrid(trajectory.states[stepIdx]);
-      const meta = trajectory.meta || {};
-      const outerSteps = meta.outer_steps ?? Math.max(0, trajectory.states.length - 1);
-      const maxOuter = meta.max_outer_iters ?? metrics?.args?.eval_max_outer_iters ?? "?";
-      const stopLabel = meta.halted === true ? "halt" : meta.halted === false ? "max" : null;
-
-      metaEl.textContent = [
-        meta.rating !== undefined ? `rating ${meta.rating}` : null,
-        meta.source ? `source ${meta.source}` : null,
-        stopLabel
-          ? `outer steps ${outerSteps} / ${maxOuter} (${stopLabel})`
-          : `outer steps ${outerSteps} / ${maxOuter}`,
-      ].filter(Boolean).join(" · ");
-
-      slider.max = trajectory.states.length - 1;
-      slider.value = stepIdx;
-      stepIndexEl.textContent = `step ${stepIdx} / ${outerSteps}`;
-
-      document.getElementById("stepFirst").disabled = stepIdx === 0;
-      document.getElementById("stepPrev").disabled = stepIdx === 0;
-      document.getElementById("stepNext").disabled = stepIdx === trajectory.states.length - 1;
-      document.getElementById("stepLast").disabled = stepIdx === trajectory.states.length - 1;
-      document.getElementById("stepPlay").disabled = trajectory.states.length <= 1;
-
+    function renderSudokuGrid(gridEl, grid, clues, answer) {
       gridEl.innerHTML = "";
       for (let r = 0; r < 9; r++) {
         for (let c = 0; c < 9; c++) {
@@ -887,6 +867,56 @@
       }
     }
 
+    function renderTrajectory() {
+      const inputGridEl = document.getElementById("inputGrid");
+      const predGridEl = document.getElementById("predGrid");
+      const metaEl = document.getElementById("trajectoryMeta");
+      const stepIndexEl = document.getElementById("stepIndex");
+      const slider = document.getElementById("stepSlider");
+
+      if (!trajectory) {
+        inputGridEl.innerHTML = "";
+        predGridEl.innerHTML = "";
+        metaEl.textContent = "Select a puzzle";
+        stepIndexEl.textContent = "";
+        document.getElementById("stepPlay").disabled = true;
+        return;
+      }
+
+      const clues = parseGrid(trajectory.question);
+      const answer = parseGrid(trajectory.answer);
+      const predictions = trajectory.predictions || trajectory.states;
+      const inputs = trajectory.inputs || predictions;
+      const frameCount = trajectoryFrameCount(trajectory);
+      const inputGrid = parseGrid(inputs[stepIdx]);
+      const predGrid = parseGrid(predictions[stepIdx]);
+      const meta = trajectory.meta || {};
+      const outerSteps = meta.outer_steps ?? frameCount;
+      const maxOuter = meta.max_outer_iters ?? metrics?.args?.eval_max_outer_iters ?? "?";
+      const stopLabel = meta.halted === true ? "halt" : meta.halted === false ? "max" : null;
+
+      metaEl.textContent = [
+        meta.rating !== undefined ? `rating ${meta.rating}` : null,
+        meta.source ? `source ${meta.source}` : null,
+        stopLabel
+          ? `outer steps ${outerSteps} / ${maxOuter} (${stopLabel})`
+          : `outer steps ${outerSteps} / ${maxOuter}`,
+      ].filter(Boolean).join(" · ");
+
+      slider.max = frameCount - 1;
+      slider.value = stepIdx;
+      stepIndexEl.textContent = `frame ${stepIdx} / ${Math.max(0, frameCount - 1)}`;
+
+      document.getElementById("stepFirst").disabled = stepIdx === 0;
+      document.getElementById("stepPrev").disabled = stepIdx === 0;
+      document.getElementById("stepNext").disabled = stepIdx === frameCount - 1;
+      document.getElementById("stepLast").disabled = stepIdx === frameCount - 1;
+      document.getElementById("stepPlay").disabled = frameCount <= 1;
+
+      renderSudokuGrid(inputGridEl, inputGrid, clues, answer);
+      renderSudokuGrid(predGridEl, predGrid, clues, answer);
+    }
+
     function fillSelect(select, values, formatter = v => v) {
       select.innerHTML = "";
       for (const value of values) {
@@ -897,7 +927,7 @@
       }
     }
 
-    const MIN_STEP_INTERVAL_MS = 1000 / 3;
+    const MIN_STEP_INTERVAL_MS = 100;
     const MAX_STEP_INTERVAL_MS = 3000;
 
     function getPlayIntervalMs() {
@@ -920,7 +950,7 @@
           stopPlayback();
           return;
         }
-        if (stepIdx >= trajectory.states.length - 1) {
+        if (stepIdx >= trajectoryFrameCount(trajectory) - 1) {
           stopPlayback();
           return;
         }
@@ -933,7 +963,7 @@
         stopPlayback();
         return;
       }
-      if (!trajectory || trajectory.states.length <= 1) return;
+      if (!trajectory || trajectoryFrameCount(trajectory) <= 1) return;
       if (stepIdx >= trajectory.states.length - 1) {
         setStep(0);
       }
@@ -1013,7 +1043,7 @@
     function setStep(idx, { fromPlayback = false } = {}) {
       if (!trajectory) return;
       if (!fromPlayback) stopPlayback();
-      stepIdx = Math.max(0, Math.min(idx, trajectory.states.length - 1));
+      stepIdx = Math.max(0, Math.min(idx, trajectoryFrameCount(trajectory) - 1));
       renderTrajectory();
     }
 
@@ -1071,7 +1101,7 @@
       document.getElementById("stepFirst").onclick = () => setStep(0);
       document.getElementById("stepPrev").onclick = () => setStep(stepIdx - 1);
       document.getElementById("stepNext").onclick = () => setStep(stepIdx + 1);
-      document.getElementById("stepLast").onclick = () => setStep(trajectory ? trajectory.states.length - 1 : 0);
+      document.getElementById("stepLast").onclick = () => setStep(trajectory ? trajectoryFrameCount(trajectory) - 1 : 0);
       document.getElementById("stepPlay").onclick = togglePlayback;
       document.getElementById("speedSlider").oninput = () => {
         if (isPlaying) schedulePlaybackTick();

@@ -18,9 +18,10 @@ from rollout import (
     _compute_cell_loss,
     _halt_target,
     _curriculum_init_digit_id,
+    _commit_candidate,
     _inner_loop,
-    _outer_commit,
     _predict_halt,
+    _transition_board,
     predict_grid,
     refill_done_slots,
     rollout_eval_batch,
@@ -137,8 +138,9 @@ def test_state_persists_across_steps():
     config = _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
     digit_before = state.digit_id.clone()
     rollout_train_step(model, state, config)
+    rollout_train_step(model, state, config)
     assert not torch.equal(state.digit_id, digit_before)
-    assert state.outer_count.item() == 1
+    assert state.outer_count.item() == 2
 
 
 def test_state_persists_across_epochs():
@@ -514,7 +516,7 @@ def test_rollout_trace_frame_count():
     max_outer_iters = 3
     config = _baseline_config(inner_iters=2, max_outer_iters=max_outer_iters)
     grids = rollout_trace(model, clues, config=config)
-    assert 2 <= len(grids) <= max_outer_iters + 1
+    assert 1 <= len(grids) <= max_outer_iters
 
 
 def test_rollout_trace_batch_matches_single():
@@ -536,20 +538,25 @@ def test_rollout_trace_batch_matches_single():
     assert batched[1].states == single_second
 
 
-def test_outer_commit_matches_full_decode():
+def _transition_from_logits(logits, ctx, prev, **kwargs):
+    candidate = _commit_candidate(logits, ctx)
+    return _transition_board(candidate, ctx, prev, **kwargs)
+
+
+def test_transition_board_matches_full_decode():
     clues = torch.zeros(9, 9, dtype=torch.long)
     gt_pin = torch.zeros(9, 9, dtype=torch.bool)
     prev = clues.unsqueeze(0)
     ctx = _PinContext.from_state(prev, prev, gt_pin.unsqueeze(0))
     logits = torch.zeros(1, 9, 9, 10)
     logits[0, 0, 0, 5] = 10.0
-    committed = _outer_commit(
+    committed = _transition_from_logits(
         logits, ctx, prev, transition_prob=1.0, transition_noise_prob=0.0
     )
     assert committed[0, 0, 0] == 5
 
 
-def test_outer_commit_pins_gt():
+def test_transition_board_pins_gt():
     clues = torch.zeros(1, 9, 9, dtype=torch.long)
     answer = torch.full((1, 9, 9), 3)
     gt_pin = torch.zeros(1, 9, 9, dtype=torch.bool)
@@ -557,13 +564,13 @@ def test_outer_commit_pins_gt():
     ctx = _PinContext.from_state(clues, answer, gt_pin)
     logits = torch.zeros(1, 9, 9, 10)
     logits[0, 0, 0, 7] = 10.0
-    committed = _outer_commit(
+    committed = _transition_from_logits(
         logits, ctx, clues, transition_prob=1.0, transition_noise_prob=0.0
     )
     assert committed[0, 0, 0] == 3
 
 
-def test_outer_commit_unpins_gt_when_disabled():
+def test_transition_board_unpins_gt_when_disabled():
     clues = torch.zeros(1, 9, 9, dtype=torch.long)
     answer = torch.full((1, 9, 9), 3)
     gt_pin = torch.zeros(1, 9, 9, dtype=torch.bool)
@@ -571,13 +578,13 @@ def test_outer_commit_unpins_gt_when_disabled():
     ctx = _PinContext.from_state(clues, answer, gt_pin, pin_gt=False)
     logits = torch.zeros(1, 9, 9, 10)
     logits[0, 0, 0, 7] = 10.0
-    committed = _outer_commit(
+    committed = _transition_from_logits(
         logits, ctx, clues, transition_prob=1.0, transition_noise_prob=0.0
     )
     assert committed[0, 0, 0] == 7
 
 
-def test_outer_commit_partial_transition():
+def test_transition_board_partial_transition():
     clues = torch.zeros(1, 9, 9, dtype=torch.long)
     gt_pin = torch.zeros(1, 9, 9, dtype=torch.bool)
     prev = clues.clone()
@@ -591,14 +598,14 @@ def test_outer_commit_partial_transition():
         "rollout.torch.rand",
         return_value=torch.tensor([[[0.2, 0.8] + [0.0] * 7] * 9]),
     ):
-        committed = _outer_commit(
+        committed = _transition_from_logits(
             logits, ctx, prev, transition_prob=0.5, transition_noise_prob=0.0
         )
     assert committed[0, 0, 0] == 5
     assert committed[0, 0, 1] == 3
 
 
-def test_outer_commit_transition_noise():
+def test_transition_board_transition_noise():
     clues = torch.zeros(1, 9, 9, dtype=torch.long)
     gt_pin = torch.zeros(1, 9, 9, dtype=torch.bool)
     prev = clues.clone()
@@ -618,36 +625,10 @@ def test_outer_commit_transition_noise():
             return_value=torch.full((1, 9, 9), 7, dtype=torch.long),
         ),
     ):
-        committed = _outer_commit(
+        committed = _transition_from_logits(
             logits, ctx, prev, transition_prob=0.5, transition_noise_prob=0.5
         )
     assert committed[0, 0, 0] == 7
-
-
-def test_outer_commit_full_on_halt():
-    clues = torch.zeros(1, 9, 9, dtype=torch.long)
-    gt_pin = torch.zeros(1, 9, 9, dtype=torch.bool)
-    prev = clues.clone()
-    prev[0, 0, 0] = 2
-    prev[0, 0, 1] = 3
-    ctx = _PinContext.from_state(clues, clues, gt_pin)
-    logits = torch.zeros(1, 9, 9, 10)
-    logits[0, 0, 0, 5] = 10.0
-    logits[0, 0, 1, 6] = 10.0
-    with patch(
-        "rollout.torch.rand",
-        return_value=torch.tensor([[[0.2, 0.8] + [0.0] * 7] * 9]),
-    ):
-        committed = _outer_commit(
-            logits,
-            ctx,
-            prev,
-            transition_prob=0.5,
-            transition_noise_prob=0.0,
-            halt=torch.tensor([True]),
-        )
-    assert committed[0, 0, 0] == 5
-    assert committed[0, 0, 1] == 6
 
 
 def test_predict_grid_gt_unpinned():
@@ -706,6 +687,7 @@ def test_curriculum_gt_unpinned_after_commit():
         logits[..., 2] = 10.0
         mock_inner.return_value = (logits, torch.zeros(1), torch.zeros(1, 9, 9, 32))
         rollout_train_step(model, state, _baseline_config(pin_gt=False), backward=False)
+        rollout_train_step(model, state, _baseline_config(pin_gt=False), backward=False)
     assert torch.equal(state.digit_id[gt_pin], torch.full_like(state.digit_id[gt_pin], 2))
 
 
@@ -736,13 +718,11 @@ def test_train_step_order_of_ops_with_gt_pin():
         mock_inner.return_value = (logits, torch.zeros(1), torch.zeros(1, 9, 9, 32))
         result = rollout_train_step(model, state, _baseline_config(), backward=False)
     assert result.halt_target is not None
-    assert result.pred_raw is not None
     assert result.pred is not None
     assert result.cell_loss is not None
     assert result.halt_target.item() == 0.0
     assert result.cell_loss.item() > 0.0
     assert torch.equal(state.digit_id[gt_pin], answer[gt_pin])
-    assert not torch.equal(result.pred_raw[gt_pin], state.digit_id[gt_pin])
     assert not torch.equal(result.pred[gt_pin], answer[gt_pin])
 
 
@@ -832,13 +812,15 @@ def test_eval_outer_commit_clue_pin_only():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _tiny_batch()
-    with patch("rollout._outer_commit", wraps=_outer_commit) as mock_commit:
+    from rollout import _transition_board
+
+    with patch("rollout._transition_board", wraps=_transition_board) as mock_commit:
         with patch("rollout._inner_loop") as mock_inner:
             logits = torch.zeros(1, 9, 9, 10)
             logits[..., 1] = 10.0
             mock_inner.return_value = (logits, torch.zeros(1), torch.zeros(1, 9, 9, 32))
             rollout_eval_batch(
-                model, clues, answer, config=_baseline_config(inner_iters=1, max_outer_iters=1)
+                model, clues, answer, config=_baseline_config(inner_iters=1, max_outer_iters=2)
             )
     ctx = mock_commit.call_args[0][1]
     assert torch.equal(ctx.pin, clues > 0)
@@ -856,6 +838,7 @@ def test_mutable_non_gt_cell_overwritable_on_commit():
         logits = torch.zeros(1, 9, 9, 10)
         logits[0, 0, 2, 4] = 10.0
         mock_inner.return_value = (logits, torch.zeros(1), torch.zeros(1, 9, 9, 32))
+        rollout_train_step(model, state, _baseline_config(), backward=False)
         rollout_train_step(model, state, _baseline_config(), backward=False)
     assert state.digit_id[0, 0, 2] == 4
     assert not state.gt_pin[0, 0, 2]
@@ -953,7 +936,8 @@ def test_trace_includes_halt_metadata():
     clues, _ = _tiny_batch()
     config = _baseline_config(inner_iters=2, max_outer_iters=3)
     trace = rollout_trace_batch(model, clues, config=config)[0]
-    assert len(trace.states) == trace.outer_steps + 1
+    assert len(trace.predictions) == trace.outer_steps
+    assert len(trace.inputs) == len(trace.predictions)
     assert isinstance(trace.halted, bool)
     halt_logit = torch.tensor([10.0, -10.0])
     assert torch.equal(_predict_halt(halt_logit, halt_threshold=0.5), torch.tensor([True, False]))

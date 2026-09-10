@@ -57,7 +57,9 @@ def _trajectory_payload(
     return {
         "question": row["question"],
         "answer": row["answer"],
-        "states": trace.states,
+        "inputs": trace.inputs,
+        "predictions": trace.predictions,
+        "states": trace.predictions,
         "meta": {
             "split": split,
             "epoch": epoch,

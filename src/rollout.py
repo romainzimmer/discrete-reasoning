@@ -72,6 +72,7 @@ class BatchSlotState:
     outer_count: torch.Tensor
     memory_embed: torch.Tensor | None = None
     ema_embed: torch.Tensor | None = None
+    pending_candidate: torch.Tensor | None = None
 
     @classmethod
     def seed(
@@ -117,7 +118,6 @@ class RolloutResult:
     cell_loss: torch.Tensor | None = None
     halt_loss: torch.Tensor | None = None
     pred: torch.Tensor | None = None
-    pred_raw: torch.Tensor | None = None
     done: torch.Tensor | None = None
     halted: torch.Tensor | None = None
     halt_target: torch.Tensor | None = None
@@ -140,9 +140,14 @@ class EvalRolloutResult:
 
 @dataclass
 class PuzzleTrace:
-    states: list[str]
+    inputs: list[str]
+    predictions: list[str]
     halted: bool
     outer_steps: int
+
+    @property
+    def states(self) -> list[str]:
+        return self.predictions
 
 
 def predict_grid(logits: torch.Tensor, clues: torch.Tensor) -> torch.Tensor:
@@ -230,31 +235,51 @@ def _noise_committed_digits(
     return torch.where(noise_mask, noisy, committed)
 
 
-def _outer_commit(
-    logits: torch.Tensor,
+def _transition_board(
+    candidate: torch.Tensor,
     ctx: _PinContext,
     prev_digit_id: torch.Tensor,
     *,
     transition_prob: float,
-    transition_noise_prob: float = DEFAULT_TRANSITION_NOISE_PROB,
-    halt: torch.Tensor | None = None,
+    transition_noise_prob: float,
 ) -> torch.Tensor:
-    """prev -> masked transition -> noise; full commit on halt."""
-    candidate = _commit_candidate(logits, ctx)
+    """Apply masked transition + noise; candidate is clean pred with pins reapplied."""
+    candidate = torch.where(ctx.pin, ctx.pin_digit_ids, candidate)
     if transition_prob >= 1.0:
         committed = candidate
     else:
         transition_mask = ~ctx.pin & (
             torch.rand(prev_digit_id.shape, device=prev_digit_id.device) < transition_prob
         )
-        partial = torch.where(ctx.pin | transition_mask, candidate, prev_digit_id)
-        if halt is None or not halt.any():
-            committed = partial
-        else:
-            committed = torch.where(halt.view(-1, 1, 1), candidate, partial)
+        committed = torch.where(ctx.pin | transition_mask, candidate, prev_digit_id)
     return _noise_committed_digits(
         committed, ctx, transition_noise_prob=transition_noise_prob
     )
+
+
+def _begin_outer_step(
+    digit_id: torch.Tensor,
+    pin_ctx: _PinContext,
+    *,
+    pending_candidate: torch.Tensor | None,
+    outer_count: torch.Tensor,
+    transition_prob: float,
+    transition_noise_prob: float,
+) -> torch.Tensor:
+    """Apply deferred transition+noise from the prior outer step before inner loop."""
+    if pending_candidate is None:
+        return digit_id
+    commit_mask = (outer_count > 0).view(-1, 1, 1)
+    if not commit_mask.any():
+        return digit_id
+    committed = _transition_board(
+        pending_candidate,
+        pin_ctx,
+        digit_id,
+        transition_prob=transition_prob,
+        transition_noise_prob=transition_noise_prob,
+    )
+    return torch.where(commit_mask, committed, digit_id)
 
 
 def _curriculum_init_digit_id(
@@ -324,6 +349,14 @@ def rollout_train_step(
 ) -> RolloutResult:
     if not model.training:
         raise ValueError("rollout_train_step requires model.training")
+    state.digit_id = _begin_outer_step(
+        state.digit_id,
+        state.pin_ctx,
+        pending_candidate=state.pending_candidate,
+        outer_count=state.outer_count,
+        transition_prob=config.transition_prob,
+        transition_noise_prob=config.transition_noise_prob,
+    )
     logits, halt_logit, final_cell_embed = _inner_loop(
         model,
         state.digit_id,
@@ -334,7 +367,6 @@ def rollout_train_step(
         ema_alpha=config.ema_alpha,
         with_grad=True,
     )
-    pred_raw = decode_logits(logits)
     pred = predict_grid(logits, state.clues)
     halt_target = _halt_target(pred, state.answer)
     predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
@@ -348,14 +380,7 @@ def rollout_train_step(
     )
     if backward:
         loss.backward()
-    state.digit_id = _outer_commit(
-        logits,
-        state.pin_ctx,
-        state.digit_id,
-        transition_prob=config.transition_prob,
-        transition_noise_prob=config.transition_noise_prob,
-        halt=predict_halt,
-    )
+    state.pending_candidate = pred.detach()
     state.memory_embed = memory_init(final_cell_embed)
     if state.ema_embed is not None:
         state.ema_embed = ema_update(state.ema_embed, final_cell_embed, config.ema_alpha)
@@ -366,7 +391,6 @@ def rollout_train_step(
         cell_loss=cell_loss.detach(),
         halt_loss=halt_loss.detach(),
         pred=pred.detach(),
-        pred_raw=pred_raw.detach(),
         done=done,
         halted=predict_halt,
         halt_target=halt_target.detach(),
@@ -416,6 +440,143 @@ def refill_done_slots(
     if state.ema_embed is not None:
         new_ema = zero_ema(b, dim, device)
         state.ema_embed = torch.where(done_mask_mem, new_ema, state.ema_embed)
+    if done.any() and state.pending_candidate is not None:
+        if done.all():
+            state.pending_candidate = None
+        else:
+            state.pending_candidate = state.pending_candidate.clone()
+            state.pending_candidate[done] = 0
+
+
+def _pending_for_active(
+    pending_candidate: torch.Tensor | None,
+    slot_idx: torch.Tensor,
+) -> torch.Tensor | None:
+    if pending_candidate is None:
+        return None
+    return pending_candidate[slot_idx]
+
+
+def _store_pending_candidate(
+    pending_candidate: torch.Tensor | None,
+    slot_idx: torch.Tensor,
+    pre_commit: torch.Tensor,
+    *,
+    batch_size: int,
+    like: torch.Tensor,
+) -> torch.Tensor:
+    if pending_candidate is None:
+        pending_candidate = like.new_zeros((batch_size, 9, 9))
+    pending_candidate[slot_idx] = pre_commit
+    return pending_candidate
+
+
+@dataclass
+class _CompactOuterStep:
+    slot_idx: torch.Tensor
+    model_input: torch.Tensor
+    pre_commit: torch.Tensor
+    predict_halt: torch.Tensor
+    logits: torch.Tensor
+    halt_logit: torch.Tensor
+    active_digit_id: torch.Tensor
+    active_outer_count: torch.Tensor
+    active_answer: torch.Tensor
+    done: torch.Tensor
+
+
+def _iter_compact_outer_rollout(
+    model: MixerNextStateModel,
+    clues: torch.Tensor,
+    answer: torch.Tensor,
+    *,
+    config: RolloutConfig,
+):
+    clues, _ = _ensure_batched(clues)
+    answer, _ = _ensure_batched(answer)
+    b = clues.size(0)
+    device = clues.device
+
+    digit_id = clues.clone()
+    clue_pin = clues > 0
+    gt_pin = torch.zeros_like(clue_pin)
+
+    slot_idx = torch.arange(b, device=device)
+    active_digit_id = digit_id
+    active_clues = clues
+    active_answer = answer
+    active_clue_pin = clue_pin
+    active_outer_count = torch.zeros(b, dtype=torch.long, device=device)
+    active_ctx = _PinContext.from_state(clues, answer, gt_pin)
+    active_memory_embed: torch.Tensor | None = None
+    active_ema_embed = (
+        zero_ema(b, model.dim, device) if uses_ema(config.ema_alpha) else None
+    )
+    pending_candidate: torch.Tensor | None = None
+
+    while slot_idx.numel() > 0:
+        active_gt_pin = gt_pin[slot_idx]
+        active_digit_id = _begin_outer_step(
+            active_digit_id,
+            active_ctx,
+            pending_candidate=_pending_for_active(pending_candidate, slot_idx),
+            outer_count=active_outer_count,
+            transition_prob=config.transition_prob,
+            transition_noise_prob=config.transition_noise_prob,
+        )
+        model_input = active_digit_id
+        logits, halt_logit, final_cell_embed = _inner_loop(
+            model,
+            active_digit_id,
+            active_clue_pin,
+            config.inner_iters,
+            memory_embed=active_memory_embed,
+            ema_embed=active_ema_embed,
+            ema_alpha=config.ema_alpha,
+            with_grad=False,
+        )
+        pre_commit = predict_grid(logits, active_clues)
+        predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
+        pending_candidate = _store_pending_candidate(
+            pending_candidate,
+            slot_idx,
+            pre_commit,
+            batch_size=b,
+            like=digit_id,
+        )
+        active_memory_embed = memory_init(final_cell_embed)
+        if active_ema_embed is not None:
+            active_ema_embed = ema_update(active_ema_embed, final_cell_embed, config.ema_alpha)
+        active_outer_count = active_outer_count + 1
+        done = predict_halt | (active_outer_count >= config.max_outer_iters)
+
+        yield _CompactOuterStep(
+            slot_idx=slot_idx,
+            model_input=model_input,
+            pre_commit=pre_commit,
+            predict_halt=predict_halt,
+            logits=logits,
+            halt_logit=halt_logit,
+            active_digit_id=active_digit_id,
+            active_outer_count=active_outer_count,
+            active_answer=active_answer,
+            done=done,
+        )
+
+        keep = ~done
+        if not keep.any():
+            break
+        slot_idx = slot_idx[keep]
+        active_digit_id = active_digit_id[keep]
+        active_clues = active_clues[keep]
+        active_answer = active_answer[keep]
+        active_clue_pin = active_clue_pin[keep]
+        active_gt_pin = active_gt_pin[keep]
+        active_outer_count = active_outer_count[keep]
+        active_memory_embed = active_memory_embed[keep] if active_memory_embed is not None else None
+        if active_ema_embed is not None:
+            active_ema_embed = active_ema_embed[keep]
+        active_ctx = _PinContext.from_state(active_clues, active_answer, active_gt_pin)
 
 
 @torch.inference_mode()
@@ -432,84 +593,26 @@ def rollout_eval_batch(
     answer_b, _ = _ensure_batched(answer)
     b = clues_b.size(0)
     device = clues_b.device
-
-    digit_id = clues_b.clone()
     clue_pin = clues_b > 0
-    gt_pin = torch.zeros_like(clue_pin)
-    ctx = _PinContext.from_state(clues_b, answer_b, gt_pin)
-    outer_count = torch.zeros(b, dtype=torch.long, device=device)
 
-    out_pred = digit_id.clone()
+    out_pred = clues_b.clone()
     out_steps = torch.zeros(b, dtype=torch.long, device=device)
     out_halted = torch.zeros(b, dtype=torch.bool, device=device)
-    final_logits = digit_id.new_zeros((b, 9, 9, 10), dtype=LOSS_DTYPE)
-    final_halt_logit = digit_id.new_zeros((b,), dtype=LOSS_DTYPE)
-
-    slot_idx = torch.arange(b, device=device)
-    active_digit_id = digit_id
-    active_clues = clues_b
-    active_answer = answer_b
-    active_clue_pin = clue_pin
-    active_outer_count = outer_count
-    active_ctx = ctx
-    active_memory_embed: torch.Tensor | None = None
-    active_ema_embed = (
-        zero_ema(b, model.dim, device) if uses_ema(config.ema_alpha) else None
-    )
+    final_logits = clues_b.new_zeros((b, 9, 9, 10), dtype=LOSS_DTYPE)
+    final_halt_logit = clues_b.new_zeros((b,), dtype=LOSS_DTYPE)
     halt_correct_rounds = torch.zeros((), device=device, dtype=torch.long)
     halt_total_rounds = 0
 
-    while slot_idx.numel() > 0:
-        active_gt_pin = gt_pin[slot_idx]
-        logits, halt_logit, final_cell_embed = _inner_loop(
-            model,
-            active_digit_id,
-            active_clue_pin,
-            config.inner_iters,
-            memory_embed=active_memory_embed,
-            ema_embed=active_ema_embed,
-            ema_alpha=config.ema_alpha,
-            with_grad=False,
-        )
-        pre_commit = predict_grid(logits, active_clues)
-        halt_target_round = _halt_target(pre_commit, active_answer)
-        predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
-        halt_correct_rounds += (predict_halt == (halt_target_round > 0.5)).sum()
-        halt_total_rounds += pre_commit.size(0)
-        committed = _outer_commit(
-            logits,
-            active_ctx,
-            active_digit_id,
-            transition_prob=config.transition_prob,
-            transition_noise_prob=config.transition_noise_prob,
-            halt=predict_halt,
-        )
-        active_memory_embed = memory_init(final_cell_embed)
-        if active_ema_embed is not None:
-            active_ema_embed = ema_update(active_ema_embed, final_cell_embed, config.ema_alpha)
-        active_outer_count = active_outer_count + 1
-        done = predict_halt | (active_outer_count >= config.max_outer_iters)
-
-        final_logits[slot_idx] = to_loss_dtype(logits)
-        final_halt_logit[slot_idx] = to_loss_dtype(halt_logit)
-
-        done_idx = slot_idx[done]
-        out_pred[done_idx] = committed[done]
-        out_steps[done_idx] = active_outer_count[done]
-        out_halted[done_idx] = predict_halt[done]
-
-        keep = ~done
-        slot_idx = slot_idx[keep]
-        active_digit_id = committed[keep]
-        active_clues = active_clues[keep]
-        active_answer = active_answer[keep]
-        active_clue_pin = active_clue_pin[keep]
-        active_gt_pin = active_gt_pin[keep]
-        active_outer_count = active_outer_count[keep]
-        active_memory_embed = active_memory_embed[keep] if active_memory_embed is not None else None
-        if active_ema_embed is not None:
-            active_ema_embed = active_ema_embed[keep]
-        active_ctx = _PinContext.from_state(active_clues, active_answer, active_gt_pin)
+    for step in _iter_compact_outer_rollout(model, clues_b, answer_b, config=config):
+        halt_target_round = _halt_target(step.pre_commit, step.active_answer)
+        halt_correct_rounds += (step.predict_halt == (halt_target_round > 0.5)).sum()
+        halt_total_rounds += step.pre_commit.size(0)
+        final_logits[step.slot_idx] = to_loss_dtype(step.logits)
+        final_halt_logit[step.slot_idx] = to_loss_dtype(step.halt_logit)
+        done_idx = step.slot_idx[step.done]
+        out_pred[done_idx] = step.pre_commit[step.done]
+        out_steps[done_idx] = step.active_outer_count[step.done]
+        out_halted[done_idx] = step.predict_halt[step.done]
 
     pre_commit_final = predict_grid(final_logits, clues_b)
     halt_target = _halt_target(pre_commit_final, answer_b)
@@ -573,84 +676,30 @@ def rollout_trace_batch(
     *,
     config: RolloutConfig | None = None,
 ) -> list[PuzzleTrace]:
-    """Rollout for viz; one frame per outer argmax commit, per puzzle."""
+    """Rollout for viz; one frame per outer step: model input + clean prediction."""
     config = config or RolloutConfig()
     clues, _ = _ensure_batched(clues)
     b = clues.size(0)
     device = clues.device
 
-    digit_id = clues.clone()
-    clue_pin = clues > 0
-    gt_pin = torch.zeros_like(clue_pin)
-    ctx = _PinContext.from_state(clues, clues, gt_pin)
-    outer_count = torch.zeros(b, dtype=torch.long, device=device)
-    trajectories: list[list[str]] = [[tensor_to_string(clues[i])] for i in range(b)]
+    input_frames: list[list[str]] = [[] for _ in range(b)]
+    pred_frames: list[list[str]] = [[] for _ in range(b)]
     out_halted = torch.zeros(b, dtype=torch.bool, device=device)
     out_steps = torch.zeros(b, dtype=torch.long, device=device)
 
-    slot_idx = torch.arange(b, device=device)
-    active_digit_id = digit_id
-    active_clues = clues
-    active_clue_pin = clue_pin
-    active_gt_pin = gt_pin
-    active_outer_count = outer_count
-    active_ctx = ctx
-    active_memory_embed: torch.Tensor | None = None
-    active_ema_embed = (
-        zero_ema(b, model.dim, device) if uses_ema(config.ema_alpha) else None
-    )
-
-    while slot_idx.numel() > 0:
-        logits, halt_logit, final_cell_embed = _inner_loop(
-            model,
-            active_digit_id,
-            active_clue_pin,
-            config.inner_iters,
-            memory_embed=active_memory_embed,
-            ema_embed=active_ema_embed,
-            ema_alpha=config.ema_alpha,
-            with_grad=False,
-        )
-        predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
-        committed = _outer_commit(
-            logits,
-            active_ctx,
-            active_digit_id,
-            transition_prob=config.transition_prob,
-            transition_noise_prob=config.transition_noise_prob,
-            halt=predict_halt,
-        )
-        active_memory_embed = memory_init(final_cell_embed)
-        if active_ema_embed is not None:
-            active_ema_embed = ema_update(active_ema_embed, final_cell_embed, config.ema_alpha)
-        active_outer_count = active_outer_count + 1
-        done = predict_halt | (active_outer_count >= config.max_outer_iters)
-
-        for local_i, global_i in enumerate(slot_idx.tolist()):
-            trajectories[global_i].append(tensor_to_string(committed[local_i]))
-
-        if done.any():
-            done_idx = slot_idx[done]
-            out_halted[done_idx] = predict_halt[done]
-            out_steps[done_idx] = active_outer_count[done]
-
-        keep = ~done
-        if not keep.any():
-            break
-        slot_idx = slot_idx[keep]
-        active_digit_id = committed[keep]
-        active_clues = active_clues[keep]
-        active_clue_pin = active_clue_pin[keep]
-        active_gt_pin = active_gt_pin[keep]
-        active_outer_count = active_outer_count[keep]
-        active_memory_embed = active_memory_embed[keep] if active_memory_embed is not None else None
-        if active_ema_embed is not None:
-            active_ema_embed = active_ema_embed[keep]
-        active_ctx = _PinContext.from_state(active_clues, active_clues, active_gt_pin)
+    for step in _iter_compact_outer_rollout(model, clues, clues, config=config):
+        for local_i, global_i in enumerate(step.slot_idx.tolist()):
+            input_frames[global_i].append(tensor_to_string(step.model_input[local_i]))
+            pred_frames[global_i].append(tensor_to_string(step.pre_commit[local_i]))
+        if step.done.any():
+            done_idx = step.slot_idx[step.done]
+            out_halted[done_idx] = step.predict_halt[step.done]
+            out_steps[done_idx] = step.active_outer_count[step.done]
 
     return [
         PuzzleTrace(
-            states=trajectories[i],
+            inputs=input_frames[i],
+            predictions=pred_frames[i],
             halted=bool(out_halted[i].item()),
             outer_steps=int(out_steps[i].item()),
         )

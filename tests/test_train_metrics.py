@@ -36,7 +36,6 @@ def test_accumulate_step_metrics_from_training_logits() -> None:
     result = RolloutResult(
         loss=torch.tensor(1.0),
         pred=pred,
-        pred_raw=pred,
         done=torch.tensor([True]),
         halted=torch.tensor([False]),
         halt_target=torch.tensor([0.0]),
@@ -63,13 +62,13 @@ def test_accumulate_step_metrics_from_training_logits() -> None:
     stats = acc.finalize()
     assert int(acc.total_cells.item()) == 81 - 1
     assert int(acc.correct_cells.item()) == int(
-        (result.pred_raw[0][clues == 0] == answer[clues == 0]).sum()
+        (result.pred[0][clues == 0] == answer[clues == 0]).sum()
     )
     assert stats.completions_per_epoch == 1
     assert int(acc.correct_puzzles_done.item()) == int((result.pred[0] == answer).all())
 
 
-def test_accumulate_step_uses_pred_raw_with_gt_pin() -> None:
+def test_accumulate_step_uses_pred_with_clue_mask() -> None:
     from rollout import RolloutResult
 
     clues = torch.zeros(9, 9, dtype=torch.long)
@@ -80,13 +79,11 @@ def test_accumulate_step_uses_pred_raw_with_gt_pin() -> None:
     clue_pin = clues_b > 0
     gt_pin = torch.zeros_like(clue_pin)
     gt_pin[0, 0, 1] = True
-    pred_raw = torch.full((1, 9, 9), 2)
-    pred = pred_raw.clone()
+    pred = torch.full((1, 9, 9), 2)
     pred[0, 0, 0] = 5
     result = RolloutResult(
         loss=torch.tensor(1.0),
         pred=pred,
-        pred_raw=pred_raw,
         done=torch.tensor([True]),
         halted=torch.tensor([False]),
         halt_target=torch.tensor([0.0]),
@@ -103,8 +100,8 @@ def test_accumulate_step_uses_pred_raw_with_gt_pin() -> None:
     )
     acc = TrainMetricsAccumulator.empty(torch.device("cpu"))
     acc.add_step(result, state)
-    mask = (answer_b > 0) & ~clue_pin
-    expected_correct = int((pred_raw[mask] == answer_b[mask]).sum())
+    mask = clues == 0
+    expected_correct = int((pred[0][mask] == answer[mask]).sum())
     assert int(acc.correct_cells.item()) == expected_correct
     assert int(acc.total_cells.item()) == int(mask.sum())
     assert int(acc.correct_puzzles_done.item()) == 0

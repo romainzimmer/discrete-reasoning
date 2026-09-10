@@ -15,6 +15,7 @@ from tqdm import tqdm
 from amp import AmpConfig, autocast_context, resolve_amp
 from augment import AugmentConfig
 from dataset import PuzzleDataset, collate_puzzles, filter_rows
+from encoding import cell_acc_mask
 from model import MixerNextStateModel
 from ema import DEFAULT_EMA_ALPHA, validate_ema_alpha
 from rollout import (
@@ -151,9 +152,8 @@ class TrainMetricsAccumulator:
         self.halt_correct += (result.halted == (result.halt_target > 0.5)).sum()
         self.halt_total += b
 
-        assert result.pred_raw is not None
-        mask = (state.answer > 0) & ~state.clue_pin
-        self.correct_cells += (result.pred_raw[mask] == state.answer[mask]).sum()
+        mask = cell_acc_mask(state.clues)
+        self.correct_cells += (result.pred[mask] == state.answer[mask]).sum()
         self.total_cells += mask.sum()
 
         puzzle_ok = (result.pred == state.answer).all(dim=(-2, -1))
@@ -243,7 +243,7 @@ class EvalMetricsAccumulator:
         preds = result.pred.unsqueeze(0) if result.pred.dim() == 2 else result.pred
         answers = answer.unsqueeze(0) if answer.dim() == 2 else answer
         clue_rows = clues.unsqueeze(0) if clues.dim() == 2 else clues
-        mask = clue_rows == 0
+        mask = cell_acc_mask(clue_rows)
         self.correct_cells += (preds[mask] == answers[mask]).sum()
         self.total_cells += mask.sum()
         self.correct_puzzles += (preds == answers).all(dim=(-2, -1)).sum()
