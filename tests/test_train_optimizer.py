@@ -16,13 +16,11 @@ def test_optimizer_param_groups_split_decay_and_no_decay() -> None:
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if name.endswith(".bias") or name == "ema_alpha_logit":
+        if name.endswith(".bias"):
             assert id(param) in no_decay_ids
             assert id(param) not in decay_ids
         else:
             assert id(param) in decay_ids
             assert id(param) not in no_decay_ids
 
-    assert "ema_alpha_logit" in dict(model.named_parameters())
-    assert id(model.ema_alpha_logit) in no_decay_ids
     assert id(model.encoder.digit_embed.weight) in decay_ids

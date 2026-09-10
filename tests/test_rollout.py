@@ -8,7 +8,6 @@ import torch
 from dataset import PuzzleDataset
 from encoding import decode_logits
 from model import MixerNextStateModel
-from ema import ema_combine
 from rollout import (
     DEFAULT_INNER_ITERS,
     DEFAULT_MAX_OUTER_ITERS,
@@ -41,10 +40,6 @@ def _first_param(model: MixerNextStateModel) -> torch.Tensor:
 def _baseline_config(**kwargs) -> RolloutConfig:
     kwargs.setdefault("transition_prob", 1.0)
     return RolloutConfig(**kwargs)
-
-
-def _set_model_ema_alpha(model: MixerNextStateModel, alpha: float) -> None:
-    model.ema_alpha_logit.data.fill_(float(torch.logit(torch.tensor(alpha))))
 
 
 def _deep_supervision_inner_return(
@@ -734,7 +729,6 @@ def test_gt_pin_not_in_encode_clue_pin():
             clue_pin,
             1,
             memory_embed=None,
-            ema_embed=None,
         )
     passed_clue_pin = mock_encode.call_args[0][1]
     assert torch.equal(passed_clue_pin, clue_pin)
@@ -988,30 +982,7 @@ def test_eval_rollout_reaches_max_outer_iters():
     assert result.outer_steps.item() == 3
 
 
-def test_seed_allocates_ema_embed_by_default():
-    state = BatchSlotState.seed(
-        _tiny_dataset(),
-        batch_size=1,
-        device=torch.device("cpu"),
-        generator=torch.Generator().manual_seed(0),
-        dim=32,
-    )
-    assert state.ema_embed is not None
-
-
-def test_seed_skips_ema_embed_when_disabled():
-    state = BatchSlotState.seed(
-        _tiny_dataset(),
-        batch_size=1,
-        device=torch.device("cpu"),
-        generator=torch.Generator().manual_seed(0),
-        dim=32,
-        use_ema=False,
-    )
-    assert state.ema_embed is None
-
-
-def test_ema_embed_updated_after_train_step():
+def test_train_step_stores_memory_embed():
     clues, answer = _tiny_batch()
     state = BatchSlotState.seed(
         _tiny_dataset(),
@@ -1022,28 +993,6 @@ def test_ema_embed_updated_after_train_step():
     )
     config = RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
     model = MixerNextStateModel(dim=32, num_blocks=1)
-    _set_model_ema_alpha(model, 0.05)
-    model.train()
-    rollout_train_step(model, state, config)
-    assert state.ema_embed is not None
-    assert not state.ema_embed.requires_grad
-    assert state.ema_embed.abs().sum().item() > 0
-
-
-def test_ema_end_of_inner_matches_stored_ema():
-    clues, answer = _tiny_batch()
-    ema_alpha = 0.05
-    state = BatchSlotState.seed(
-        _tiny_dataset(),
-        batch_size=1,
-        device=torch.device("cpu"),
-        generator=torch.Generator().manual_seed(0),
-        dim=32,
-    )
-    ema_before = state.ema_embed.clone()
-    config = RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
-    model = MixerNextStateModel(dim=32, num_blocks=1)
-    _set_model_ema_alpha(model, ema_alpha)
     model.train()
     with patch("rollout._inner_loop") as mock_inner:
         final_cell = torch.randn(1, 9, 9, 32)
@@ -1051,8 +1000,9 @@ def test_ema_end_of_inner_matches_stored_ema():
             torch.zeros(1, 9, 9, 10), torch.zeros(1), final_cell
         )
         rollout_train_step(model, state, config, backward=False)
-    expected = ema_combine(final_cell, ema_before, ema_alpha)
-    assert torch.allclose(state.ema_embed, expected)
+    assert state.memory_embed is not None
+    assert not state.memory_embed.requires_grad
+    assert torch.allclose(state.memory_embed, final_cell.detach())
 
 
 def test_refill_zeros_memory_embed():
@@ -1065,17 +1015,6 @@ def test_refill_zeros_memory_embed():
     refill_done_slots(state, torch.tensor([True]), dataset, generator=gen, dim=32)
     assert state.memory_embed is not None
     assert state.memory_embed.sum().item() == 0.0
-
-
-def test_refill_zeros_ema_embed():
-    dataset = _tiny_dataset()
-    gen = torch.Generator().manual_seed(0)
-    state = BatchSlotState.seed(
-        dataset, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32,
-    )
-    state.ema_embed.fill_(1.0)
-    refill_done_slots(state, torch.tensor([True]), dataset, generator=gen, dim=32)
-    assert state.ema_embed.sum().item() == 0.0
 
 
 def test_deep_supervision_affects_loss():

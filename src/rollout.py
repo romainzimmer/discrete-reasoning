@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from data import tensor_to_string
 from dataset import PuzzleDataset
 from amp import LOSS_DTYPE, to_loss_dtype
-from ema import ema_update, memory_init, zero_ema
+from memory import memory_init, zero_memory
 from encoding import decode_logits, target_mask
 from model import MixerNextStateModel
 
@@ -28,7 +28,6 @@ class RolloutConfig:
     deep_supervision: bool = True
     adaptive_curriculum: bool = True
     curriculum_puzzle_acc: float = 0.0
-    use_ema: bool = True
 
     def __post_init__(self) -> None:
         if self.inner_iters < 1:
@@ -69,7 +68,6 @@ class BatchSlotState:
     pin_ctx: _PinContext
     outer_count: torch.Tensor
     memory_embed: torch.Tensor | None = None
-    ema_embed: torch.Tensor | None = None
     pending_candidate: torch.Tensor | None = None
 
     @classmethod
@@ -85,7 +83,6 @@ class BatchSlotState:
         pin_gt: bool = True,
         adaptive_curriculum: bool = True,
         curriculum_puzzle_acc: float = 0.0,
-        use_ema: bool = True,
     ) -> BatchSlotState:
         idx = torch.randint(len(dataset), (batch_size,), generator=generator)
         clues, answers = dataset.sample(idx)
@@ -104,7 +101,6 @@ class BatchSlotState:
             digit_id = clues.clone()
             gt_pin = torch.zeros_like(clue_pin)
         pin_ctx = _PinContext.from_state(clues, answers, gt_pin, pin_gt=pin_gt)
-        ema_embed = zero_ema(batch_size, dim, device) if use_ema else None
         return cls(
             digit_id=digit_id,
             clues=clues,
@@ -113,7 +109,6 @@ class BatchSlotState:
             gt_pin=gt_pin,
             pin_ctx=pin_ctx,
             outer_count=torch.zeros(batch_size, dtype=torch.long, device=device),
-            ema_embed=ema_embed,
         )
 
 
@@ -309,7 +304,6 @@ def _inner_loop(
     inner_iters: int,
     *,
     memory_embed: torch.Tensor | None,
-    ema_embed: torch.Tensor | None,
     with_grad: bool = False,
     collect_steps: bool = False,
 ) -> (
@@ -320,21 +314,18 @@ def _inner_loop(
     cell_embed: torch.Tensor | None = memory_embed
     logits: torch.Tensor | None = None
     halt_logit: torch.Tensor | None = None
-    loop_ema = ema_embed
     step_outputs: list[tuple[torch.Tensor, torch.Tensor]] | None = [] if collect_steps else None
     for _ in range(inner_iters):
         if with_grad:
             out = model(
                 input_embed=input_embed,
                 cell_embed=cell_embed,
-                ema_embed=loop_ema,
             )
         else:
             with torch.no_grad():
                 out = model(
                     input_embed=input_embed,
                     cell_embed=cell_embed,
-                    ema_embed=loop_ema,
                 )
         logits = out.logits
         halt_logit = out.halt_logit
@@ -373,7 +364,6 @@ def rollout_train_step(
             state.clue_pin,
             config.inner_iters,
             memory_embed=state.memory_embed,
-            ema_embed=state.ema_embed,
             with_grad=True,
             collect_steps=True,
         )
@@ -392,7 +382,6 @@ def rollout_train_step(
             state.clue_pin,
             config.inner_iters,
             memory_embed=state.memory_embed,
-            ema_embed=state.ema_embed,
             with_grad=True,
         )
         pred = predict_grid(logits, state.clues)
@@ -413,12 +402,6 @@ def rollout_train_step(
         loss.backward()
     state.pending_candidate = pred.detach()
     state.memory_embed = memory_init(final_cell_embed)
-    if state.ema_embed is not None:
-        state.ema_embed = ema_update(
-            state.ema_embed,
-            final_cell_embed,
-            float(model.ema_alpha().detach().item()),
-        )
     state.outer_count = state.outer_count + 1
     solved = halt_target > 0.5
     done = (predict_halt & solved) | (state.outer_count >= config.max_outer_iters)
@@ -476,11 +459,8 @@ def refill_done_slots(
     state.outer_count = torch.where(done, torch.zeros_like(state.outer_count), state.outer_count)
     done_mask_mem = done.view(b, 1, 1, 1)
     if state.memory_embed is not None:
-        new_memory = zero_ema(b, dim, device)
+        new_memory = zero_memory(b, dim, device)
         state.memory_embed = torch.where(done_mask_mem, new_memory, state.memory_embed)
-    if state.ema_embed is not None:
-        new_ema = zero_ema(b, dim, device)
-        state.ema_embed = torch.where(done_mask_mem, new_ema, state.ema_embed)
     if done.any() and state.pending_candidate is not None:
         if done.all():
             state.pending_candidate = None
@@ -550,7 +530,6 @@ def _iter_compact_outer_rollout(
     active_outer_count = torch.zeros(b, dtype=torch.long, device=device)
     active_ctx = _PinContext.from_state(clues, answer, gt_pin)
     active_memory_embed: torch.Tensor | None = None
-    active_ema_embed = zero_ema(b, model.dim, device) if config.use_ema else None
     pending_candidate: torch.Tensor | None = None
 
     while slot_idx.numel() > 0:
@@ -569,7 +548,6 @@ def _iter_compact_outer_rollout(
             active_clue_pin,
             config.inner_iters,
             memory_embed=active_memory_embed,
-            ema_embed=active_ema_embed,
             with_grad=False,
         )
         pre_commit = predict_grid(logits, active_clues)
@@ -582,12 +560,6 @@ def _iter_compact_outer_rollout(
             like=digit_id,
         )
         active_memory_embed = memory_init(final_cell_embed)
-        if active_ema_embed is not None:
-            active_ema_embed = ema_update(
-                active_ema_embed,
-                final_cell_embed,
-                float(model.ema_alpha().detach().item()),
-            )
         active_outer_count = active_outer_count + 1
         done = predict_halt | (active_outer_count >= config.max_outer_iters)
 
@@ -615,8 +587,6 @@ def _iter_compact_outer_rollout(
         active_gt_pin = active_gt_pin[keep]
         active_outer_count = active_outer_count[keep]
         active_memory_embed = active_memory_embed[keep] if active_memory_embed is not None else None
-        if active_ema_embed is not None:
-            active_ema_embed = active_ema_embed[keep]
         active_ctx = _PinContext.from_state(active_clues, active_answer, active_gt_pin)
 
 

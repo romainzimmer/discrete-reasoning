@@ -344,14 +344,6 @@
         <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
       </div>
     </div>
-    <div class="chart">
-      <div class="chart-title">Learned EMA α</div>
-      <canvas id="emaAlphaChart"></canvas>
-      <div class="axis-x-label">epoch</div>
-      <div class="legend" id="emaAlphaLegend">
-        <div class="legend-item"><span class="dot" style="background:#7c3aed"></span> learned</div>
-      </div>
-    </div>
     </div>
   </div>
 
@@ -479,7 +471,6 @@
       "no_pin_gt",
       "no_deep_supervision",
       "no_adaptive_curriculum",
-      "no_ema",
       "epochs",
       "train_batch_size",
       "batches_per_epoch",
@@ -823,12 +814,6 @@
         formatY: v => Number(v).toFixed(0),
       });
       renderTrainOnlyLegend("completionsLegend", epochs, "completions_per_epoch");
-      drawSeries(document.getElementById("emaAlphaChart"), scalarSeries(epochs, "ema_alpha"), {
-        yMin: 0,
-        yMax: 1,
-        xLabels,
-        formatY: v => Number(v).toFixed(3),
-      });
       renderAccLegend("cellAccLegend", epochs, "cell_acc");
       renderAccLegend("puzzleAccLegend", epochs, "puzzle_acc");
     }

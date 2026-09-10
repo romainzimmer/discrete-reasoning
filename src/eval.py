@@ -25,7 +25,6 @@ def save_test_metrics(
     max_rating: int | None,
     inner_iters: int,
     max_outer_iters: int,
-    learned_ema_alpha: float,
     transition_prob: float,
 ) -> None:
     history_path = run_dir / "history.json"
@@ -40,7 +39,6 @@ def save_test_metrics(
         "max_rating": max_rating,
         "inner_iters": inner_iters,
         "max_outer_iters": max_outer_iters,
-        "learned_ema_alpha": learned_ema_alpha,
         "transition_prob": transition_prob,
         **asdict(test),
     }
@@ -141,13 +139,10 @@ def main() -> None:
         if args.transition_prob is not None
         else float(run_args.get("transition_prob", DEFAULT_TRANSITION_PROB))
     )
-    learned_ema_alpha = float(model.ema_alpha().item())
-    use_ema = not bool(run_args.get("no_ema", False))
     rollout_config = build_rollout_config(
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
         transition_prob=transition_prob,
-        use_ema=use_ema,
     )
 
     amp_enabled = bool(run_args.get("amp", True))
@@ -176,12 +171,11 @@ def main() -> None:
         max_rating=args.max_rating,
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
-        learned_ema_alpha=learned_ema_alpha,
         transition_prob=transition_prob,
     )
     print(
         f"test (epoch {epoch}, n={len(test_rows)}, inner={inner_iters}, max_outer={max_outer_iters}, "
-        f"ema={learned_ema_alpha:.4f}, transition={transition_prob}): "
+        f"transition={transition_prob}): "
         f"loss={test.loss:.4f} cell_acc={test.cell_acc:.4f} "
         f"cell_loss={test.cell_loss:.4f} halt_loss={test.halt_loss:.4f} "
         f"puzzle_acc={test.puzzle_acc:.4f} halt_rate={test.halt_rate:.4f}",

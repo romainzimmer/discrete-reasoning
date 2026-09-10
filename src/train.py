@@ -49,7 +49,7 @@ def optimizer_param_groups(
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if name.endswith(".bias") or name == "ema_alpha_logit":
+        if name.endswith(".bias"):
             no_decay_params.append(param)
         else:
             decay_params.append(param)
@@ -90,7 +90,6 @@ def build_rollout_config(
     pin_gt: bool = True,
     deep_supervision: bool = True,
     adaptive_curriculum: bool = True,
-    use_ema: bool = True,
 ) -> RolloutConfig:
     return RolloutConfig(
         inner_iters=inner_iters,
@@ -101,7 +100,6 @@ def build_rollout_config(
         pin_gt=pin_gt,
         deep_supervision=deep_supervision,
         adaptive_curriculum=adaptive_curriculum,
-        use_ema=use_ema,
     )
 
 
@@ -360,7 +358,6 @@ def save_epoch_metrics(
     train: TrainEpochStats,
     val: EpochStats,
     args: argparse.Namespace,
-    ema_alpha: float,
 ) -> None:
     history_path = run_dir / "history.json"
     if history_path.exists():
@@ -373,7 +370,6 @@ def save_epoch_metrics(
     history["epochs"].append(
         {
             "epoch": epoch,
-            "ema_alpha": ema_alpha,
             **{f"train_{k}": v for k, v in asdict(train).items()},
             **{f"val_{k}": v for k, v in asdict(val).items()},
         }
@@ -621,11 +617,6 @@ def main() -> None:
         action="store_true",
         help="Disable adaptive curriculum (use fixed U[0, 1] for p_gt instead of U[0, 1 - puzzle_acc])",
     )
-    parser.add_argument(
-        "--no-ema",
-        action="store_true",
-        help="Disable outer-loop EMA memory (use current cell_embed only; equivalent to alpha=1)",
-    )
     parser.add_argument("--no-augment", action="store_true", help="Disable training data augmentations")
     parser.add_argument("--aug-digit-proba", type=float, default=0.5)
     parser.add_argument("--aug-rot-proba", type=float, default=0.5)
@@ -701,7 +692,6 @@ def main() -> None:
     pin_gt = not args.no_pin_gt
     adaptive_curriculum = not args.no_adaptive_curriculum
     deep_supervision = not args.no_deep_supervision
-    use_ema = not args.no_ema
     rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.train_max_outer_iters,
@@ -710,14 +700,12 @@ def main() -> None:
         pin_gt=pin_gt,
         deep_supervision=deep_supervision,
         adaptive_curriculum=adaptive_curriculum,
-        use_ema=use_ema,
     )
     eval_rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.eval_max_outer_iters,
         transition_prob=args.transition_prob,
         curriculum_training=False,
-        use_ema=use_ema,
     )
     refill_generator = torch.Generator(device="cpu").manual_seed(args.seed)
     best_val_cell_acc = -1.0
@@ -758,7 +746,6 @@ def main() -> None:
                 pin_gt=rollout_config.pin_gt,
                 adaptive_curriculum=rollout_config.adaptive_curriculum,
                 curriculum_puzzle_acc=rollout_config.curriculum_puzzle_acc,
-                use_ema=rollout_config.use_ema,
             )
 
         profiler = None
@@ -830,14 +817,12 @@ def main() -> None:
         if val.cell_acc > best_val_cell_acc:
             best_val_cell_acc = val.cell_acc
             save_checkpoint(run_dir / "best.pt", **ckpt_kwargs)
-        ema_alpha = float(model.ema_alpha().item())
         save_epoch_metrics(
             run_dir,
             epoch=epoch,
             train=train,
             val=val,
             args=args,
-            ema_alpha=ema_alpha,
         )
         train_msg = (
             f"train_loss={train.loss:.4f} train_cell_loss={train.cell_loss:.4f} "
@@ -850,7 +835,7 @@ def main() -> None:
             f"{train_msg} val_loss={val.loss:.4f} val_cell_loss={val.cell_loss:.4f} "
             f"val_halt_loss={val.halt_loss:.4f} val_halt_acc={val.halt_acc:.4f} "
             f"val_cell_acc={val.cell_acc:.4f} val_puzzle_acc={val.puzzle_acc:.4f} "
-            f"val_halt_rate={val.halt_rate:.4f} ema_alpha={ema_alpha:.4f}",
+            f"val_halt_rate={val.halt_rate:.4f}",
             flush=True,
         )
 

@@ -119,12 +119,10 @@ def test_save_epoch_metrics_includes_train_acc(tmp_path: Path) -> None:
         train=TrainEpochStats(loss=1.25, cell_acc=0.9, puzzle_acc=0.4, halt_acc=0.5),
         val=EpochStats(loss=2.0, cell_acc=0.5, puzzle_acc=0.1, halt_acc=0.6),
         args=args,
-        ema_alpha=0.5,
     )
     epoch = json.loads((run_dir / "history.json").read_text())["epochs"][0]
     assert epoch["train_cell_acc"] == 0.9
     assert epoch["train_puzzle_acc"] == 0.4
-    assert epoch["ema_alpha"] == 0.5
 
 
 def test_update_curriculum_puzzle_acc_ema() -> None:

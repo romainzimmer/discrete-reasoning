@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import torch
 
-from ema import ema_combine, ema_update
 from encoding import NUM_VOCAB, decode_logits, target_mask
 from model import MixerNextStateModel, _swiglu_hidden_dim
 from rollout import predict_grid
@@ -23,8 +22,8 @@ def test_h_plus_p_forward():
     digit_id = torch.randint(0, 10, (1, 9, 9))
     clue_pin = (digit_id > 0).long()
     p = model.encode_input(digit_id, clue_pin)
-    out0 = model(input_embed=p, cell_embed=None, ema_embed=None)
-    out1 = model(input_embed=p, cell_embed=out0.cell_embed, ema_embed=None)
+    out0 = model(input_embed=p, cell_embed=None)
+    out1 = model(input_embed=p, cell_embed=out0.cell_embed)
     assert out0.logits.shape == (1, 9, 9, NUM_VOCAB)
     assert out0.halt_logit.shape == (1,)
     assert not torch.allclose(out0.logits, out1.logits)
@@ -68,27 +67,10 @@ def test_encode_decode_round_trip_pins_clues():
     logits = model(
         input_embed=model.encode_input(digit_id, clue_pin),
         cell_embed=None,
-        ema_embed=None,
     ).logits
     pred = predict_grid(logits, clues)
     assert pred[0, 0, 0] == 7
     assert pred.shape == (1, 9, 9)
-
-
-def test_forward_ema_embed_changes_output():
-    model = MixerNextStateModel(dim=16, num_blocks=1)
-    digit_id = torch.randint(0, 10, (1, 9, 9))
-    clue_pin = (digit_id > 0).long()
-    p = model.encode_input(digit_id, clue_pin)
-    ema = torch.randn(1, 9, 9, 16)
-    out_base = model(input_embed=p, cell_embed=None, ema_embed=ema)
-    out_new = model(input_embed=p, cell_embed=None, ema_embed=ema * 2.0)
-    assert not torch.allclose(out_base.logits, out_new.logits)
-
-
-def test_learned_ema_alpha_init():
-    model = MixerNextStateModel(dim=16, num_blocks=1)
-    assert torch.allclose(model.ema_alpha(), torch.tensor(0.5))
 
 
 def test_halt_readout_uses_halt_branch():
@@ -96,7 +78,7 @@ def test_halt_readout_uses_halt_branch():
     digit_id = torch.randint(0, 10, (1, 9, 9))
     clue_pin = (digit_id > 0).long()
     p = model.encode_input(digit_id, clue_pin)
-    out = model(input_embed=p, cell_embed=None, ema_embed=None)
+    out = model(input_embed=p, cell_embed=None)
     z = p
     for block in model.blocks:
         z = block(z)
@@ -111,11 +93,10 @@ def test_dual_readout_carry_uses_memory_branch():
     digit_id = torch.randint(0, 10, (1, 9, 9))
     clue_pin = (digit_id > 0).long()
     p = model.encode_input(digit_id, clue_pin)
-    out0 = model(input_embed=p, cell_embed=None, ema_embed=None)
+    out0 = model(input_embed=p, cell_embed=None)
     out_memory_carry = model(
         input_embed=p,
         cell_embed=out0.cell_embed,
-        ema_embed=None,
     )
     z = p
     for block in model.blocks:
@@ -123,15 +104,5 @@ def test_dual_readout_carry_uses_memory_branch():
     out_raw_carry = model(
         input_embed=p,
         cell_embed=z.view(1, 9, 9, 16),
-        ema_embed=None,
     )
     assert not torch.allclose(out_memory_carry.logits, out_raw_carry.logits)
-
-
-def test_ema_end_of_inner_matches_update():
-    alpha = 0.05
-    ema_h = torch.randn(1, 9, 9, 16)
-    h_final = torch.randn(1, 9, 9, 16)
-    combined = ema_combine(h_final, ema_h, alpha)
-    updated = ema_update(ema_h, h_final, alpha)
-    assert torch.allclose(combined, updated)

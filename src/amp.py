@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 
-# Losses and cross-step state (EMA) stay in fp32 under autocast for stability.
+# Losses and cross-step memory stay in fp32 under autocast for stability.
 LOSS_DTYPE = torch.float32
 STORAGE_DTYPE = torch.float32
 
