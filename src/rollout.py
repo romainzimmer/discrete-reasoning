@@ -212,11 +212,6 @@ def _compute_losses(
     return cell_loss, halt_loss, total_loss
 
 
-def _commit_candidate(logits: torch.Tensor, ctx: _PinContext) -> torch.Tensor:
-    decoded = decode_logits(logits).detach()
-    return torch.where(ctx.pin, ctx.pin_digit_ids, decoded)
-
-
 def _noise_committed_digits(
     committed: torch.Tensor,
     ctx: _PinContext,

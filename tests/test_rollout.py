@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from dataset import PuzzleDataset
+from encoding import decode_logits
 from model import MixerNextStateModel
 from ema import DEFAULT_EMA_ALPHA, ema_combine
 from rollout import (
@@ -18,7 +19,6 @@ from rollout import (
     _compute_cell_loss,
     _halt_target,
     _curriculum_init_digit_id,
-    _commit_candidate,
     _inner_loop,
     _predict_halt,
     _transition_board,
@@ -552,7 +552,8 @@ def test_rollout_trace_batch_matches_single():
 
 
 def _transition_from_logits(logits, ctx, prev, **kwargs):
-    candidate = _commit_candidate(logits, ctx)
+    decoded = decode_logits(logits)
+    candidate = torch.where(ctx.pin, ctx.pin_digit_ids, decoded)
     return _transition_board(candidate, ctx, prev, **kwargs)
 
 
