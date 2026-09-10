@@ -637,7 +637,8 @@ def main() -> None:
         aug_seed=args.seed,
         pin_memory=use_cuda,
     )
-    val_ds = PuzzleDataset(rows=val_rows, pin_memory=use_cuda)
+    # Val uses DataLoader workers; do not pin base tensors (fork + pinned memory segfaults on Jetson).
+    val_ds = PuzzleDataset(rows=val_rows)
     args.train_samples = len(train_rows)
     args.val_samples_count = len(val_rows)
     loader_kwargs = {

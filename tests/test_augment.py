@@ -163,7 +163,7 @@ class TestApplyAugment:
         ds_b.set_epoch(3)
         assert torch.equal(ds_a[0]["clues"], ds_b[0]["clues"])
 
-    def test_cache_sample_matches_getitem(self) -> None:
+    def test_sample_varies_on_resample_same_idx(self) -> None:
         rows = [_sample_row()]
         ds = PuzzleDataset(
             rows=rows,
@@ -172,9 +172,33 @@ class TestApplyAugment:
             aug_seed=7,
         )
         ds.set_epoch(2)
-        clues, answers = ds.sample(torch.tensor([0]))
-        assert torch.equal(clues[0], ds[0]["clues"])
-        assert torch.equal(answers[0], ds[0]["answer"])
+        clues_one, _ = ds.sample(torch.tensor([0]))
+        clues_two, _ = ds.sample(torch.tensor([0]))
+        assert not torch.equal(clues_one, clues_two)
+
+    def test_sample_resample_is_reproducible(self) -> None:
+        rows = [_sample_row()]
+        ds_a = PuzzleDataset(
+            rows=rows,
+            augment=True,
+            aug_config=AugmentConfig(p_digit=1.0, p_rot=1.0, p_band=1.0),
+            aug_seed=7,
+        )
+        ds_b = PuzzleDataset(
+            rows=rows,
+            augment=True,
+            aug_config=AugmentConfig(p_digit=1.0, p_rot=1.0, p_band=1.0),
+            aug_seed=7,
+        )
+        ds_a.set_epoch(2)
+        ds_b.set_epoch(2)
+        clues_a1, _ = ds_a.sample(torch.tensor([0]))
+        clues_a2, _ = ds_a.sample(torch.tensor([0]))
+        clues_b1, _ = ds_b.sample(torch.tensor([0]))
+        clues_b2, _ = ds_b.sample(torch.tensor([0]))
+        assert torch.equal(clues_a1, clues_b1)
+        assert torch.equal(clues_a2, clues_b2)
+        assert not torch.equal(clues_a1, clues_a2)
 
     def test_cache_sample_varies_by_epoch(self) -> None:
         rows = [_sample_row()]

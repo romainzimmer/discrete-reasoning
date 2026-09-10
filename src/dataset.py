@@ -53,6 +53,7 @@ class PuzzleDataset(Dataset):
         self.aug_config = aug_config
         self.aug_seed = aug_seed
         self._epoch = 0
+        self._sample_counter = 0
         self._materialize_base_tensors(pin_memory=pin_memory)
 
     @classmethod
@@ -77,6 +78,7 @@ class PuzzleDataset(Dataset):
         ds.aug_config = aug_config
         ds.aug_seed = aug_seed
         ds._epoch = 0
+        ds._sample_counter = 0
         ds._base_clues = clues
         ds._base_answers = answers
         return ds
@@ -84,6 +86,7 @@ class PuzzleDataset(Dataset):
     def _materialize_base_tensors(self, *, pin_memory: bool = False) -> None:
         clues = torch.stack([puzzle_to_tensor(row["question"]) for row in self.rows])
         answers = torch.stack([answer_to_tensor(row["answer"]) for row in self.rows])
+        # Only for main-process sampling (train refill). Unsafe with DataLoader workers.
         if pin_memory:
             clues = clues.pin_memory()
             answers = answers.pin_memory()
@@ -92,12 +95,21 @@ class PuzzleDataset(Dataset):
 
     def set_epoch(self, epoch: int) -> None:
         self._epoch = epoch
+        self._sample_counter = 0
 
     def _aug_generator(self, idx: int) -> torch.Generator | None:
         if self.aug_seed is None:
             return None
-        # Vary augmentations across epochs while keeping them deterministic per (epoch, idx).
+        # Fixed per (epoch, idx) for DataLoader __getitem__ paths.
         seed = self.aug_seed + self._epoch * len(self.rows) + idx
+        return torch.Generator().manual_seed(seed)
+
+    def _sample_aug_generator(self, idx: int) -> torch.Generator | None:
+        if self.aug_seed is None:
+            return None
+        n = len(self.rows)
+        seed = self.aug_seed + self._epoch * n + idx + self._sample_counter * (n + 1)
+        self._sample_counter += 1
         return torch.Generator().manual_seed(seed)
 
     def __len__(self) -> int:
@@ -118,6 +130,21 @@ class PuzzleDataset(Dataset):
             )
         return clues, answer
 
+    def _sample_augment_pair(
+        self,
+        idx: int,
+        clues: torch.Tensor,
+        answer: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.augment and self.aug_config is not None:
+            return apply_augment(
+                clues,
+                answer,
+                self.aug_config,
+                generator=self._sample_aug_generator(idx),
+            )
+        return clues, answer
+
     def sample(self, indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         clues = self._base_clues[indices]
         answers = self._base_answers[indices]
@@ -126,7 +153,7 @@ class PuzzleDataset(Dataset):
         aug_clues: list[torch.Tensor] = []
         aug_answers: list[torch.Tensor] = []
         for offset, idx in enumerate(indices.tolist()):
-            c, a = self.augment_pair(idx, clues[offset], answers[offset])
+            c, a = self._sample_augment_pair(idx, clues[offset], answers[offset])
             aug_clues.append(c)
             aug_answers.append(a)
         return torch.stack(aug_clues), torch.stack(aug_answers)
