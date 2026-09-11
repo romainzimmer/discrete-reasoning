@@ -59,7 +59,7 @@ Writes `data/train.csv` and `data/test.csv` (~798 MB).
 Main run (looped-mixer; reduce `--train-batch-size` if OOM):
 
 ```bash
-docker compose run --rm train   --epochs 1000   --dim 256   --num-blocks 2   --train-batch-size 128 --val-batch-size 256   --num-workers 3   --val-samples 512   --max-samples 100000   --inner-iters 3   --train-max-outer-iters 30   --eval-max-outer-iters 30 --batches-per-epoch 100
+docker compose run --rm train --epochs 1000 --dim 256 --num-blocks 2 --train-batch-size 256 --num-workers 3 --max-samples 100000 --val-samples 512 --inner-iters 3 --train-max-outer-iters 30 --eval-max-outer-iters 30 --batches-per-epoch 300
 ```
 
 Quick test (easy sudoku, ~1k train cap):
@@ -67,15 +67,15 @@ Quick test (easy sudoku, ~1k train cap):
 ```bash
 docker compose run --rm train \
   --epochs 5 \
-  --dim 512 \
+  --dim 256 \
   --num-blocks 2 \
-  --inner-iters 2 \
+  --inner-iters 3 \
   --train-max-outer-iters 3 \
   --eval-max-outer-iters 3 \
   --train-batch-size 64 \
   --batches-per-epoch 50 \
   --num-workers 1 \
-  --max-samples 6464 \
+  --max-samples 5000 \
   --min-rating 0 \
   --max-rating 0 \
   --val-samples 64

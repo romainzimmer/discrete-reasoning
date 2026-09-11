@@ -533,7 +533,7 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01, help="L2 regularization on weights only (not bias)")
-    parser.add_argument("--dim", type=int, default=512, help="Embedding / mixer hidden dimension D")
+    parser.add_argument("--dim", type=int, default=256, help="Embedding / mixer hidden dimension D")
     parser.add_argument("--num-blocks", type=int, default=2, help="Mixer blocks per inner step (layers in M)")
     parser.add_argument(
         "--inner-iters",
@@ -553,7 +553,7 @@ def main() -> None:
         default=DEFAULT_MAX_OUTER_ITERS,
         help="Max outer commits per puzzle during val/viz/test",
     )
-    parser.add_argument("--train-batch-size", type=int, default=8, help="Parallel GPU slots (B)")
+    parser.add_argument("--train-batch-size", type=int, default=128, help="Parallel GPU slots (B)")
     parser.add_argument(
         "--batches-per-epoch",
         type=int,
@@ -569,7 +569,7 @@ def main() -> None:
     parser.add_argument(
         "--val-batch-size",
         type=int,
-        default=None,
+        default=128,
         help="Validation batch size (default: training batch size)",
     )
     parser.add_argument(

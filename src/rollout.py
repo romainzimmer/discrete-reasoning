@@ -12,7 +12,7 @@ from memory import memory_init, zero_memory
 from encoding import decode_logits, target_mask
 from model import MixerNextStateModel
 
-DEFAULT_INNER_ITERS = 5
+DEFAULT_INNER_ITERS = 3
 DEFAULT_MAX_OUTER_ITERS = 10
 
 

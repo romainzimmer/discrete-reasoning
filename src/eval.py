@@ -16,8 +16,10 @@ from train import EpochStats, build_rollout_config, measure_split, require_run_a
 
 SWEEP_MAX_INNER = 10
 SWEEP_MAX_OUTER = 100
-INNER_SWEEP_OUTER = SWEEP_MAX_OUTER
-OUTER_SWEEP_INNER = SWEEP_MAX_INNER
+SWEEP_DEFAULT_INNER = 3
+SWEEP_DEFAULT_OUTER = 30
+INNER_SWEEP_OUTER = SWEEP_DEFAULT_OUTER
+OUTER_SWEEP_INNER = SWEEP_DEFAULT_INNER
 
 
 def _test_point(inner_iters: int, max_outer_iters: int, stats: EpochStats) -> dict:
@@ -124,8 +126,8 @@ def main() -> None:
         "--sweep",
         action="store_true",
         help=(
-            "Sweep eval puzzle accuracy: inner 1–10 at max outer, "
-            "outer 10–100 at max inner, plus max inner × max outer"
+            "Sweep eval puzzle accuracy: inner 1–10 at outer=30, "
+            "outer 10–30 at inner=3, plus max inner × max outer (10×100)"
         ),
     )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -208,7 +210,7 @@ def main() -> None:
                 flush=True,
             )
         outer_sweep = []
-        for outer in range(10, SWEEP_MAX_OUTER + 1, 10):
+        for outer in range(10, SWEEP_DEFAULT_OUTER + 1, 10):
             stats = run_eval(OUTER_SWEEP_INNER, outer)
             outer_sweep.append(_test_point(OUTER_SWEEP_INNER, outer, stats))
             print(
