@@ -59,7 +59,7 @@ def optimizer_param_groups(
 
 
 def update_curriculum_puzzle_acc(prev: float, epoch_puzzle_acc: float) -> float:
-    """EMA of done-only train puzzle acc for adaptive curriculum p_gt upper bound."""
+    """EMA of done-only train puzzle acc for adaptive curriculum p_gt band center."""
     a = ADAPTIVE_CURRICULUM_ACC_EMA_ALPHA
     return a * epoch_puzzle_acc + (1.0 - a) * prev
 
@@ -569,7 +569,7 @@ def main() -> None:
     parser.add_argument(
         "--val-batch-size",
         type=int,
-        default=128,
+        default=None,
         help="Validation batch size (default: training batch size)",
     )
     parser.add_argument(

@@ -293,7 +293,9 @@ def test_curriculum_init_random_when_no_reveal():
             "rollout.torch.randint",
             return_value=torch.full(clues.shape, 7, dtype=clues.dtype),
         ):
-            digit_id = _curriculum_init_digit_id(clues, answer, clue_pin)
+            digit_id = _curriculum_init_digit_id(
+                clues, answer, clue_pin, puzzle_acc=1.0
+            )
     assert torch.equal(digit_id[clue_pin], clues[clue_pin])
     assert torch.equal(digit_id[~clue_pin], torch.full_like(clues, 7)[~clue_pin])
 
@@ -792,7 +794,9 @@ def test_curriculum_partial_reveal():
 
     with patch("rollout.torch.rand", side_effect=_rand):
         with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
-            digit_id = _curriculum_init_digit_id(clues, answer, clue_pin)
+            digit_id = _curriculum_init_digit_id(
+                clues, answer, clue_pin, puzzle_acc=0.5
+            )
     revealed = (digit_id == answer) & ~clue_pin
     empty = (digit_id == 0) & ~clue_pin
     assert revealed.any()
@@ -1046,7 +1050,7 @@ def test_deep_supervision_regression_single_step():
     assert result_off.loss.item() == result_on.loss.item()
 
 
-def test_curriculum_p_gt_upper_bound():
+def test_curriculum_p_gt_at_band_hi_skips_reveal_at_threshold():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
 
@@ -1064,7 +1068,7 @@ def test_curriculum_p_gt_upper_bound():
     assert torch.equal(digit_id[~clue_pin], torch.zeros_like(answer[~clue_pin]))
 
 
-def test_curriculum_zero_acc_uses_full_range():
+def test_curriculum_zero_acc_reveals_all_at_band_hi():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
 
@@ -1080,7 +1084,7 @@ def test_curriculum_zero_acc_uses_full_range():
     assert torch.equal(digit_id[~clue_pin], answer[~clue_pin])
 
 
-def test_curriculum_full_acc_no_reveal():
+def test_curriculum_full_acc_fills_non_clue_cells():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
     digit_id = _curriculum_init_digit_id(
@@ -1107,7 +1111,7 @@ def test_curriculum_puzzle_acc_update():
         if len(args) == 1 and isinstance(args[0], int):
             return torch.ones(args[0])
         shape = args[0] if len(args) == 1 else args
-        return torch.full(shape, 0.25)
+        return torch.full(shape, 0.35)
 
     with patch("rollout.torch.rand", side_effect=rand_reveal):
         with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
