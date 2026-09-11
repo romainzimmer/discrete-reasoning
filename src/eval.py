@@ -14,6 +14,20 @@ from amp import resolve_amp
 from train import EpochStats, build_rollout_config, measure_split, require_run_args
 
 
+SWEEP_MAX_INNER = 10
+SWEEP_MAX_OUTER = 100
+INNER_SWEEP_OUTER = SWEEP_MAX_OUTER
+OUTER_SWEEP_INNER = SWEEP_MAX_INNER
+
+
+def _test_point(inner_iters: int, max_outer_iters: int, stats: EpochStats) -> dict:
+    return {
+        "inner_iters": inner_iters,
+        "max_outer_iters": max_outer_iters,
+        **asdict(stats),
+    }
+
+
 def save_test_metrics(
     run_dir: Path,
     *,
@@ -25,13 +39,16 @@ def save_test_metrics(
     inner_iters: int,
     max_outer_iters: int,
     max_tries: int,
+    seed: int,
+    inner_sweep: list[dict] | None = None,
+    outer_sweep: list[dict] | None = None,
 ) -> None:
     history_path = run_dir / "history.json"
     if history_path.exists():
         history = json.loads(history_path.read_text())
     else:
         history = {"run_id": run_dir.name, "epochs": []}
-    history["test"] = {
+    payload: dict = {
         "best_epoch": epoch,
         "test_samples_count": test_samples,
         "min_rating": min_rating,
@@ -39,8 +56,20 @@ def save_test_metrics(
         "inner_iters": inner_iters,
         "max_outer_iters": max_outer_iters,
         "max_tries": max_tries,
+        "seed": seed,
         **asdict(test),
     }
+    if inner_sweep is not None:
+        payload["inner_sweep"] = {
+            "max_outer_iters": INNER_SWEEP_OUTER,
+            "points": inner_sweep,
+        }
+    if outer_sweep is not None:
+        payload["outer_sweep"] = {
+            "inner_iters": OUTER_SWEEP_INNER,
+            "points": outer_sweep,
+        }
+    history["test"] = payload
     history_path.write_text(json.dumps(history, indent=2))
 
 
@@ -91,6 +120,14 @@ def main() -> None:
         help="Max random inits per puzzle; stop at first halt, else keep last try (default: 1)",
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducible test metrics")
+    parser.add_argument(
+        "--sweep",
+        action="store_true",
+        help=(
+            "Sweep eval puzzle accuracy: inner 1–10 at max outer, "
+            "outer 10–100 at max inner, plus max inner × max outer"
+        ),
+    )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
@@ -128,34 +165,63 @@ def main() -> None:
     ).to(device)
     model.load_state_dict(ckpt["model"])
 
-    inner_iters = args.inner_iters if args.inner_iters is not None else int(run_args["inner_iters"])
-    max_outer_iters = (
-        args.max_outer_iters if args.max_outer_iters is not None else int(run_args["eval_max_outer_iters"])
-    )
+    default_inner = int(run_args["inner_iters"])
+    default_outer = int(run_args["eval_max_outer_iters"])
+    inner_iters = args.inner_iters if args.inner_iters is not None else default_inner
+    max_outer_iters = args.max_outer_iters if args.max_outer_iters is not None else default_outer
     halt_loss_weight = float(run_args.get("halt_loss_weight", 1.0))
-    rollout_config = build_rollout_config(
-        inner_iters=inner_iters,
-        max_outer_iters=max_outer_iters,
-    )
 
     amp_enabled = bool(run_args.get("amp", True))
     amp = resolve_amp(device, enabled=amp_enabled)
 
     epoch = int(ckpt["epoch"])
-    test = measure_split(
-        model,
-        test_loader,
-        device,
-        epoch=epoch,
-        epochs=epoch,
-        phase="test",
-        rollout_config=rollout_config,
-        halt_loss_weight=halt_loss_weight,
-        use_cuda=use_cuda,
-        seed=args.seed,
-        amp=amp,
-        max_tries=args.max_tries,
-    )
+
+    def run_eval(inner: int, outer: int) -> EpochStats:
+        rollout_config = build_rollout_config(inner_iters=inner, max_outer_iters=outer)
+        return measure_split(
+            model,
+            test_loader,
+            device,
+            epoch=epoch,
+            epochs=epoch,
+            phase="test",
+            rollout_config=rollout_config,
+            halt_loss_weight=halt_loss_weight,
+            use_cuda=use_cuda,
+            seed=args.seed,
+            amp=amp,
+            max_tries=args.max_tries,
+        )
+
+    inner_sweep: list[dict] | None = None
+    outer_sweep: list[dict] | None = None
+    if args.sweep:
+        if args.inner_iters is not None or args.max_outer_iters is not None:
+            raise ValueError("--sweep cannot be combined with --inner-iters or --max-outer-iters")
+        inner_sweep = []
+        for inner in range(1, SWEEP_MAX_INNER + 1):
+            stats = run_eval(inner, INNER_SWEEP_OUTER)
+            inner_sweep.append(_test_point(inner, INNER_SWEEP_OUTER, stats))
+            print(
+                f"test sweep inner={inner} max_outer={INNER_SWEEP_OUTER}: "
+                f"puzzle_acc={stats.puzzle_acc:.4f}",
+                flush=True,
+            )
+        outer_sweep = []
+        for outer in range(10, SWEEP_MAX_OUTER + 1, 10):
+            stats = run_eval(OUTER_SWEEP_INNER, outer)
+            outer_sweep.append(_test_point(OUTER_SWEEP_INNER, outer, stats))
+            print(
+                f"test sweep inner={OUTER_SWEEP_INNER} max_outer={outer}: "
+                f"puzzle_acc={stats.puzzle_acc:.4f}",
+                flush=True,
+            )
+        inner_iters = SWEEP_MAX_INNER
+        max_outer_iters = SWEEP_MAX_OUTER
+        test = run_eval(inner_iters, max_outer_iters)
+    else:
+        test = run_eval(inner_iters, max_outer_iters)
+
     save_test_metrics(
         run_dir,
         epoch=epoch,
@@ -166,6 +232,9 @@ def main() -> None:
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
         max_tries=args.max_tries,
+        seed=args.seed,
+        inner_sweep=inner_sweep,
+        outer_sweep=outer_sweep,
     )
     print(
         f"test (epoch {epoch}, n={len(test_rows)}, inner={inner_iters}, max_outer={max_outer_iters}, "

@@ -9,33 +9,33 @@
     body {
       font-family: system-ui, sans-serif;
       margin: 0 auto;
-      padding: 1.25rem 1.5rem;
+      padding: 24px;
       max-width: 1400px;
       background: #fafafa;
       color: #111;
     }
-    h1 { font-size: 1.25rem; margin: 0 0 1rem; }
+    h1 { font-size: 1.25rem; margin: 0 0 16px; }
     .panel {
       background: #fff;
       border: 1px solid #ddd;
       border-radius: 8px;
-      padding: 1rem;
-      margin-bottom: 1rem;
+      padding: 16px;
+      margin-bottom: 16px;
     }
     label {
       display: block;
       font-size: 0.85rem;
-      margin-bottom: 0.75rem;
+      margin-bottom: 16px;
     }
     select, button {
       font: inherit;
-      padding: 0.4rem 0.5rem;
+      padding: 8px;
     }
-    select { width: 100%; margin-top: 0.25rem; }
+    select { width: 100%; margin-top: 8px; }
     button {
       cursor: pointer;
       border: 1px solid #ccc;
-      border-radius: 6px;
+      border-radius: 8px;
       background: #fff;
     }
     button:hover { background: #f3f4f6; }
@@ -44,16 +44,16 @@
       margin-bottom: 0;
     }
     .run-details {
-      margin-top: 0.85rem;
-      padding-top: 0.85rem;
+      margin-top: 16px;
+      padding-top: 16px;
       border-top: 1px solid #eee;
     }
     .run-header {
       display: flex;
       align-items: baseline;
       justify-content: space-between;
-      gap: 1rem;
-      margin-bottom: 0.75rem;
+      gap: 16px;
+      margin-bottom: 16px;
     }
     .run-heading {
       font-size: 0.95rem;
@@ -84,12 +84,12 @@
     .run-config {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 0.8rem;
-      line-height: 1.55;
+      line-height: 1.5;
       background: #f9fafb;
       border: 1px solid #eee;
-      border-radius: 6px;
-      padding: 0.75rem 1rem;
-      margin: 0.5rem 0 0;
+      border-radius: 8px;
+      padding: 8px 16px;
+      margin: 8px 0 0;
       overflow-x: auto;
       white-space: pre;
       color: #333;
@@ -97,19 +97,19 @@
     .section-title {
       font-size: 0.95rem;
       font-weight: 600;
-      margin: 0 0 0.75rem;
+      margin: 0 0 16px;
     }
     .charts-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 1rem;
+      gap: 16px;
     }
     .chart { min-width: 0; }
-    .chart-title { font-size: 0.85rem; color: #555; margin-bottom: 0.35rem; }
+    .chart-title { font-size: 0.85rem; color: #555; margin-bottom: 8px; }
     canvas {
       display: block;
       width: 100%;
-      height: 180px;
+      height: 176px;
       border: 1px solid #eee;
       background: #fff;
     }
@@ -117,49 +117,49 @@
       text-align: center;
       font-size: 0.8rem;
       color: #888;
-      margin-top: 0.25rem;
+      margin-top: 8px;
     }
     .legend {
       display: flex;
-      gap: 1rem;
+      gap: 16px;
       font-size: 0.8rem;
-      margin-top: 0.35rem;
+      margin-top: 8px;
     }
     .legend-item {
       display: flex;
       align-items: center;
-      gap: 0.35rem;
+      gap: 8px;
     }
     .dot {
       display: inline-block;
       flex-shrink: 0;
-      width: 0.65rem;
-      height: 0.65rem;
+      width: 8px;
+      height: 8px;
       border-radius: 50%;
     }
     .trajectory-controls {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 1rem;
-      margin-bottom: 1rem;
+      gap: 16px;
+      margin-bottom: 16px;
     }
     .trajectory-controls label { margin-bottom: 0; }
     .trajectory-meta {
       font-size: 0.85rem;
       color: #555;
-      margin-bottom: 0.75rem;
+      margin-bottom: 16px;
     }
     .trajectory-layout {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(220px, 0.75fr);
-      gap: 1rem;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(224px, 0.75fr);
+      gap: 16px;
       align-items: stretch;
     }
     .trajectory-panel {
       background: #f9fafb;
       border: 1px solid #eee;
       border-radius: 8px;
-      padding: 1rem;
+      padding: 16px;
       min-height: 100%;
     }
     .trajectory-panel-grid {
@@ -167,7 +167,7 @@
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 0.5rem;
+      gap: 8px;
     }
     .grid-panel-title {
       font-size: 0.85rem;
@@ -205,7 +205,7 @@
     .step-controls {
       display: flex;
       flex-direction: column;
-      gap: 2.25rem;
+      gap: 32px;
       width: 100%;
       max-width: 320px;
       margin: 0 auto;
@@ -217,19 +217,19 @@
     .step-buttons {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
-      gap: 1rem;
+      gap: 16px;
     }
     .step-buttons button {
       width: 100%;
-      padding: 0.75rem;
+      padding: 8px;
     }
     #stepPlay {
       grid-column: span 4;
       font-weight: 600;
-      margin-top: 0.75rem;
+      margin-top: 16px;
     }
     .speed-control {
-      padding-top: 1rem;
+      padding-top: 16px;
     }
     .speed-control label {
       margin-bottom: 0;
@@ -237,10 +237,59 @@
     }
     .speed-control input[type="range"] {
       width: 100%;
-      margin-top: 1rem;
+      margin-top: 16px;
     }
     input[type="range"] { width: 100%; }
-    .error { color: #b91c1c; font-size: 0.9rem; margin-top: 0.75rem; }
+    .error { color: #b91c1c; font-size: 0.9rem; margin-top: 16px; }
+    .test-empty {
+      font-size: 0.85rem;
+      color: #888;
+      margin: 0;
+    }
+    #testMeta .run-config-details {
+      margin-top: 8px;
+    }
+    #testMeta .run-config {
+      margin-bottom: 0;
+    }
+    #testMaxResults:not(:empty) {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid #eee;
+    }
+    #testMaxResults:not(:empty) + #testCharts,
+    #testMeta:not(:empty) + #testCharts {
+      margin-top: 24px;
+      padding-top: 24px;
+      border-top: 1px solid #eee;
+    }
+    .test-summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(144px, 1fr));
+      gap: 16px;
+    }
+    .test-stat {
+      background: #f9fafb;
+      border: 1px solid #eee;
+      border-radius: 8px;
+      padding: 8px 16px;
+    }
+    .test-stat-label {
+      font-size: 0.75rem;
+      color: #888;
+      margin-bottom: 8px;
+    }
+    .test-stat-value {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: #111;
+    }
+    .test-max-heading {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #444;
+      margin: 0 0 16px;
+    }
     @media (max-width: 900px) {
       .charts-grid { grid-template-columns: 1fr; }
       .trajectory-layout { grid-template-columns: 1fr; }
@@ -259,7 +308,7 @@
   </div>
 
   <div class="panel">
-    <div class="section-title">Metrics</div>
+    <div class="section-title">Train</div>
     <div class="charts-grid">
     <div class="chart">
       <div class="chart-title">Total loss</div>
@@ -348,7 +397,25 @@
   </div>
 
   <div class="panel">
-    <div class="section-title">Trajectory</div>
+    <div class="section-title">Test</div>
+    <div id="testMeta"></div>
+    <div id="testMaxResults"></div>
+    <div class="charts-grid" id="testCharts">
+      <div class="chart">
+        <div class="chart-title">Puzzle accuracy vs inner iters (max outer = 100)</div>
+        <canvas id="testInnerSweepChart"></canvas>
+        <div class="axis-x-label">inner iters</div>
+      </div>
+      <div class="chart">
+        <div class="chart-title">Puzzle accuracy vs max outer iters (inner = 10)</div>
+        <canvas id="testOuterSweepChart"></canvas>
+        <div class="axis-x-label">max outer iters</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="section-title">Trajectories</div>
     <div class="trajectory-controls">
       <label>Split
         <select id="splitSelect"></select>
@@ -488,6 +555,29 @@
       "aug_band_proba",
     ];
 
+    const EVAL_CONFIG_PARAM_ORDER = [
+      "best_epoch",
+      "test_samples_count",
+      "min_rating",
+      "max_rating",
+      "inner_iters",
+      "max_outer_iters",
+      "max_tries",
+      "seed",
+    ];
+
+    const EVAL_RESULT_KEYS = new Set([
+      "loss",
+      "cell_loss",
+      "halt_loss",
+      "cell_acc",
+      "puzzle_acc",
+      "halt_acc",
+      "avg_outer_iters",
+      "halt_rate",
+      "avg_tries",
+    ]);
+
     const CONFIG_PARAM_HIDDEN = new Set(["runs_dir"]);
 
     function isHiddenConfigKey(key) {
@@ -586,7 +676,7 @@
       return indices;
     }
 
-    const CHART_HEIGHT = 180;
+    const CHART_HEIGHT = 176;
     const MIN_CANVAS_SCALE = 2;
 
     function setupCanvas(canvas) {
@@ -618,10 +708,10 @@
       ctx.clearRect(0, 0, width, height);
       if (!series.length || !series[0].values.length) return;
 
-      const padLeft = 52;
+      const padLeft = 56;
       const padRight = 16;
-      const padTop = 12;
-      const padBottom = 28;
+      const padTop = 16;
+      const padBottom = 32;
       const plotW = width - padLeft - padRight;
       const plotH = height - padTop - padBottom;
 
@@ -649,7 +739,7 @@
         ctx.stroke();
         ctx.textAlign = "right";
         ctx.textBaseline = "middle";
-        ctx.fillText(formatY(tick), padLeft - 6, y);
+        ctx.fillText(formatY(tick), padLeft - 8, y);
       }
 
       ctx.strokeStyle = "#999";
@@ -664,7 +754,7 @@
         const x = xAt(i);
         ctx.beginPath();
         ctx.moveTo(x, padTop + plotH);
-        ctx.lineTo(x, padTop + plotH + 4);
+        ctx.lineTo(x, padTop + plotH + 8);
         ctx.stroke();
         ctx.textAlign = "center";
         ctx.textBaseline = "top";
@@ -689,7 +779,7 @@
           if (value === null || value === undefined) return;
           ctx.fillStyle = s.color;
           ctx.beginPath();
-          ctx.arc(xAt(i), yAt(value), 3, 0, Math.PI * 2);
+          ctx.arc(xAt(i), yAt(value), 4, 0, Math.PI * 2);
           ctx.fill();
         });
       }
@@ -813,6 +903,109 @@
       renderTrainOnlyLegend("completionsLegend", epochs, "completions_per_epoch");
       renderAccLegend("cellAccLegend", epochs, "cell_acc");
       renderAccLegend("puzzleAccLegend", epochs, "puzzle_acc");
+    }
+
+    function formatPct(value) {
+      if (value == null) return "—";
+      return `${(Number(value) * 100).toFixed(1)}%`;
+    }
+
+    function formatTestStatValue(key, value) {
+      if (value == null) return "—";
+      if (key.endsWith("_acc") || key === "halt_rate") return formatPct(value);
+      if (typeof value === "number") {
+        if (Number.isInteger(value)) return String(value);
+        return Number(value).toFixed(4);
+      }
+      return String(value);
+    }
+
+    function renderEvalConfigYaml(test) {
+      const keys = EVAL_CONFIG_PARAM_ORDER.filter(key => test[key] !== undefined);
+      const extras = Object.keys(test).filter(
+        key =>
+          !EVAL_CONFIG_PARAM_ORDER.includes(key)
+          && !EVAL_RESULT_KEYS.has(key)
+          && key !== "inner_sweep"
+          && key !== "outer_sweep"
+      ).sort();
+      return [...keys, ...extras].map(
+        key => `${key}: ${formatConfigValue(key, test[key], test)}`
+      ).join("\n");
+    }
+
+    function renderSweepChart(canvasId, points, xKey) {
+      if (!points?.length) {
+        const canvas = document.getElementById(canvasId);
+        const { ctx, width, height } = setupCanvas(canvas);
+        ctx.clearRect(0, 0, width, height);
+        return;
+      }
+      const sorted = [...points].sort((a, b) => a[xKey] - b[xKey]);
+      drawSeries(document.getElementById(canvasId), [{
+        color: "#7c3aed",
+        values: sorted.map(p => p.puzzle_acc ?? null),
+      }], {
+        yMin: 0,
+        yMax: 1,
+        xLabels: sorted.map(p => p[xKey]),
+        formatY: v => `${(Number(v) * 100).toFixed(0)}%`,
+      });
+    }
+
+    function renderTestMaxResults(test) {
+      const container = document.getElementById("testMaxResults");
+      if (!test) {
+        container.innerHTML = "";
+        return;
+      }
+      const stats = [
+        ["puzzle_acc", "Puzzle accuracy"],
+        ["cell_acc", "Cell accuracy"],
+        ["halt_acc", "Halt accuracy"],
+        ["halt_rate", "Halt rate"],
+        ["avg_outer_iters", "Avg outer iters"],
+        ["avg_tries", "Avg tries"],
+        ["loss", "Loss"],
+      ];
+      container.innerHTML = `
+        <div class="test-max-heading">
+          Max config (inner=${test.inner_iters ?? "?"}, max outer=${test.max_outer_iters ?? "?"})
+        </div>
+        <div class="test-summary">
+          ${stats.map(([key, label]) => `
+            <div class="test-stat">
+              <div class="test-stat-label">${label}</div>
+              <div class="test-stat-value">${formatTestStatValue(key, test[key])}</div>
+            </div>
+          `).join("")}
+        </div>
+      `;
+    }
+
+    function renderTest() {
+      const metaEl = document.getElementById("testMeta");
+      const chartsEl = document.getElementById("testCharts");
+      const test = metrics?.test;
+      if (!test) {
+        metaEl.innerHTML = '<p class="test-empty">No test metrics. Run: uv run eval runs/&lt;run-id&gt; --sweep</p>';
+        chartsEl.style.display = "none";
+        renderTestMaxResults(null);
+        return;
+      }
+      metaEl.innerHTML = `
+        <details class="run-config-details">
+          <summary>Eval config</summary>
+          <pre class="run-config">${escapeHtml(renderEvalConfigYaml(test))}</pre>
+        </details>
+      `;
+      const hasSweep = test.inner_sweep?.points?.length || test.outer_sweep?.points?.length;
+      chartsEl.style.display = hasSweep ? "" : "none";
+      if (hasSweep) {
+        renderSweepChart("testInnerSweepChart", test.inner_sweep?.points, "inner_iters");
+        renderSweepChart("testOuterSweepChart", test.outer_sweep?.points, "max_outer_iters");
+      }
+      renderTestMaxResults(test);
     }
 
     function renderRunMeta() {
@@ -1010,6 +1203,7 @@
         manifest = await manifestRes.json();
         renderRunMeta();
         renderCharts();
+        renderTest();
 
         const splits = manifest.splits
           ? Object.keys(manifest.splits).filter(s => TRAJECTORY_SPLITS.includes(s))
@@ -1023,6 +1217,7 @@
         trajectory = null;
         renderRunMeta();
         renderCharts();
+        renderTest();
         renderTrajectory();
         errorEl.textContent = `${e.message}. Train a run first: uv run train`;
       }
@@ -1091,6 +1286,7 @@
         await loadRun(runs[0]);
         requestAnimationFrame(() => {
           if (metrics?.epochs?.length) renderCharts();
+          renderTest();
         });
       } catch (e) {
         errorEl.textContent = `${e.message}. Serve the project root: uv run python -m http.server`;
@@ -1115,6 +1311,7 @@
         clearTimeout(resizeTimer);
         resizeTimer = setTimeout(() => {
           if (metrics?.epochs?.length) renderCharts();
+          renderTest();
         }, 150);
       });
     }
