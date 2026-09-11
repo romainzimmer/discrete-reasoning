@@ -20,7 +20,6 @@ from model import MixerNextStateModel
 from rollout import (
     DEFAULT_INNER_ITERS,
     DEFAULT_MAX_OUTER_ITERS,
-    DEFAULT_TRANSITION_PROB,
     BatchSlotState,
     RolloutConfig,
     RolloutResult,
@@ -85,21 +84,15 @@ def build_rollout_config(
     inner_iters: int,
     max_outer_iters: int,
     halt_threshold: float = 0.5,
-    transition_prob: float = DEFAULT_TRANSITION_PROB,
     curriculum_training: bool = True,
-    pin_gt: bool = True,
     deep_supervision: bool = True,
-    adaptive_curriculum: bool = True,
 ) -> RolloutConfig:
     return RolloutConfig(
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
         halt_threshold=halt_threshold,
-        transition_prob=transition_prob,
         curriculum_training=curriculum_training,
-        pin_gt=pin_gt,
         deep_supervision=deep_supervision,
-        adaptive_curriculum=adaptive_curriculum,
     )
 
 
@@ -175,7 +168,7 @@ class TrainMetricsAccumulator:
         self.halt_correct += (result.halted == (result.halt_target > 0.5)).sum()
         self.halt_total += b
 
-        mask = cell_acc_mask(state.clues)
+        mask = cell_acc_mask(state.clues) & done.view(-1, 1, 1)
         self.correct_cells += (result.pred[mask] == state.answer[mask]).sum()
         self.total_cells += mask.sum()
 
@@ -467,8 +460,6 @@ def train_epoch(
                 generator=refill_generator,
                 dim=model.dim,
                 curriculum_training=rollout_config.curriculum_training,
-                pin_gt=rollout_config.pin_gt,
-                adaptive_curriculum=rollout_config.adaptive_curriculum,
                 curriculum_puzzle_acc=rollout_config.curriculum_puzzle_acc,
             )
         if profiler is not None:
@@ -576,12 +567,6 @@ def main() -> None:
         help="Weight for halt BCE loss",
     )
     parser.add_argument(
-        "--transition-prob",
-        type=float,
-        default=DEFAULT_TRANSITION_PROB,
-        help="Per-cell prob of committing decoded digit each outer step (clues/GT pins always commit; 1 = full grid update)",
-    )
-    parser.add_argument(
         "--val-batch-size",
         type=int,
         default=None,
@@ -613,19 +598,9 @@ def main() -> None:
         help="Disable curriculum puzzle init (partial GT reveal) during training seed/refill",
     )
     parser.add_argument(
-        "--no-pin-gt",
-        action="store_true",
-        help="Disable GT pinning during rollout (curriculum init still reveals GT; commits use model digits)",
-    )
-    parser.add_argument(
         "--no-deep-supervision",
         action="store_true",
         help="Use final inner loop step only for cell and halt loss (default: average all steps)",
-    )
-    parser.add_argument(
-        "--no-adaptive-curriculum",
-        action="store_true",
-        help="Disable adaptive curriculum (use fixed U[0, 1] for p_gt instead of U[0, 1 - puzzle_acc])",
     )
     parser.add_argument("--no-augment", action="store_true", help="Disable training data augmentations")
     parser.add_argument("--aug-digit-proba", type=float, default=0.5)
@@ -699,22 +674,16 @@ def main() -> None:
         lr=args.lr,
     )
     curriculum_training = not args.no_curriculum_training
-    pin_gt = not args.no_pin_gt
-    adaptive_curriculum = not args.no_adaptive_curriculum
     deep_supervision = not args.no_deep_supervision
     rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.train_max_outer_iters,
-        transition_prob=args.transition_prob,
         curriculum_training=curriculum_training,
-        pin_gt=pin_gt,
         deep_supervision=deep_supervision,
-        adaptive_curriculum=adaptive_curriculum,
     )
     eval_rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.eval_max_outer_iters,
-        transition_prob=args.transition_prob,
         curriculum_training=False,
     )
     refill_generator = torch.Generator(device="cpu").manual_seed(args.seed)
@@ -751,10 +720,7 @@ def main() -> None:
                 args.train_batch_size,
                 device,
                 generator=refill_generator,
-                dim=model.dim,
                 curriculum_training=rollout_config.curriculum_training,
-                pin_gt=rollout_config.pin_gt,
-                adaptive_curriculum=rollout_config.adaptive_curriculum,
                 curriculum_puzzle_acc=rollout_config.curriculum_puzzle_acc,
             )
 
@@ -776,7 +742,7 @@ def main() -> None:
             profiler=profiler,
             amp=amp,
         )
-        if rollout_config.adaptive_curriculum:
+        if rollout_config.curriculum_training:
             rollout_config = replace(
                 rollout_config,
                 curriculum_puzzle_acc=update_curriculum_puzzle_acc(

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from rollout import BatchSlotState, _PinContext
+from rollout import BatchSlotState
 from train import (
     TrainEpochStats,
     EpochStats,
@@ -49,14 +49,11 @@ def test_accumulate_step_metrics_from_training_logits() -> None:
     clues_b = clues.unsqueeze(0)
     answer_b = answer.unsqueeze(0)
     clue_pin = clues_b > 0
-    gt_pin = torch.zeros_like(clue_pin)
     state = BatchSlotState(
         digit_id=clues_b,
         clues=clues_b,
         answer=answer_b,
         clue_pin=clue_pin,
-        gt_pin=gt_pin,
-        pin_ctx=_PinContext.from_state(clues_b, answer_b, gt_pin),
         outer_count=torch.tensor([1]),
     )
     acc = TrainMetricsAccumulator.empty(torch.device("cpu"))
@@ -79,8 +76,6 @@ def test_accumulate_step_uses_pred_with_clue_mask() -> None:
     clues_b = clues.unsqueeze(0)
     answer_b = answer.unsqueeze(0)
     clue_pin = clues_b > 0
-    gt_pin = torch.zeros_like(clue_pin)
-    gt_pin[0, 0, 1] = True
     pred = torch.full((1, 9, 9), 2)
     pred[0, 0, 0] = 5
     result = RolloutResult(
@@ -96,8 +91,6 @@ def test_accumulate_step_uses_pred_with_clue_mask() -> None:
         clues=clues_b,
         answer=answer_b,
         clue_pin=clue_pin,
-        gt_pin=gt_pin,
-        pin_ctx=_PinContext.from_state(clues_b, answer_b, gt_pin),
         outer_count=torch.tensor([1]),
     )
     acc = TrainMetricsAccumulator.empty(torch.device("cpu"))

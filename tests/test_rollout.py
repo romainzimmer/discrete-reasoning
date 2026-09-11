@@ -6,7 +6,6 @@ import pytest
 import torch
 
 from dataset import PuzzleDataset
-from encoding import decode_logits
 from model import MixerNextStateModel
 from rollout import (
     DEFAULT_INNER_ITERS,
@@ -14,7 +13,6 @@ from rollout import (
     BatchSlotState,
     RolloutConfig,
     _OnceEvalState,
-    _PinContext,
     _copy_once_state,
     _compute_cell_loss,
     _compute_deep_supervision_losses,
@@ -24,7 +22,6 @@ from rollout import (
     _curriculum_init_digit_id,
     _inner_loop,
     _predict_halt,
-    _transition_board,
     predict_grid,
     refill_done_slots,
     rollout_eval_batch,
@@ -40,7 +37,6 @@ def _first_param(model: MixerNextStateModel) -> torch.Tensor:
 
 
 def _baseline_config(**kwargs) -> RolloutConfig:
-    kwargs.setdefault("transition_prob", 1.0)
     return RolloutConfig(**kwargs)
 
 
@@ -75,20 +71,13 @@ def _tiny_batch():
 def _make_state(
     clues: torch.Tensor,
     answer: torch.Tensor,
-    *,
-    gt_pin: torch.Tensor | None = None,
 ) -> BatchSlotState:
     clue_pin = clues > 0
-    if gt_pin is None:
-        gt_pin = torch.zeros_like(clue_pin)
-    pin_ctx = _PinContext.from_state(clues, answer, gt_pin)
     return BatchSlotState(
         digit_id=clues.clone(),
         clues=clues,
         answer=answer,
         clue_pin=clue_pin,
-        gt_pin=gt_pin,
-        pin_ctx=pin_ctx,
         outer_count=torch.zeros(clues.size(0), dtype=torch.long),
     )
 
@@ -108,10 +97,6 @@ def test_rollout_config_validation():
         RolloutConfig(inner_iters=0)
     with pytest.raises(ValueError):
         RolloutConfig(max_outer_iters=0)
-    with pytest.raises(ValueError):
-        RolloutConfig(transition_prob=0.0)
-    with pytest.raises(ValueError):
-        RolloutConfig(transition_prob=1.1)
 
 
 def test_defaults():
@@ -119,7 +104,6 @@ def test_defaults():
     assert config.inner_iters == DEFAULT_INNER_ITERS
     assert config.max_outer_iters == DEFAULT_MAX_OUTER_ITERS
     assert config.deep_supervision is True
-    assert config.adaptive_curriculum is True
     assert config.curriculum_puzzle_acc == 0.0
 
 
@@ -151,7 +135,7 @@ def test_state_persists_across_epochs():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
-        dataset, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32    )
+        dataset, batch_size=1, device=torch.device("cpu"), generator=gen)
     config = _baseline_config(inner_iters=2, max_outer_iters=100, halt_threshold=1.1)
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
@@ -175,7 +159,6 @@ def test_clues_init_without_curriculum():
         batch_size=2,
         device=torch.device("cpu"),
         generator=gen,
-        dim=32,
         curriculum_training=False,
     )
     assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
@@ -220,7 +203,7 @@ def test_refill_after_done():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
-        dataset, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32    )
+        dataset, batch_size=1, device=torch.device("cpu"), generator=gen)
     original_clues = state.clues.clone()
     done = torch.tensor([True])
     refill_done_slots(
@@ -236,7 +219,7 @@ def test_max_outer_forces_refill():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
-        dataset, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32    )
+        dataset, batch_size=1, device=torch.device("cpu"), generator=gen)
     state.outer_count[0] = 9
     config = _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
     model = MixerNextStateModel(dim=32, num_blocks=1)
@@ -270,9 +253,8 @@ def test_curriculum_init_preserves_clues():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
     with patch("rollout.torch.rand", side_effect=_curriculum_rand_side_effect()):
-        digit_id, gt_pin = _curriculum_init_digit_id(clues, answer, clue_pin)
+        digit_id = _curriculum_init_digit_id(clues, answer, clue_pin)
     assert torch.equal(digit_id[clue_pin], clues[clue_pin])
-    assert not gt_pin.any()
 
 
 def test_curriculum_init_gt_reveal():
@@ -289,9 +271,8 @@ def test_curriculum_init_gt_reveal():
         return torch.zeros(size, device=device)
 
     with patch("rollout.torch.rand", side_effect=_rand):
-        digit_id, gt_pin = _curriculum_init_digit_id(clues, answer, clue_pin)
+        digit_id = _curriculum_init_digit_id(clues, answer, clue_pin)
     assert torch.equal(digit_id[~clue_pin], answer[~clue_pin])
-    assert torch.equal(gt_pin, ~clue_pin)
 
 
 def test_curriculum_init_random_when_no_reveal():
@@ -312,10 +293,9 @@ def test_curriculum_init_random_when_no_reveal():
             "rollout.torch.randint",
             return_value=torch.full(clues.shape, 7, dtype=clues.dtype),
         ):
-            digit_id, gt_pin = _curriculum_init_digit_id(clues, answer, clue_pin)
+            digit_id = _curriculum_init_digit_id(clues, answer, clue_pin)
     assert torch.equal(digit_id[clue_pin], clues[clue_pin])
     assert torch.equal(digit_id[~clue_pin], torch.full_like(clues, 7)[~clue_pin])
-    assert not gt_pin.any()
 
 
 def test_curriculum_seed_fills_cells():
@@ -323,7 +303,7 @@ def test_curriculum_seed_fills_cells():
     gen = torch.Generator().manual_seed(0)
     torch.manual_seed(42)
     state = BatchSlotState.seed(
-        dataset, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32    )
+        dataset, batch_size=1, device=torch.device("cpu"), generator=gen)
     assert not torch.equal(state.digit_id, state.clues)
     assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
 
@@ -336,7 +316,6 @@ def test_curriculum_refill_fills_cells():
         batch_size=1,
         device=torch.device("cpu"),
         generator=gen,
-        dim=32,
         curriculum_training=False,
     )
     torch.manual_seed(42)
@@ -550,9 +529,9 @@ def test_seeded_refill():
     gen1 = torch.Generator().manual_seed(42)
     gen2 = torch.Generator().manual_seed(42)
     state1 = BatchSlotState.seed(
-        dataset, batch_size=1, device=torch.device("cpu"), generator=gen1, dim=32    )
+        dataset, batch_size=1, device=torch.device("cpu"), generator=gen1)
     state2 = BatchSlotState.seed(
-        dataset, batch_size=1, device=torch.device("cpu"), generator=gen2, dim=32    )
+        dataset, batch_size=1, device=torch.device("cpu"), generator=gen2)
     done = torch.tensor([True])
     refill_done_slots(state1, done, dataset, generator=gen1, dim=32)
     refill_done_slots(state2, done, dataset, generator=gen2, dim=32)
@@ -563,7 +542,7 @@ def test_refill_no_op_when_not_done():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
-        dataset, batch_size=2, device=torch.device("cpu"), generator=gen, dim=32    )
+        dataset, batch_size=2, device=torch.device("cpu"), generator=gen)
     before = (
         state.digit_id.clone(),
         state.clues.clone(),
@@ -648,70 +627,8 @@ def test_rollout_trace_batch_matches_single():
     assert batched[1].states == single_second
 
 
-def _transition_from_logits(logits, ctx, prev, **kwargs):
-    decoded = decode_logits(logits)
-    candidate = torch.where(ctx.pin, ctx.pin_digit_ids, decoded)
-    return _transition_board(candidate, ctx, prev, **kwargs)
-
-
-def test_transition_board_matches_full_decode():
-    clues = torch.zeros(9, 9, dtype=torch.long)
-    gt_pin = torch.zeros(9, 9, dtype=torch.bool)
-    prev = clues.unsqueeze(0)
-    ctx = _PinContext.from_state(prev, prev, gt_pin.unsqueeze(0))
-    logits = torch.zeros(1, 9, 9, 10)
-    logits[0, 0, 0, 5] = 10.0
-    committed = _transition_from_logits(logits, ctx, prev, transition_prob=1.0)
-    assert committed[0, 0, 0] == 5
-
-
-def test_transition_board_pins_gt():
-    clues = torch.zeros(1, 9, 9, dtype=torch.long)
-    answer = torch.full((1, 9, 9), 3)
-    gt_pin = torch.zeros(1, 9, 9, dtype=torch.bool)
-    gt_pin[0, 0, 0] = True
-    ctx = _PinContext.from_state(clues, answer, gt_pin)
-    logits = torch.zeros(1, 9, 9, 10)
-    logits[0, 0, 0, 7] = 10.0
-    committed = _transition_from_logits(logits, ctx, clues, transition_prob=1.0)
-    assert committed[0, 0, 0] == 3
-
-
-def test_transition_board_unpins_gt_when_disabled():
-    clues = torch.zeros(1, 9, 9, dtype=torch.long)
-    answer = torch.full((1, 9, 9), 3)
-    gt_pin = torch.zeros(1, 9, 9, dtype=torch.bool)
-    gt_pin[0, 0, 0] = True
-    ctx = _PinContext.from_state(clues, answer, gt_pin, pin_gt=False)
-    logits = torch.zeros(1, 9, 9, 10)
-    logits[0, 0, 0, 7] = 10.0
-    committed = _transition_from_logits(logits, ctx, clues, transition_prob=1.0)
-    assert committed[0, 0, 0] == 7
-
-
-def test_transition_board_partial_transition():
-    clues = torch.zeros(1, 9, 9, dtype=torch.long)
-    gt_pin = torch.zeros(1, 9, 9, dtype=torch.bool)
-    prev = clues.clone()
-    prev[0, 0, 0] = 2
-    prev[0, 0, 1] = 3
-    ctx = _PinContext.from_state(clues, clues, gt_pin)
-    logits = torch.zeros(1, 9, 9, 10)
-    logits[0, 0, 0, 5] = 10.0
-    logits[0, 0, 1, 6] = 10.0
-    with patch(
-        "rollout.torch.rand",
-        return_value=torch.tensor([[[0.2, 0.8] + [0.0] * 7] * 9]),
-    ):
-        committed = _transition_from_logits(logits, ctx, prev, transition_prob=0.5)
-    assert committed[0, 0, 0] == 5
-    assert committed[0, 0, 1] == 3
-
-
 def test_predict_grid_gt_unpinned():
     clues = torch.zeros(9, 9, dtype=torch.long)
-    gt_pin = torch.zeros(9, 9, dtype=torch.bool)
-    gt_pin[0, 0] = True
     logits = torch.zeros(9, 9, 10)
     logits[0, 0, 7] = 10.0
     pred = predict_grid(logits, clues)
@@ -731,14 +648,11 @@ def test_halt_requires_gt_logits():
     assert _halt_target(pred, answer).item() == 1.0
 
 
-def test_curriculum_gt_pinned_after_commit():
+def test_curriculum_gt_overwritten_after_commit():
     clues, answer = _tiny_batch()
-    clue_pin = clues > 0
-    gt_pin = ~clue_pin
-    pin_ctx = _PinContext.from_state(clues, answer, gt_pin)
-    state = _make_state(clues, answer, gt_pin=gt_pin)
-    state.digit_id = torch.where(gt_pin, answer, clues)
-    state.pin_ctx = pin_ctx
+    non_clue = ~(clues > 0)
+    state = _make_state(clues, answer)
+    state.digit_id = torch.where(non_clue, answer, clues)
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     with patch("rollout._inner_loop") as mock_inner:
@@ -748,34 +662,14 @@ def test_curriculum_gt_pinned_after_commit():
             logits, torch.zeros(1), torch.zeros(1, 9, 9, 32)
         )
         rollout_train_step(model, state, _baseline_config(), backward=False)
-    assert torch.equal(state.digit_id[gt_pin], answer[gt_pin])
-
-
-def test_curriculum_gt_unpinned_after_commit():
-    clues, answer = _tiny_batch()
-    clue_pin = clues > 0
-    gt_pin = ~clue_pin
-    pin_ctx = _PinContext.from_state(clues, answer, gt_pin, pin_gt=False)
-    state = _make_state(clues, answer, gt_pin=gt_pin)
-    state.digit_id = torch.where(gt_pin, answer, clues)
-    state.pin_ctx = pin_ctx
-    model = MixerNextStateModel(dim=32, num_blocks=1)
-    model.train()
-    with patch("rollout._inner_loop") as mock_inner:
-        logits = torch.zeros(1, 9, 9, 10)
-        logits[..., 2] = 10.0
-        mock_inner.return_value = _deep_supervision_inner_return(
-            logits, torch.zeros(1), torch.zeros(1, 9, 9, 32)
-        )
-        rollout_train_step(model, state, _baseline_config(pin_gt=False), backward=False)
-        rollout_train_step(model, state, _baseline_config(pin_gt=False), backward=False)
-    assert torch.equal(state.digit_id[gt_pin], torch.full_like(state.digit_id[gt_pin], 2))
+        rollout_train_step(model, state, _baseline_config(), backward=False)
+    assert torch.equal(state.digit_id[non_clue], torch.full_like(state.digit_id[non_clue], 2))
+    assert torch.equal(state.digit_id[state.clue_pin], clues[state.clue_pin])
 
 
 def test_gt_cells_in_loss():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
-    gt_pin = ~clue_pin
     logits = torch.zeros(1, 9, 9, 10)
     logits[..., 2] = 10.0
     loss_wrong = _compute_cell_loss(logits, clue_pin=clue_pin, answer=answer)
@@ -784,13 +678,11 @@ def test_gt_cells_in_loss():
     assert loss_wrong.item() > loss_right.item()
 
 
-def test_train_step_order_of_ops_with_gt_pin():
-    """Wrong GT logits block halt but commit still pins board state."""
+def test_train_step_wrong_gt_blocks_halt():
     clues, answer = _tiny_batch()
-    gt_pin = ~(clues > 0)
-    state = _make_state(clues, answer, gt_pin=gt_pin)
-    state.digit_id = torch.where(gt_pin, answer, clues)
-    state.pin_ctx = _PinContext.from_state(clues, answer, gt_pin)
+    non_clue = ~(clues > 0)
+    state = _make_state(clues, answer)
+    state.digit_id = torch.where(non_clue, answer, clues)
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     with patch("rollout._inner_loop") as mock_inner:
@@ -805,15 +697,15 @@ def test_train_step_order_of_ops_with_gt_pin():
     assert result.cell_loss is not None
     assert result.halt_target.item() == 0.0
     assert result.cell_loss.item() > 0.0
-    assert torch.equal(state.digit_id[gt_pin], answer[gt_pin])
-    assert not torch.equal(result.pred[gt_pin], answer[gt_pin])
+    assert torch.equal(state.digit_id[non_clue], answer[non_clue])
+    assert not torch.equal(result.pred[non_clue], answer[non_clue])
 
 
-def test_gt_pin_not_in_encode_clue_pin():
+def test_gt_reveal_not_in_encode_clue_pin():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
-    gt_pin = ~clue_pin
-    digit_id = torch.where(gt_pin, answer, clues)
+    revealed = ~clue_pin
+    digit_id = torch.where(revealed, answer, clues)
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     with patch.object(model, "encode_input", wraps=model.encode_input) as mock_encode:
@@ -826,10 +718,10 @@ def test_gt_pin_not_in_encode_clue_pin():
         )
     passed_clue_pin = mock_encode.call_args[0][1]
     assert torch.equal(passed_clue_pin, clue_pin)
-    assert not (passed_clue_pin & gt_pin).any()
+    assert not (passed_clue_pin & revealed).any()
 
 
-def test_train_seed_without_pin_gt_keeps_curriculum_init():
+def test_train_seed_curriculum_reveals_gt():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     calls = 0
@@ -844,35 +736,13 @@ def test_train_seed_without_pin_gt_keeps_curriculum_init():
 
     with patch("rollout.torch.rand", side_effect=_rand):
         state = BatchSlotState.seed(
-            dataset, 1, torch.device("cpu"), generator=gen, dim=32, pin_gt=False
+            dataset, batch_size=1, device=torch.device("cpu"), generator=gen
         )
-    assert state.gt_pin.any()
-    assert torch.equal(state.pin_ctx.pin, state.clue_pin)
-    assert torch.equal(state.digit_id[state.gt_pin], state.answer[state.gt_pin])
+    assert torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
+    assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
 
 
-def test_train_seed_sets_gt_pin():
-    dataset = _tiny_dataset()
-    gen = torch.Generator().manual_seed(0)
-    calls = 0
-
-    def _rand(shape, *, device=None):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return torch.tensor([1.0], device=device)
-        size = shape if isinstance(shape, tuple) else (shape,)
-        return torch.zeros(size, device=device)
-
-    with patch("rollout.torch.rand", side_effect=_rand):
-        state = BatchSlotState.seed(
-            dataset, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32        )
-    assert state.gt_pin.any()
-    assert state.gt_pin.sum() == (~state.clue_pin).sum()
-    assert torch.equal(state.pin_ctx.pin, state.clue_pin | state.gt_pin)
-
-
-def test_train_seed_without_curriculum_has_no_gt_pin():
+def test_train_seed_without_curriculum_keeps_clues_only():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
@@ -880,35 +750,15 @@ def test_train_seed_without_curriculum_has_no_gt_pin():
         batch_size=1,
         device=torch.device("cpu"),
         generator=gen,
-        dim=32,
         curriculum_training=False,
     )
-    assert not state.gt_pin.any()
-    assert torch.equal(state.pin_ctx.pin, state.clue_pin)
+    assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
+    assert not torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
 
 
-def test_eval_outer_commit_clue_pin_only():
-    model = MixerNextStateModel(dim=32, num_blocks=1)
-    model.eval()
+def test_mutable_non_clue_cell_overwritable_on_commit():
     clues, answer = _tiny_batch()
-    from rollout import _transition_board
-
-    with patch("rollout._transition_board", wraps=_transition_board) as mock_commit:
-        with patch("rollout._inner_loop") as mock_inner:
-            logits = torch.zeros(1, 9, 9, 10)
-            logits[..., 1] = 10.0
-            mock_inner.return_value = (logits, torch.zeros(1), torch.zeros(1, 9, 9, 32))
-            rollout_eval_batch(
-                model, clues, answer, config=_baseline_config(inner_iters=1, max_outer_iters=2)
-            )
-    ctx = mock_commit.call_args[0][1]
-    assert torch.equal(ctx.pin, clues > 0)
-
-
-def test_mutable_non_gt_cell_overwritable_on_commit():
-    clues, answer = _tiny_batch()
-    gt_pin = torch.zeros_like(clues > 0)
-    state = _make_state(clues, answer, gt_pin=gt_pin)
+    state = _make_state(clues, answer)
     state.digit_id = clues.clone()
     state.digit_id[0, 0, 2] = 7
     model = MixerNextStateModel(dim=32, num_blocks=1)
@@ -922,10 +772,9 @@ def test_mutable_non_gt_cell_overwritable_on_commit():
         rollout_train_step(model, state, _baseline_config(), backward=False)
         rollout_train_step(model, state, _baseline_config(), backward=False)
     assert state.digit_id[0, 0, 2] == 4
-    assert not state.gt_pin[0, 0, 2]
 
 
-def test_curriculum_partial_reveal_gt_pin():
+def test_curriculum_partial_reveal():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
     calls = 0
@@ -942,16 +791,17 @@ def test_curriculum_partial_reveal_gt_pin():
         return out
 
     with patch("rollout.torch.rand", side_effect=_rand):
-        _, gt_pin = _curriculum_init_digit_id(clues, answer, clue_pin)
-    assert gt_pin.any()
-    assert (~gt_pin & ~clue_pin).any()
-    assert gt_pin.sum() < (~clue_pin).sum()
-    assert not (gt_pin & clue_pin).any()
-    empty = (clues == 0) & ~gt_pin
+        with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
+            digit_id = _curriculum_init_digit_id(clues, answer, clue_pin)
+    revealed = (digit_id == answer) & ~clue_pin
+    empty = (digit_id == 0) & ~clue_pin
+    assert revealed.any()
     assert empty.any()
+    assert revealed.sum() < (~clue_pin).sum()
+    assert not (revealed & clue_pin).any()
 
 
-def test_refill_updates_gt_pin_and_pin_ctx():
+def test_refill_curriculum_reveals_gt():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
@@ -959,10 +809,9 @@ def test_refill_updates_gt_pin_and_pin_ctx():
         batch_size=1,
         device=torch.device("cpu"),
         generator=gen,
-        dim=32,
         curriculum_training=False,
     )
-    assert not state.gt_pin.any()
+    assert not torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
     calls = 0
 
     def _rand(shape, *, device=None):
@@ -975,9 +824,7 @@ def test_refill_updates_gt_pin_and_pin_ctx():
 
     with patch("rollout.torch.rand", side_effect=_rand):
         refill_done_slots(state, torch.tensor([True]), dataset, generator=gen, dim=32)
-    assert state.gt_pin.any()
-    assert torch.equal(state.pin_ctx.pin, state.clue_pin | state.gt_pin)
-    assert torch.equal(state.digit_id[state.gt_pin], state.answer[state.gt_pin])
+    assert torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
 
 
 def test_predict_grid_pins_clues():
@@ -1029,13 +876,10 @@ def test_build_rollout_config():
     config = build_rollout_config(
         inner_iters=2,
         max_outer_iters=3,
-        transition_prob=0.75,
     )
     assert config.inner_iters == 2
     assert config.max_outer_iters == 3
-    assert config.transition_prob == 0.75
     assert config.curriculum_training is True
-    assert config.pin_gt is True
 
 
 def test_eval_rollout_config_disables_curriculum():
@@ -1064,6 +908,8 @@ def test_train_metrics_done_only_puzzle_acc():
     acc.add_step(result, state)
     assert int(acc.puzzles_done.item()) == 0
     assert int(acc.correct_puzzles_done.item()) == 0
+    assert int(acc.total_cells.item()) == 0
+    assert int(acc.correct_cells.item()) == 0
 
 
 def test_eval_rollout_reaches_max_outer_iters():
@@ -1083,7 +929,6 @@ def test_train_step_stores_memory_embed():
         batch_size=1,
         device=torch.device("cpu"),
         generator=torch.Generator().manual_seed(0),
-        dim=32,
     )
     config = RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
     model = MixerNextStateModel(dim=32, num_blocks=1)
@@ -1103,7 +948,7 @@ def test_refill_zeros_memory_embed():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
-        dataset, batch_size=1, device=torch.device("cpu"), generator=gen, dim=32,
+        dataset, batch_size=1, device=torch.device("cpu"), generator=gen,
     )
     state.memory_embed = torch.randn(1, 9, 9, 32)
     refill_done_slots(state, torch.tensor([True]), dataset, generator=gen, dim=32)
@@ -1201,61 +1046,56 @@ def test_deep_supervision_regression_single_step():
     assert result_off.loss.item() == result_on.loss.item()
 
 
-def test_adaptive_curriculum_p_gt_upper_bound():
+def test_curriculum_p_gt_upper_bound():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
-    call_count = 0
 
     def rand_side_effect(*args, **kwargs):
-        nonlocal call_count
-        call_count += 1
         if len(args) == 1 and isinstance(args[0], int):
             return torch.ones(args[0])
         shape = args[0] if len(args) == 1 else args
         return torch.full(shape, 0.5)
 
     with patch("rollout.torch.rand", side_effect=rand_side_effect):
-        _, gt_pin_adaptive = _curriculum_init_digit_id(
-            clues, answer, clue_pin, puzzle_acc=0.6, adaptive=True
-        )
-        call_count = 0
-        _, gt_pin_fixed = _curriculum_init_digit_id(
-            clues, answer, clue_pin, puzzle_acc=0.6, adaptive=False
-        )
-    assert not gt_pin_adaptive.any()
-    assert gt_pin_fixed.any()
+        with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
+            digit_id = _curriculum_init_digit_id(
+                clues, answer, clue_pin, puzzle_acc=0.6
+            )
+    assert torch.equal(digit_id[~clue_pin], torch.zeros_like(answer[~clue_pin]))
 
 
-def test_adaptive_curriculum_zero_acc_matches_uniform():
+def test_curriculum_zero_acc_uses_full_range():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
-    torch.manual_seed(42)
-    digit_fixed, gt_fixed = _curriculum_init_digit_id(clues, answer, clue_pin, adaptive=False)
-    torch.manual_seed(42)
-    digit_adaptive, gt_adaptive = _curriculum_init_digit_id(
-        clues, answer, clue_pin, puzzle_acc=0.0, adaptive=True
-    )
-    assert torch.equal(digit_fixed, digit_adaptive)
-    assert torch.equal(gt_fixed, gt_adaptive)
+
+    def rand_side_effect(*args, **kwargs):
+        if len(args) == 1 and isinstance(args[0], int):
+            return torch.ones(args[0])
+        shape = args[0] if len(args) == 1 else args
+        return torch.full(shape, 0.5)
+
+    with patch("rollout.torch.rand", side_effect=rand_side_effect):
+        with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
+            digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, puzzle_acc=0.0)
+    assert torch.equal(digit_id[~clue_pin], answer[~clue_pin])
 
 
-def test_adaptive_curriculum_full_acc_no_reveal():
+def test_curriculum_full_acc_no_reveal():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
-    digit_id, gt_pin = _curriculum_init_digit_id(
-        clues, answer, clue_pin, puzzle_acc=1.0, adaptive=True
+    digit_id = _curriculum_init_digit_id(
+        clues, answer, clue_pin, puzzle_acc=1.0
     )
     assert torch.equal(digit_id[clue_pin], clues[clue_pin])
     assert not torch.equal(digit_id[~clue_pin], clues[~clue_pin])
-    assert not gt_pin.any()
 
 
-def test_adaptive_curriculum_config_update():
+def test_curriculum_puzzle_acc_update():
     from dataclasses import replace
 
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
-    config = replace(RolloutConfig(), curriculum_puzzle_acc=0.8, adaptive_curriculum=True)
+    config = replace(RolloutConfig(), curriculum_puzzle_acc=0.8)
 
     def rand_reveal(*args, **kwargs):
         if len(args) == 1 and isinstance(args[0], int):
@@ -1270,23 +1110,23 @@ def test_adaptive_curriculum_config_update():
         return torch.full(shape, 0.25)
 
     with patch("rollout.torch.rand", side_effect=rand_reveal):
-        _, gt_pin = _curriculum_init_digit_id(
-            clues,
-            answer,
-            clue_pin,
-            puzzle_acc=config.curriculum_puzzle_acc,
-            adaptive=config.adaptive_curriculum,
-        )
+        with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
+            digit_id = _curriculum_init_digit_id(
+                clues,
+                answer,
+                clue_pin,
+                puzzle_acc=config.curriculum_puzzle_acc,
+            )
     with patch("rollout.torch.rand", side_effect=rand_no_reveal):
-        _, gt_pin_tight = _curriculum_init_digit_id(
-            clues,
-            answer,
-            clue_pin,
-            puzzle_acc=config.curriculum_puzzle_acc,
-            adaptive=config.adaptive_curriculum,
-        )
-    assert gt_pin.any()
-    assert not gt_pin_tight.any()
+        with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
+            digit_id_tight = _curriculum_init_digit_id(
+                clues,
+                answer,
+                clue_pin,
+                puzzle_acc=config.curriculum_puzzle_acc,
+            )
+    assert torch.equal(digit_id[~clue_pin], answer[~clue_pin])
+    assert torch.equal(digit_id_tight[~clue_pin], torch.zeros_like(answer[~clue_pin]))
 
 
 def test_build_rollout_config_new_flags():
@@ -1296,7 +1136,5 @@ def test_build_rollout_config_new_flags():
         inner_iters=2,
         max_outer_iters=3,
         deep_supervision=True,
-        adaptive_curriculum=True,
     )
     assert config.deep_supervision is True
-    assert config.adaptive_curriculum is True

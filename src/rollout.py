@@ -14,7 +14,6 @@ from model import MixerNextStateModel
 
 DEFAULT_INNER_ITERS = 5
 DEFAULT_MAX_OUTER_ITERS = 10
-DEFAULT_TRANSITION_PROB = 0.5
 
 
 @dataclass(frozen=True)
@@ -22,11 +21,8 @@ class RolloutConfig:
     inner_iters: int = DEFAULT_INNER_ITERS
     max_outer_iters: int = DEFAULT_MAX_OUTER_ITERS
     halt_threshold: float = 0.5
-    transition_prob: float = DEFAULT_TRANSITION_PROB
     curriculum_training: bool = True
-    pin_gt: bool = True
     deep_supervision: bool = True
-    adaptive_curriculum: bool = True
     curriculum_puzzle_acc: float = 0.0
 
     def __post_init__(self) -> None:
@@ -34,28 +30,6 @@ class RolloutConfig:
             raise ValueError("inner_iters must be >= 1")
         if self.max_outer_iters < 1:
             raise ValueError("max_outer_iters must be >= 1")
-        if not 0.0 < self.transition_prob <= 1.0:
-            raise ValueError("transition_prob must be in (0, 1]")
-
-
-@dataclass(frozen=True)
-class _PinContext:
-    pin: torch.Tensor
-    pin_digit_ids: torch.Tensor
-
-    @classmethod
-    def from_state(
-        cls,
-        clues: torch.Tensor,
-        answer: torch.Tensor,
-        gt_pin: torch.Tensor,
-        *,
-        pin_gt: bool = True,
-    ) -> _PinContext:
-        clue_pin = clues > 0
-        pin = clue_pin | (gt_pin if pin_gt else False)
-        pin_digit_ids = torch.where(clue_pin, clues, answer)
-        return cls(pin=pin, pin_digit_ids=pin_digit_ids)
 
 
 @dataclass
@@ -64,8 +38,6 @@ class BatchSlotState:
     clues: torch.Tensor
     answer: torch.Tensor
     clue_pin: torch.Tensor
-    gt_pin: torch.Tensor
-    pin_ctx: _PinContext
     outer_count: torch.Tensor
     memory_embed: torch.Tensor | None = None
     pending_candidate: torch.Tensor | None = None
@@ -78,10 +50,7 @@ class BatchSlotState:
         device: torch.device,
         *,
         generator: torch.Generator,
-        dim: int,
         curriculum_training: bool = True,
-        pin_gt: bool = True,
-        adaptive_curriculum: bool = True,
         curriculum_puzzle_acc: float = 0.0,
     ) -> BatchSlotState:
         idx = torch.randint(len(dataset), (batch_size,), generator=generator)
@@ -90,24 +59,19 @@ class BatchSlotState:
         answers = answers.to(device, non_blocking=True)
         clue_pin = clues > 0
         if curriculum_training:
-            digit_id, gt_pin = _curriculum_init_digit_id(
+            digit_id = _curriculum_init_digit_id(
                 clues,
                 answers,
                 clue_pin,
                 puzzle_acc=curriculum_puzzle_acc,
-                adaptive=adaptive_curriculum,
             )
         else:
             digit_id = _init_digit_id_from_clues(clues, clue_pin)
-            gt_pin = torch.zeros_like(clue_pin)
-        pin_ctx = _PinContext.from_state(clues, answers, gt_pin, pin_gt=pin_gt)
         return cls(
             digit_id=digit_id,
             clues=clues,
             answer=answers,
             clue_pin=clue_pin,
-            gt_pin=gt_pin,
-            pin_ctx=pin_ctx,
             outer_count=torch.zeros(batch_size, dtype=torch.long, device=device),
         )
 
@@ -247,44 +211,19 @@ def _compute_deep_supervision_losses(
     return cell_loss, halt_loss, total_loss
 
 
-def _transition_board(
-    candidate: torch.Tensor,
-    ctx: _PinContext,
-    prev_digit_id: torch.Tensor,
-    *,
-    transition_prob: float,
-) -> torch.Tensor:
-    """Apply masked transition; candidate is clean pred with pins reapplied."""
-    candidate = torch.where(ctx.pin, ctx.pin_digit_ids, candidate)
-    if transition_prob >= 1.0:
-        return candidate
-    transition_mask = ~ctx.pin & (
-        torch.rand(prev_digit_id.shape, device=prev_digit_id.device) < transition_prob
-    )
-    return torch.where(ctx.pin | transition_mask, candidate, prev_digit_id)
-
-
 def _begin_outer_step(
     digit_id: torch.Tensor,
-    pin_ctx: _PinContext,
     *,
     pending_candidate: torch.Tensor | None,
     outer_count: torch.Tensor,
-    transition_prob: float,
 ) -> torch.Tensor:
-    """Apply deferred transition from the prior outer step before inner loop."""
+    """Apply deferred full transition from the prior outer step before inner loop."""
     if pending_candidate is None:
         return digit_id
     commit_mask = (outer_count > 0).view(-1, 1, 1)
     if not commit_mask.any():
         return digit_id
-    committed = _transition_board(
-        pending_candidate,
-        pin_ctx,
-        digit_id,
-        transition_prob=transition_prob,
-    )
-    return torch.where(commit_mask, committed, digit_id)
+    return torch.where(commit_mask, pending_candidate, digit_id)
 
 
 def _puzzle_init_seed(clues_row: torch.Tensor, base_seed: int) -> int:
@@ -344,21 +283,17 @@ def _curriculum_init_digit_id(
     clue_pin: torch.Tensor,
     *,
     puzzle_acc: float = 0.0,
-    adaptive: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     """Training-only puzzle entry: partial GT reveal; unrevealed non-clue cells are random."""
     digit_id = clues.clone()
     non_clue = ~clue_pin
     b, device = clues.size(0), clues.device
 
-    p_gt = torch.rand(b, device=device)
-    if adaptive:
-        upper = max(0.0, 1.0 - puzzle_acc)
-        p_gt = p_gt * upper
+    upper = max(0.0, 1.0 - puzzle_acc)
+    p_gt = torch.rand(b, device=device) * upper
     reveal = non_clue & (torch.rand(clues.shape, device=device) < p_gt.view(b, 1, 1))
     digit_id = torch.where(reveal, answer, digit_id)
-    digit_id = _random_fill_unpinned(digit_id, non_clue & ~reveal)
-    return digit_id, reveal
+    return _random_fill_unpinned(digit_id, non_clue & ~reveal)
 
 
 def _inner_loop(
@@ -416,10 +351,8 @@ def rollout_train_step(
         raise ValueError("rollout_train_step requires model.training")
     state.digit_id = _begin_outer_step(
         state.digit_id,
-        state.pin_ctx,
         pending_candidate=state.pending_candidate,
         outer_count=state.outer_count,
-        transition_prob=config.transition_prob,
     )
     if config.deep_supervision:
         step_outputs, final_cell_embed = _inner_loop(
@@ -489,8 +422,6 @@ def refill_done_slots(
     generator: torch.Generator,
     dim: int,
     curriculum_training: bool = True,
-    pin_gt: bool = True,
-    adaptive_curriculum: bool = True,
     curriculum_puzzle_acc: float = 0.0,
 ) -> None:
     b = done.size(0)
@@ -502,24 +433,18 @@ def refill_done_slots(
     done_mask = done.view(b, 1, 1)
     new_clue_pin = new_clues > 0
     if curriculum_training:
-        new_digit_id, new_gt_pin = _curriculum_init_digit_id(
+        new_digit_id = _curriculum_init_digit_id(
             new_clues,
             new_answers,
             new_clue_pin,
             puzzle_acc=curriculum_puzzle_acc,
-            adaptive=adaptive_curriculum,
         )
     else:
         new_digit_id = _init_digit_id_from_clues(new_clues, new_clue_pin)
-        new_gt_pin = torch.zeros_like(new_clue_pin)
     state.digit_id = torch.where(done_mask, new_digit_id, state.digit_id)
     state.clues = torch.where(done_mask, new_clues, state.clues)
     state.answer = torch.where(done_mask, new_answers, state.answer)
     state.clue_pin = state.clues > 0
-    state.gt_pin = torch.where(done_mask, new_gt_pin, state.gt_pin)
-    state.pin_ctx = _PinContext.from_state(
-        state.clues, state.answer, state.gt_pin, pin_gt=pin_gt
-    )
     state.outer_count = torch.where(done, torch.zeros_like(state.outer_count), state.outer_count)
     done_mask_mem = done.view(b, 1, 1, 1)
     if state.memory_embed is not None:
@@ -584,7 +509,6 @@ def _iter_compact_outer_rollout(
     device = clues.device
 
     clue_pin = clues > 0
-    gt_pin = torch.zeros_like(clue_pin)
     digit_id = _init_digit_id_from_clues(clues, clue_pin, init_seed=init_seed)
 
     slot_idx = torch.arange(b, device=device)
@@ -593,18 +517,14 @@ def _iter_compact_outer_rollout(
     active_answer = answer
     active_clue_pin = clue_pin
     active_outer_count = torch.zeros(b, dtype=torch.long, device=device)
-    active_ctx = _PinContext.from_state(clues, answer, gt_pin)
     active_memory_embed: torch.Tensor | None = None
     pending_candidate: torch.Tensor | None = None
 
     while slot_idx.numel() > 0:
-        active_gt_pin = gt_pin[slot_idx]
         active_digit_id = _begin_outer_step(
             active_digit_id,
-            active_ctx,
             pending_candidate=_pending_for_active(pending_candidate, slot_idx),
             outer_count=active_outer_count,
-            transition_prob=config.transition_prob,
         )
         model_input = active_digit_id
         logits, halt_logit, final_cell_embed = _inner_loop(
@@ -649,10 +569,8 @@ def _iter_compact_outer_rollout(
         active_clues = active_clues[keep]
         active_answer = active_answer[keep]
         active_clue_pin = active_clue_pin[keep]
-        active_gt_pin = active_gt_pin[keep]
         active_outer_count = active_outer_count[keep]
         active_memory_embed = active_memory_embed[keep] if active_memory_embed is not None else None
-        active_ctx = _PinContext.from_state(active_clues, active_answer, active_gt_pin)
 
 
 def _rollout_eval_batch_once(
