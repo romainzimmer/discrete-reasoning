@@ -24,6 +24,7 @@ def test_eval_metrics_accumulator():
         halt_logit=torch.zeros(2),
         halt_correct_rounds=3,
         halt_total_rounds=10,
+        tries=torch.tensor([2, 3]),
     )
     acc.add_batch(result, answer, clues)
     stats = acc.finalize()
@@ -32,3 +33,4 @@ def test_eval_metrics_accumulator():
     assert stats.halt_acc == 0.3
     assert stats.avg_outer_iters == 2.5
     assert stats.halt_rate == 0.5
+    assert stats.avg_tries == 2.5

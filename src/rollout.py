@@ -136,6 +136,18 @@ class EvalRolloutResult:
     halt_logit: torch.Tensor
     halt_correct_rounds: int
     halt_total_rounds: int
+    tries: torch.Tensor
+
+
+@dataclass
+class _OnceEvalState:
+    pred: torch.Tensor
+    outer_steps: torch.Tensor
+    halted: torch.Tensor
+    final_logits: torch.Tensor
+    final_halt_logit: torch.Tensor
+    halt_correct_by_puzzle: torch.Tensor
+    halt_total_by_puzzle: torch.Tensor
 
 
 @dataclass
@@ -643,6 +655,179 @@ def _iter_compact_outer_rollout(
         active_ctx = _PinContext.from_state(active_clues, active_answer, active_gt_pin)
 
 
+def _rollout_eval_batch_once(
+    model: MixerNextStateModel,
+    clues_b: torch.Tensor,
+    answer_b: torch.Tensor,
+    *,
+    config: RolloutConfig,
+    init_seed: int | None,
+) -> _OnceEvalState:
+    b = clues_b.size(0)
+    device = clues_b.device
+
+    out_pred = clues_b.clone()
+    out_steps = torch.zeros(b, dtype=torch.long, device=device)
+    out_halted = torch.zeros(b, dtype=torch.bool, device=device)
+    final_logits = clues_b.new_zeros((b, 9, 9, 10), dtype=LOSS_DTYPE)
+    final_halt_logit = clues_b.new_zeros((b,), dtype=LOSS_DTYPE)
+    halt_correct_by_puzzle = torch.zeros(b, dtype=torch.long, device=device)
+    halt_total_by_puzzle = torch.zeros(b, dtype=torch.long, device=device)
+
+    for step in _iter_compact_outer_rollout(
+        model, clues_b, answer_b, config=config, init_seed=init_seed
+    ):
+        halt_target_round = _halt_target(step.pre_commit, step.active_answer)
+        round_correct = (step.predict_halt == (halt_target_round > 0.5)).long()
+        halt_correct_by_puzzle[step.slot_idx] += round_correct
+        halt_total_by_puzzle[step.slot_idx] += 1
+        final_logits[step.slot_idx] = to_loss_dtype(step.logits)
+        final_halt_logit[step.slot_idx] = to_loss_dtype(step.halt_logit)
+        done_idx = step.slot_idx[step.done]
+        out_pred[done_idx] = step.pre_commit[step.done]
+        out_steps[done_idx] = step.active_outer_count[step.done]
+        out_halted[done_idx] = step.predict_halt[step.done]
+
+    return _OnceEvalState(
+        pred=out_pred,
+        outer_steps=out_steps,
+        halted=out_halted,
+        final_logits=final_logits,
+        final_halt_logit=final_halt_logit,
+        halt_correct_by_puzzle=halt_correct_by_puzzle,
+        halt_total_by_puzzle=halt_total_by_puzzle,
+    )
+
+
+def _try_init_seed(init_seed: int | None, try_idx: int) -> int | None:
+    if init_seed is None:
+        return None
+    return init_seed + try_idx
+
+
+def _copy_once_state(
+    out: _OnceEvalState,
+    sub: _OnceEvalState,
+    slot_idx: torch.Tensor,
+    local_mask: torch.Tensor,
+) -> None:
+    local_idx = local_mask.nonzero(as_tuple=True)[0]
+    accept_global = slot_idx[local_mask]
+    out.pred[accept_global] = sub.pred[local_idx]
+    out.outer_steps[accept_global] = sub.outer_steps[local_idx]
+    out.halted[accept_global] = sub.halted[local_idx]
+    out.final_logits[accept_global] = sub.final_logits[local_idx]
+    out.final_halt_logit[accept_global] = sub.final_halt_logit[local_idx]
+    out.halt_correct_by_puzzle[accept_global] = sub.halt_correct_by_puzzle[local_idx]
+    out.halt_total_by_puzzle[accept_global] = sub.halt_total_by_puzzle[local_idx]
+
+
+def _once_state_to_result(
+    state: _OnceEvalState,
+    clues_b: torch.Tensor,
+    answer_b: torch.Tensor,
+    *,
+    halt_loss_weight: float,
+    tries: torch.Tensor,
+    was_batched: bool,
+) -> EvalRolloutResult:
+    clue_pin = clues_b > 0
+    halt_target = _halt_target(predict_grid(state.final_logits, clues_b), answer_b)
+    cell_loss, halt_loss, loss = _compute_losses(
+        state.final_logits,
+        state.final_halt_logit,
+        clue_pin=clue_pin,
+        answer=answer_b,
+        halt_target=halt_target,
+        halt_loss_weight=halt_loss_weight,
+    )
+    halt_correct_rounds = int(state.halt_correct_by_puzzle.sum().item())
+    halt_total_rounds = int(state.halt_total_by_puzzle.sum().item())
+    if not was_batched:
+        return EvalRolloutResult(
+            pred=state.pred.squeeze(0),
+            outer_steps=state.outer_steps.squeeze(0),
+            halted=state.halted.squeeze(0),
+            loss=loss,
+            cell_loss=cell_loss,
+            halt_loss=halt_loss,
+            halt_target=halt_target.squeeze(0),
+            halt_logit=state.final_halt_logit.squeeze(0),
+            halt_correct_rounds=halt_correct_rounds,
+            halt_total_rounds=halt_total_rounds,
+            tries=tries.squeeze(0),
+        )
+    return EvalRolloutResult(
+        pred=state.pred,
+        outer_steps=state.outer_steps,
+        halted=state.halted,
+        loss=loss,
+        cell_loss=cell_loss,
+        halt_loss=halt_loss,
+        halt_target=halt_target,
+        halt_logit=state.final_halt_logit,
+        halt_correct_rounds=halt_correct_rounds,
+        halt_total_rounds=halt_total_rounds,
+        tries=tries,
+    )
+
+
+def _rollout_eval_batch_multi_try(
+    model: MixerNextStateModel,
+    clues_b: torch.Tensor,
+    answer_b: torch.Tensor,
+    *,
+    config: RolloutConfig,
+    halt_loss_weight: float,
+    init_seed: int | None,
+    max_tries: int,
+    was_batched: bool,
+) -> EvalRolloutResult:
+    b = clues_b.size(0)
+    device = clues_b.device
+    pending = torch.ones(b, dtype=torch.bool, device=device)
+    tries = torch.zeros(b, dtype=torch.long, device=device)
+    merged = _OnceEvalState(
+        pred=clues_b.clone(),
+        outer_steps=torch.zeros(b, dtype=torch.long, device=device),
+        halted=torch.zeros(b, dtype=torch.bool, device=device),
+        final_logits=clues_b.new_zeros((b, 9, 9, 10), dtype=LOSS_DTYPE),
+        final_halt_logit=clues_b.new_zeros((b,), dtype=LOSS_DTYPE),
+        halt_correct_by_puzzle=torch.zeros(b, dtype=torch.long, device=device),
+        halt_total_by_puzzle=torch.zeros(b, dtype=torch.long, device=device),
+    )
+
+    for try_idx in range(max_tries):
+        if not pending.any():
+            break
+        slot_idx = pending.nonzero(as_tuple=True)[0]
+        sub = _rollout_eval_batch_once(
+            model,
+            clues_b[slot_idx],
+            answer_b[slot_idx],
+            config=config,
+            init_seed=_try_init_seed(init_seed, try_idx),
+        )
+        tries[slot_idx] += 1
+        sub_halted = sub.halted
+        if try_idx == max_tries - 1:
+            accept = torch.ones(sub_halted.size(0), dtype=torch.bool, device=device)
+        else:
+            accept = sub_halted
+        if accept.any():
+            _copy_once_state(merged, sub, slot_idx, accept)
+            pending[slot_idx[accept]] = False
+
+    return _once_state_to_result(
+        merged,
+        clues_b,
+        answer_b,
+        halt_loss_weight=halt_loss_weight,
+        tries=tries,
+        was_batched=was_batched,
+    )
+
+
 @torch.inference_mode()
 def rollout_eval_batch(
     model: MixerNextStateModel,
@@ -652,70 +837,35 @@ def rollout_eval_batch(
     config: RolloutConfig | None = None,
     halt_loss_weight: float = 1.0,
     init_seed: int | None = 0,
+    max_tries: int = 1,
 ) -> EvalRolloutResult:
     config = config or RolloutConfig()
     clues_b, was_batched = _ensure_batched(clues)
     answer_b, _ = _ensure_batched(answer)
     b = clues_b.size(0)
-    device = clues_b.device
-    clue_pin = clues_b > 0
-
-    out_pred = clues_b.clone()
-    out_steps = torch.zeros(b, dtype=torch.long, device=device)
-    out_halted = torch.zeros(b, dtype=torch.bool, device=device)
-    final_logits = clues_b.new_zeros((b, 9, 9, 10), dtype=LOSS_DTYPE)
-    final_halt_logit = clues_b.new_zeros((b,), dtype=LOSS_DTYPE)
-    halt_correct_rounds = torch.zeros((), device=device, dtype=torch.long)
-    halt_total_rounds = 0
-
-    for step in _iter_compact_outer_rollout(
-        model, clues_b, answer_b, config=config, init_seed=init_seed
-    ):
-        halt_target_round = _halt_target(step.pre_commit, step.active_answer)
-        halt_correct_rounds += (step.predict_halt == (halt_target_round > 0.5)).sum()
-        halt_total_rounds += step.pre_commit.size(0)
-        final_logits[step.slot_idx] = to_loss_dtype(step.logits)
-        final_halt_logit[step.slot_idx] = to_loss_dtype(step.halt_logit)
-        done_idx = step.slot_idx[step.done]
-        out_pred[done_idx] = step.pre_commit[step.done]
-        out_steps[done_idx] = step.active_outer_count[step.done]
-        out_halted[done_idx] = step.predict_halt[step.done]
-
-    pre_commit_final = predict_grid(final_logits, clues_b)
-    halt_target = _halt_target(pre_commit_final, answer_b)
-    cell_loss, halt_loss, loss = _compute_losses(
-        final_logits,
-        final_halt_logit,
-        clue_pin=clue_pin,
-        answer=answer_b,
-        halt_target=halt_target,
-        halt_loss_weight=halt_loss_weight,
-    )
-
-    if not was_batched:
-        return EvalRolloutResult(
-            pred=out_pred.squeeze(0),
-            outer_steps=out_steps.squeeze(0),
-            halted=out_halted.squeeze(0),
-            loss=loss,
-            cell_loss=cell_loss,
-            halt_loss=halt_loss,
-            halt_target=halt_target.squeeze(0),
-            halt_logit=final_halt_logit.squeeze(0),
-            halt_correct_rounds=int(halt_correct_rounds.item()),
-            halt_total_rounds=halt_total_rounds,
+    if max_tries > 1:
+        return _rollout_eval_batch_multi_try(
+            model,
+            clues_b,
+            answer_b,
+            config=config,
+            halt_loss_weight=halt_loss_weight,
+            init_seed=init_seed,
+            max_tries=max_tries,
+            was_batched=was_batched,
         )
-    return EvalRolloutResult(
-        pred=out_pred,
-        outer_steps=out_steps,
-        halted=out_halted,
-        loss=loss,
-        cell_loss=cell_loss,
-        halt_loss=halt_loss,
-        halt_target=halt_target,
-        halt_logit=final_halt_logit,
-        halt_correct_rounds=int(halt_correct_rounds.item()),
-        halt_total_rounds=halt_total_rounds,
+
+    state = _rollout_eval_batch_once(
+        model, clues_b, answer_b, config=config, init_seed=init_seed
+    )
+    tries = torch.ones(b, dtype=torch.long, device=clues_b.device)
+    return _once_state_to_result(
+        state,
+        clues_b,
+        answer_b,
+        halt_loss_weight=halt_loss_weight,
+        tries=tries,
+        was_batched=was_batched,
     )
 
 

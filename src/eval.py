@@ -25,6 +25,7 @@ def save_test_metrics(
     max_rating: int | None,
     inner_iters: int,
     max_outer_iters: int,
+    max_tries: int,
     transition_prob: float,
 ) -> None:
     history_path = run_dir / "history.json"
@@ -39,6 +40,7 @@ def save_test_metrics(
         "max_rating": max_rating,
         "inner_iters": inner_iters,
         "max_outer_iters": max_outer_iters,
+        "max_tries": max_tries,
         "transition_prob": transition_prob,
         **asdict(test),
     }
@@ -90,6 +92,12 @@ def main() -> None:
         type=float,
         default=None,
         help="Outer commit transition prob (default: from checkpoint, else 0.5)",
+    )
+    parser.add_argument(
+        "--max-tries",
+        type=int,
+        default=1,
+        help="Max random inits per puzzle; stop at first halt, else keep last try (default: 1)",
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducible test metrics")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -161,6 +169,7 @@ def main() -> None:
         use_cuda=use_cuda,
         seed=args.seed,
         amp=amp,
+        max_tries=args.max_tries,
     )
     save_test_metrics(
         run_dir,
@@ -171,14 +180,16 @@ def main() -> None:
         max_rating=args.max_rating,
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
+        max_tries=args.max_tries,
         transition_prob=transition_prob,
     )
     print(
         f"test (epoch {epoch}, n={len(test_rows)}, inner={inner_iters}, max_outer={max_outer_iters}, "
-        f"transition={transition_prob}): "
+        f"max_tries={args.max_tries}, transition={transition_prob}): "
         f"loss={test.loss:.4f} cell_acc={test.cell_acc:.4f} "
         f"cell_loss={test.cell_loss:.4f} halt_loss={test.halt_loss:.4f} "
-        f"puzzle_acc={test.puzzle_acc:.4f} halt_rate={test.halt_rate:.4f}",
+        f"puzzle_acc={test.puzzle_acc:.4f} halt_rate={test.halt_rate:.4f} "
+        f"avg_tries={test.avg_tries:.4f}",
         flush=True,
     )
 

@@ -13,7 +13,9 @@ from rollout import (
     DEFAULT_MAX_OUTER_ITERS,
     BatchSlotState,
     RolloutConfig,
+    _OnceEvalState,
     _PinContext,
+    _copy_once_state,
     _compute_cell_loss,
     _compute_deep_supervision_losses,
     _compute_halt_loss,
@@ -372,6 +374,84 @@ def test_halt_stops_eval_early():
     with patch("rollout._predict_halt", side_effect=[torch.tensor([False]), torch.tensor([True])]):
         result = rollout_eval_batch(model, clues, answer, config=config)
     assert result.outer_steps.item() == 2
+
+
+def test_eval_multi_try_stops_at_first_halt():
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.eval()
+    clues, answer = _tiny_batch()
+    config = _baseline_config(inner_iters=1, max_outer_iters=1, halt_threshold=0.5)
+    with patch(
+        "rollout._predict_halt",
+        side_effect=[torch.tensor([False]), torch.tensor([True])],
+    ):
+        result = rollout_eval_batch(model, clues, answer, config=config, max_tries=3, init_seed=0)
+    assert result.tries.item() == 2
+    assert result.halted.item() is True
+
+
+def test_eval_multi_try_keeps_last_try_without_halt():
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.eval()
+    clues, answer = _tiny_batch()
+    config = _baseline_config(inner_iters=1, max_outer_iters=2, halt_threshold=0.5)
+    with patch("rollout._predict_halt", return_value=torch.tensor([False])):
+        result = rollout_eval_batch(model, clues, answer, config=config, max_tries=3, init_seed=0)
+    assert result.tries.item() == 3
+    assert result.halted.item() is False
+    assert result.outer_steps.item() == 2
+
+
+def test_eval_multi_try_uses_different_init_seeds():
+    import rollout as rollout_module
+
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.eval()
+    clues, answer = _tiny_batch()
+    config = _baseline_config(inner_iters=1, max_outer_iters=1)
+    seeds_seen: list[int | None] = []
+    original_init = rollout_module._init_digit_id_from_clues
+
+    def track_init(clues_tensor, clue_pin, *, init_seed=None):
+        seeds_seen.append(init_seed)
+        return original_init(clues_tensor, clue_pin, init_seed=init_seed)
+
+    with patch.object(rollout_module, "_init_digit_id_from_clues", side_effect=track_init):
+        with patch("rollout._predict_halt", return_value=torch.tensor([False])):
+            rollout_eval_batch(model, clues, answer, config=config, max_tries=2, init_seed=7)
+    assert seeds_seen == [7, 8]
+
+
+def test_copy_once_state_scatters_partial_accept():
+    out = _OnceEvalState(
+        pred=torch.zeros(2, 9, 9, dtype=torch.long),
+        outer_steps=torch.zeros(2, dtype=torch.long),
+        halted=torch.zeros(2, dtype=torch.bool),
+        final_logits=torch.zeros(2, 9, 9, 10),
+        final_halt_logit=torch.zeros(2),
+        halt_correct_by_puzzle=torch.zeros(2, dtype=torch.long),
+        halt_total_by_puzzle=torch.zeros(2, dtype=torch.long),
+    )
+    sub = _OnceEvalState(
+        pred=torch.stack([torch.full((9, 9), 1, dtype=torch.long), torch.full((9, 9), 2, dtype=torch.long)]),
+        outer_steps=torch.tensor([10, 20]),
+        halted=torch.tensor([True, False]),
+        final_logits=torch.zeros(2, 9, 9, 10),
+        final_halt_logit=torch.zeros(2),
+        halt_correct_by_puzzle=torch.tensor([3, 7]),
+        halt_total_by_puzzle=torch.tensor([4, 8]),
+    )
+    _copy_once_state(
+        out,
+        sub,
+        slot_idx=torch.tensor([0, 1]),
+        local_mask=torch.tensor([True, False]),
+    )
+    assert out.halted.tolist() == [True, False]
+    assert out.outer_steps.tolist() == [10, 0]
+    assert out.halt_correct_by_puzzle.tolist() == [3, 0]
+    assert out.pred[0, 0, 0].item() == 1
+    assert out.pred[1, 0, 0].item() == 0
 
 
 def test_eval_compact_scatter():

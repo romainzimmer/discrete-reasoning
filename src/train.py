@@ -217,6 +217,7 @@ class EpochStats:
     halt_acc: float = 0.0
     avg_outer_iters: float = 0.0
     halt_rate: float = 0.0
+    avg_tries: float = 0.0
 
 
 @dataclass
@@ -231,6 +232,7 @@ class EvalMetricsAccumulator:
     correct_puzzles: torch.Tensor
     outer_iters_sum: torch.Tensor
     halted_count: torch.Tensor
+    tries_sum: torch.Tensor
     n: torch.Tensor
 
     @classmethod
@@ -248,6 +250,7 @@ class EvalMetricsAccumulator:
             correct_puzzles=zero_i.clone(),
             outer_iters_sum=zero.clone(),
             halted_count=zero_i.clone(),
+            tries_sum=zero.clone(),
             n=zero_i.clone(),
         )
 
@@ -277,6 +280,8 @@ class EvalMetricsAccumulator:
         self.outer_iters_sum += outer_steps.sum()
         halted = result.halted.unsqueeze(0) if result.halted.dim() == 0 else result.halted
         self.halted_count += halted.sum()
+        tries = result.tries.unsqueeze(0) if result.tries.dim() == 0 else result.tries
+        self.tries_sum += tries.sum()
 
     def finalize(self) -> EpochStats:
         n = int(self.n.item())
@@ -293,6 +298,7 @@ class EvalMetricsAccumulator:
             halt_acc=self.halt_correct.item() / halt_total if halt_total else 0.0,
             avg_outer_iters=self.outer_iters_sum.item() / n,
             halt_rate=self.halted_count.item() / n,
+            avg_tries=self.tries_sum.item() / n,
         )
 
 
@@ -500,6 +506,7 @@ def measure_split(
     use_cuda: bool,
     seed: int | None = None,
     amp: AmpConfig | None = None,
+    max_tries: int = 1,
 ) -> EpochStats:
     if seed is not None:
         _seed_all(seed)
@@ -522,6 +529,7 @@ def measure_split(
                 config=rollout_config,
                 halt_loss_weight=halt_loss_weight,
                 init_seed=seed,
+                max_tries=max_tries,
             )
         acc.add_batch(result, batch["answer"], batch["clues"])
     progress.close()
