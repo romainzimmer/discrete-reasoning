@@ -504,13 +504,17 @@ def measure_split(
     model.eval()
     amp = amp or AmpConfig(enabled=False, dtype=None, scaler=None)
     acc = EvalMetricsAccumulator.empty(device)
+    n_batches = len(loader)
     progress = tqdm(
         total=len(loader.dataset),
         desc=_epoch_desc(epoch, epochs, phase),
         leave=False,
         unit="puzzle",
+        mininterval=0.5,
     )
-    for batch in loader:
+    for batch_idx, batch in enumerate(loader):
+        n = batch["clues"].size(0)
+        progress.set_postfix(batch=f"{batch_idx + 1}/{n_batches}", size=n, refresh=True)
         batch = {k: v.to(device, non_blocking=use_cuda) for k, v in batch.items()}
         with autocast_context(device, amp):
             result = rollout_eval_batch(
@@ -523,7 +527,7 @@ def measure_split(
                 max_tries=max_tries,
             )
         acc.add_batch(result, batch["answer"], batch["clues"])
-        progress.update(batch["clues"].size(0))
+        progress.update(n)
     progress.close()
     return acc.finalize()
 

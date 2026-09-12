@@ -145,6 +145,12 @@ def main() -> None:
         default=None,
         help="Eval batch size (default: val batch size from checkpoint, else train batch size)",
     )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="DataLoader workers for eval (default: 0)",
+    )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducible test metrics")
     parser.add_argument(
         "--sweep",
@@ -180,12 +186,19 @@ def main() -> None:
     batch_size = args.batch_size if args.batch_size is not None else default_batch_size
     if batch_size < 1:
         raise ValueError("--batch-size must be >= 1")
+    if args.num_workers < 0:
+        raise ValueError("--num-workers must be >= 0")
     test_loader = DataLoader(
         PuzzleDataset(rows=test_rows),
         batch_size=batch_size,
         collate_fn=collate_puzzles,
-        pin_memory=use_cuda,
-        num_workers=run_args["num_workers"],
+        pin_memory=use_cuda and args.num_workers == 0,
+        num_workers=args.num_workers,
+    )
+    print(
+        f"test eval: {len(test_rows)} puzzles, batch_size={batch_size}, "
+        f"batches={len(test_loader)}, num_workers={args.num_workers}",
+        flush=True,
     )
 
     model = MixerNextStateModel(
