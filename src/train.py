@@ -9,12 +9,11 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from amp import AmpConfig, autocast_context, resolve_amp
 from augment import AugmentConfig
-from dataset import PuzzleDataset, collate_puzzles, filter_rows
+from dataset import PuzzleDataset, filter_rows
 from encoding import cell_acc_mask
 from model import MixerNextStateModel
 from rollout import (
@@ -25,6 +24,7 @@ from rollout import (
     RolloutResult,
     refill_done_slots,
     rollout_eval_batch,
+    rollout_eval_stream,
     rollout_train_step,
 )
 from profiling import ProfileConfig, TrainProfiler
@@ -483,12 +483,87 @@ def _seed_all(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def _accumulate_static_eval_batches(
+    model: MixerNextStateModel,
+    clues: torch.Tensor,
+    answers: torch.Tensor,
+    device: torch.device,
+    *,
+    slot_batch_size: int,
+    rollout_config: RolloutConfig,
+    halt_loss_weight: float,
+    use_cuda: bool,
+    seed: int | None,
+    amp: AmpConfig,
+    max_tries: int,
+) -> EvalMetricsAccumulator:
+    acc = EvalMetricsAccumulator.empty(device)
+    clues = clues.to(device, non_blocking=use_cuda)
+    answers = answers.to(device, non_blocking=use_cuda)
+    for start in range(0, clues.size(0), slot_batch_size):
+        end = min(start + slot_batch_size, clues.size(0))
+        batch_clues = clues[start:end]
+        batch_answers = answers[start:end]
+        with autocast_context(device, amp):
+            result = rollout_eval_batch(
+                model,
+                batch_clues,
+                batch_answers,
+                config=rollout_config,
+                halt_loss_weight=halt_loss_weight,
+                init_seed=seed,
+                max_tries=max_tries,
+            )
+        acc.add_batch(result, batch_answers, batch_clues)
+    return acc
+
+
+def _accumulate_stream_eval(
+    model: MixerNextStateModel,
+    clues: torch.Tensor,
+    answers: torch.Tensor,
+    device: torch.device,
+    *,
+    slot_batch_size: int,
+    rollout_config: RolloutConfig,
+    halt_loss_weight: float,
+    use_cuda: bool,
+    seed: int | None,
+    amp: AmpConfig,
+    max_tries: int,
+    progress,
+) -> EvalMetricsAccumulator:
+    acc = EvalMetricsAccumulator.empty(device)
+    clues = clues.to(device, non_blocking=use_cuda)
+    answers = answers.to(device, non_blocking=use_cuda)
+    with autocast_context(device, amp):
+        for result, row_clues, row_answer in rollout_eval_stream(
+            model,
+            clues,
+            answers,
+            slot_batch_size=slot_batch_size,
+            config=rollout_config,
+            halt_loss_weight=halt_loss_weight,
+            init_seed=seed,
+            max_tries=max_tries,
+        ):
+            acc.add_batch(
+                result,
+                row_answer.unsqueeze(0),
+                row_clues.unsqueeze(0),
+            )
+            progress.update(1)
+    return acc
+
+
 @torch.inference_mode()
 def measure_split(
     model: MixerNextStateModel,
-    loader: DataLoader,
+    clues: torch.Tensor,
+    answers: torch.Tensor,
     device: torch.device,
     *,
+    slot_batch_size: int,
     epoch: int,
     epochs: int,
     phase: str,
@@ -498,36 +573,51 @@ def measure_split(
     seed: int | None = None,
     amp: AmpConfig | None = None,
     max_tries: int = 1,
+    use_stream: bool = True,
 ) -> EpochStats:
     if seed is not None:
         _seed_all(seed)
     model.eval()
     amp = amp or AmpConfig(enabled=False, dtype=None, scaler=None)
-    acc = EvalMetricsAccumulator.empty(device)
-    n_batches = len(loader)
+    n_puzzles = clues.size(0)
     progress = tqdm(
-        total=len(loader.dataset),
+        total=n_puzzles,
         desc=_epoch_desc(epoch, epochs, phase),
         leave=False,
         unit="puzzle",
         mininterval=0.5,
     )
-    for batch_idx, batch in enumerate(loader):
-        n = batch["clues"].size(0)
-        progress.set_postfix(batch=f"{batch_idx + 1}/{n_batches}", size=n, refresh=True)
-        batch = {k: v.to(device, non_blocking=use_cuda) for k, v in batch.items()}
-        with autocast_context(device, amp):
-            result = rollout_eval_batch(
-                model,
-                batch["clues"],
-                batch["answer"],
-                config=rollout_config,
-                halt_loss_weight=halt_loss_weight,
-                init_seed=seed,
-                max_tries=max_tries,
-            )
-        acc.add_batch(result, batch["answer"], batch["clues"])
-        progress.update(n)
+    progress.set_postfix(slots=slot_batch_size, refresh=True)
+    if use_stream:
+        acc = _accumulate_stream_eval(
+            model,
+            clues,
+            answers,
+            device,
+            slot_batch_size=slot_batch_size,
+            rollout_config=rollout_config,
+            halt_loss_weight=halt_loss_weight,
+            use_cuda=use_cuda,
+            seed=seed,
+            amp=amp,
+            max_tries=max_tries,
+            progress=progress,
+        )
+    else:
+        acc = _accumulate_static_eval_batches(
+            model,
+            clues,
+            answers,
+            device,
+            slot_batch_size=slot_batch_size,
+            rollout_config=rollout_config,
+            halt_loss_weight=halt_loss_weight,
+            use_cuda=use_cuda,
+            seed=seed,
+            amp=amp,
+            max_tries=max_tries,
+        )
+        progress.update(n_puzzles)
     progress.close()
     return acc.finalize()
 
@@ -656,17 +746,10 @@ def main() -> None:
         aug_seed=args.seed,
         pin_memory=use_cuda,
     )
-    # Val uses DataLoader workers; do not pin base tensors (fork + pinned memory segfaults on Jetson).
     val_ds = PuzzleDataset(rows=val_rows)
     args.train_samples = len(train_rows)
     args.val_samples_count = len(val_rows)
-    loader_kwargs = {
-        "collate_fn": collate_puzzles,
-        "pin_memory": use_cuda,
-        "num_workers": args.num_workers,
-    }
     val_batch_size = args.val_batch_size or args.train_batch_size
-    val_loader = DataLoader(val_ds, batch_size=val_batch_size, **loader_kwargs)
 
     args.model = "looped-mixer"
     args.amp = not args.no_amp
@@ -756,8 +839,10 @@ def main() -> None:
             )
         val = measure_split(
             model,
-            val_loader,
+            val_ds._base_clues,
+            val_ds._base_answers,
             device,
+            slot_batch_size=val_batch_size,
             epoch=epoch,
             epochs=args.epochs,
             phase="val",

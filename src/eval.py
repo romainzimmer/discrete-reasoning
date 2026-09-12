@@ -6,9 +6,8 @@ from dataclasses import asdict
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
 
-from dataset import PuzzleDataset, collate_puzzles, filter_rows
+from dataset import PuzzleDataset, filter_rows
 from model import MixerNextStateModel
 from amp import resolve_amp
 from train import EpochStats, build_rollout_config, measure_split, require_run_args
@@ -20,6 +19,9 @@ SWEEP_OUTER_START = 10
 SWEEP_OUTER_STEP = 10
 SWEEP_TRIES_START = 10
 SWEEP_TRIES_STEP = 10
+SWEEP_DEFAULT_INNER = 3
+SWEEP_DEFAULT_OUTER = 30
+SWEEP_DEFAULT_TRIES = 10
 
 
 def _sweep_values(start: int, stop: int, step: int) -> list[int]:
@@ -73,20 +75,20 @@ def save_test_metrics(
     }
     if inner_sweep is not None:
         payload["inner_sweep"] = {
-            "max_outer_iters": max_outer_iters,
-            "max_tries": max_tries,
+            "max_outer_iters": SWEEP_DEFAULT_OUTER,
+            "max_tries": SWEEP_DEFAULT_TRIES,
             "points": inner_sweep,
         }
     if outer_sweep is not None:
         payload["outer_sweep"] = {
-            "inner_iters": inner_iters,
-            "max_tries": max_tries,
+            "inner_iters": SWEEP_DEFAULT_INNER,
+            "max_tries": SWEEP_DEFAULT_TRIES,
             "points": outer_sweep,
         }
     if tries_sweep is not None:
         payload["tries_sweep"] = {
-            "inner_iters": inner_iters,
-            "max_outer_iters": max_outer_iters,
+            "inner_iters": SWEEP_DEFAULT_INNER,
+            "max_outer_iters": SWEEP_DEFAULT_OUTER,
             "points": tries_sweep,
         }
     history["test"] = payload
@@ -145,19 +147,14 @@ def main() -> None:
         default=None,
         help="Eval batch size (default: val batch size from checkpoint, else train batch size)",
     )
-    parser.add_argument(
-        "--num-workers",
-        type=int,
-        default=0,
-        help="DataLoader workers for eval (default: 0)",
-    )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducible test metrics")
     parser.add_argument(
         "--sweep",
         action="store_true",
         help=(
-            "Also sweep one param at a time up to the given values: "
-            "inner 1..N step 1, outer 10..N step 10, max-tries 10..N step 10"
+            "Also sweep one param at a time up to the given values "
+            "(inner 1..N step 1, outer 10..N step 10, max-tries 10..N step 10); "
+            "non-swept params stay at 3 inner / 30 outer / 10 tries"
         ),
     )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -186,18 +183,9 @@ def main() -> None:
     batch_size = args.batch_size if args.batch_size is not None else default_batch_size
     if batch_size < 1:
         raise ValueError("--batch-size must be >= 1")
-    if args.num_workers < 0:
-        raise ValueError("--num-workers must be >= 0")
-    test_loader = DataLoader(
-        PuzzleDataset(rows=test_rows),
-        batch_size=batch_size,
-        collate_fn=collate_puzzles,
-        pin_memory=use_cuda and args.num_workers == 0,
-        num_workers=args.num_workers,
-    )
+    test_ds = PuzzleDataset(rows=test_rows)
     print(
-        f"test eval: {len(test_rows)} puzzles, batch_size={batch_size}, "
-        f"batches={len(test_loader)}, num_workers={args.num_workers}",
+        f"test eval: {len(test_rows)} puzzles, slot_batch_size={batch_size}",
         flush=True,
     )
 
@@ -223,8 +211,10 @@ def main() -> None:
         rollout_config = build_rollout_config(inner_iters=inner, max_outer_iters=outer)
         return measure_split(
             model,
-            test_loader,
+            test_ds._base_clues,
+            test_ds._base_answers,
             device,
+            slot_batch_size=batch_size,
             epoch=epoch,
             epochs=epoch,
             phase="test",
@@ -244,28 +234,37 @@ def main() -> None:
     if args.sweep:
         inner_sweep = []
         for inner in _sweep_values(SWEEP_INNER_START, inner_iters, SWEEP_INNER_STEP):
-            stats = run_eval(inner, max_outer_iters, max_tries)
-            inner_sweep.append(_test_point(inner, max_outer_iters, max_tries, stats))
+            stats = run_eval(inner, SWEEP_DEFAULT_OUTER, SWEEP_DEFAULT_TRIES)
+            inner_sweep.append(
+                _test_point(inner, SWEEP_DEFAULT_OUTER, SWEEP_DEFAULT_TRIES, stats)
+            )
             print(
-                f"test sweep inner={inner} max_outer={max_outer_iters} max_tries={max_tries}: "
+                f"test sweep inner={inner} max_outer={SWEEP_DEFAULT_OUTER} "
+                f"max_tries={SWEEP_DEFAULT_TRIES}: "
                 f"puzzle_acc={stats.puzzle_acc:.4f}",
                 flush=True,
             )
         outer_sweep = []
         for outer in _sweep_values(SWEEP_OUTER_START, max_outer_iters, SWEEP_OUTER_STEP):
-            stats = run_eval(inner_iters, outer, max_tries)
-            outer_sweep.append(_test_point(inner_iters, outer, max_tries, stats))
+            stats = run_eval(SWEEP_DEFAULT_INNER, outer, SWEEP_DEFAULT_TRIES)
+            outer_sweep.append(
+                _test_point(SWEEP_DEFAULT_INNER, outer, SWEEP_DEFAULT_TRIES, stats)
+            )
             print(
-                f"test sweep inner={inner_iters} max_outer={outer} max_tries={max_tries}: "
+                f"test sweep inner={SWEEP_DEFAULT_INNER} max_outer={outer} "
+                f"max_tries={SWEEP_DEFAULT_TRIES}: "
                 f"puzzle_acc={stats.puzzle_acc:.4f}",
                 flush=True,
             )
         tries_sweep = []
         for tries in _sweep_values(SWEEP_TRIES_START, max_tries, SWEEP_TRIES_STEP):
-            stats = run_eval(inner_iters, max_outer_iters, tries)
-            tries_sweep.append(_test_point(inner_iters, max_outer_iters, tries, stats))
+            stats = run_eval(SWEEP_DEFAULT_INNER, SWEEP_DEFAULT_OUTER, tries)
+            tries_sweep.append(
+                _test_point(SWEEP_DEFAULT_INNER, SWEEP_DEFAULT_OUTER, tries, stats)
+            )
             print(
-                f"test sweep inner={inner_iters} max_outer={max_outer_iters} max_tries={tries}: "
+                f"test sweep inner={SWEEP_DEFAULT_INNER} max_outer={SWEEP_DEFAULT_OUTER} "
+                f"max_tries={tries}: "
                 f"puzzle_acc={stats.puzzle_acc:.4f}",
                 flush=True,
             )

@@ -146,6 +146,25 @@ def _predict_halt(halt_logit: torch.Tensor, *, halt_threshold: float) -> torch.T
     return torch.sigmoid(halt_logit) > halt_threshold
 
 
+def _train_outer_done(
+    predict_halt: torch.Tensor,
+    solved: torch.Tensor,
+    outer_count: torch.Tensor,
+    max_outer_iters: int,
+) -> torch.Tensor:
+    """Training: stop a slot on model halt only when the grid is fully correct."""
+    return (predict_halt & solved) | (outer_count >= max_outer_iters)
+
+
+def _eval_outer_done(
+    predict_halt: torch.Tensor,
+    outer_count: torch.Tensor,
+    max_outer_iters: int,
+) -> torch.Tensor:
+    """Eval: stop on model halt alone; answer is used for metrics only after rollout."""
+    return predict_halt | (outer_count >= max_outer_iters)
+
+
 def _compute_cell_loss(
     logits: torch.Tensor,
     *,
@@ -400,7 +419,12 @@ def rollout_train_step(
     state.memory_embed = memory_init(final_cell_embed)
     state.outer_count = state.outer_count + 1
     solved = halt_target > 0.5
-    done = (predict_halt & solved) | (state.outer_count >= config.max_outer_iters)
+    done = _train_outer_done(
+        predict_halt,
+        solved,
+        state.outer_count,
+        config.max_outer_iters,
+    )
     return RolloutResult(
         loss=loss.detach() if backward else loss,
         cell_loss=cell_loss.detach(),
@@ -545,7 +569,7 @@ def _iter_compact_outer_rollout(
         )
         active_memory_embed = memory_init(final_cell_embed)
         active_outer_count = active_outer_count + 1
-        done = predict_halt | (active_outer_count >= config.max_outer_iters)
+        done = _eval_outer_done(predict_halt, active_outer_count, config.max_outer_iters)
 
         yield _CompactOuterStep(
             slot_idx=slot_idx,
@@ -687,6 +711,254 @@ def _once_state_to_result(
         halt_total_rounds=halt_total_rounds,
         tries=tries,
     )
+
+
+@dataclass
+class _StreamSlot:
+    puzzle_idx: int
+    try_idx: int
+    clues: torch.Tensor
+    answer: torch.Tensor
+    digit_id: torch.Tensor
+    outer_count: int
+    memory_embed: torch.Tensor | None
+    pending_candidate: torch.Tensor | None
+    pred: torch.Tensor
+    outer_steps: int
+    halted: bool
+    final_logits: torch.Tensor
+    final_halt_logit: torch.Tensor
+    halt_correct: int
+    halt_total: int
+
+
+def _begin_outer_step_row(
+    digit_id: torch.Tensor,
+    pending_candidate: torch.Tensor | None,
+    outer_count: int,
+) -> torch.Tensor:
+    if pending_candidate is None or outer_count == 0:
+        return digit_id
+    return pending_candidate
+
+
+def _new_stream_slot(
+    puzzle_idx: int,
+    clues: torch.Tensor,
+    answer: torch.Tensor,
+    *,
+    init_seed: int | None,
+    try_idx: int,
+) -> _StreamSlot:
+    clue_pin = clues > 0
+    digit_id = _init_digit_id_from_clues(
+        clues.unsqueeze(0),
+        clue_pin.unsqueeze(0),
+        init_seed=_try_init_seed(init_seed, try_idx),
+    ).squeeze(0)
+    return _StreamSlot(
+        puzzle_idx=puzzle_idx,
+        try_idx=try_idx,
+        clues=clues,
+        answer=answer,
+        digit_id=digit_id,
+        outer_count=0,
+        memory_embed=None,
+        pending_candidate=None,
+        pred=clues.clone(),
+        outer_steps=0,
+        halted=False,
+        final_logits=clues.new_zeros((9, 9, 10), dtype=LOSS_DTYPE),
+        final_halt_logit=clues.new_zeros((), dtype=LOSS_DTYPE),
+        halt_correct=0,
+        halt_total=0,
+    )
+
+
+def _slot_to_eval_result(
+    slot: _StreamSlot,
+    *,
+    halt_loss_weight: float,
+) -> EvalRolloutResult:
+    once = _OnceEvalState(
+        pred=slot.pred.unsqueeze(0),
+        outer_steps=torch.tensor([slot.outer_steps], device=slot.clues.device),
+        halted=torch.tensor([slot.halted], device=slot.clues.device),
+        final_logits=slot.final_logits.unsqueeze(0),
+        final_halt_logit=slot.final_halt_logit.unsqueeze(0),
+        halt_correct_by_puzzle=torch.tensor([slot.halt_correct], device=slot.clues.device),
+        halt_total_by_puzzle=torch.tensor([slot.halt_total], device=slot.clues.device),
+    )
+    tries = torch.tensor([slot.try_idx + 1], device=slot.clues.device, dtype=torch.long)
+    return _once_state_to_result(
+        once,
+        slot.clues.unsqueeze(0),
+        slot.answer.unsqueeze(0),
+        halt_loss_weight=halt_loss_weight,
+        tries=tries,
+        was_batched=False,
+    )
+
+
+def _stack_active_memory_embed(
+    slots: list[_StreamSlot],
+    *,
+    dim: int,
+    device: torch.device,
+) -> torch.Tensor | None:
+    if not slots or all(s.memory_embed is None for s in slots):
+        return None
+    rows: list[torch.Tensor] = []
+    for slot in slots:
+        if slot.memory_embed is None:
+            rows.append(zero_memory(1, dim, device).squeeze(0))
+        else:
+            rows.append(slot.memory_embed)
+    return torch.stack(rows)
+
+
+def _record_stream_outer_metrics(
+    slot: _StreamSlot,
+    *,
+    pre_commit: torch.Tensor,
+    predict_halt: bool,
+    logits: torch.Tensor,
+    halt_logit: torch.Tensor,
+) -> None:
+    halt_target_round = _halt_target(pre_commit.unsqueeze(0), slot.answer.unsqueeze(0)).item()
+    slot.halt_correct += int(predict_halt == (halt_target_round > 0.5))
+    slot.halt_total += 1
+    slot.final_logits = to_loss_dtype(logits)
+    slot.final_halt_logit = to_loss_dtype(halt_logit)
+
+
+@torch.inference_mode()
+def rollout_eval_stream(
+    model: MixerNextStateModel,
+    clues: torch.Tensor,
+    answers: torch.Tensor,
+    *,
+    slot_batch_size: int,
+    config: RolloutConfig | None = None,
+    halt_loss_weight: float = 1.0,
+    init_seed: int | None = 0,
+    max_tries: int = 1,
+):
+    """Evaluate puzzles with B parallel slots; refill freed slots from the queue."""
+    config = config or RolloutConfig()
+    if slot_batch_size < 1:
+        raise ValueError("slot_batch_size must be >= 1")
+    if max_tries < 1:
+        raise ValueError("max_tries must be >= 1")
+
+    clues_b, _ = _ensure_batched(clues)
+    answers_b, _ = _ensure_batched(answers)
+    if clues_b.size(0) != answers_b.size(0):
+        raise ValueError("clues and answers must have the same batch size")
+    n_puzzles = clues_b.size(0)
+    if n_puzzles == 0:
+        return
+
+    queue_pos = 0
+    slots: list[_StreamSlot] = []
+
+    def enqueue_next() -> bool:
+        nonlocal queue_pos
+        if queue_pos >= n_puzzles:
+            return False
+        slots.append(
+            _new_stream_slot(
+                queue_pos,
+                clues_b[queue_pos],
+                answers_b[queue_pos],
+                init_seed=init_seed,
+                try_idx=0,
+            )
+        )
+        queue_pos += 1
+        return True
+
+    while len(slots) < slot_batch_size:
+        if not enqueue_next():
+            break
+
+    while slots:
+        active_digit_id = torch.stack(
+            [
+                _begin_outer_step_row(s.digit_id, s.pending_candidate, s.outer_count)
+                for s in slots
+            ]
+        )
+        active_clues = torch.stack([s.clues for s in slots])
+        active_clue_pin = active_clues > 0
+        active_outer_count = torch.tensor(
+            [s.outer_count for s in slots],
+            device=clues_b.device,
+            dtype=torch.long,
+        )
+        active_memory = _stack_active_memory_embed(
+            slots,
+            dim=model.dim,
+            device=clues_b.device,
+        )
+
+        logits, halt_logit, final_cell_embed = _inner_loop(
+            model,
+            active_digit_id,
+            active_clue_pin,
+            config.inner_iters,
+            memory_embed=active_memory,
+            with_grad=False,
+        )
+        pre_commit = predict_grid(logits, active_clues)
+        predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
+        next_outer_count = active_outer_count + 1
+        done = _eval_outer_done(predict_halt, next_outer_count, config.max_outer_iters)
+
+        next_slots: list[_StreamSlot] = []
+        refill_count = 0
+        for i, slot in enumerate(slots):
+            _record_stream_outer_metrics(
+                slot,
+                pre_commit=pre_commit[i],
+                predict_halt=bool(predict_halt[i].item()),
+                logits=logits[i],
+                halt_logit=halt_logit[i],
+            )
+            slot.outer_count = int(next_outer_count[i].item())
+            slot.pending_candidate = pre_commit[i]
+            slot.memory_embed = final_cell_embed[i]
+            slot.digit_id = active_digit_id[i]
+
+            if not done[i]:
+                next_slots.append(slot)
+                continue
+
+            slot.pred = pre_commit[i]
+            slot.outer_steps = slot.outer_count
+            slot.halted = bool(predict_halt[i].item())
+            if slot.halted or slot.try_idx + 1 >= max_tries:
+                yield (
+                    _slot_to_eval_result(slot, halt_loss_weight=halt_loss_weight),
+                    slot.clues,
+                    slot.answer,
+                )
+                refill_count += 1
+            else:
+                next_slots.append(
+                    _new_stream_slot(
+                        slot.puzzle_idx,
+                        slot.clues,
+                        slot.answer,
+                        init_seed=init_seed,
+                        try_idx=slot.try_idx + 1,
+                    )
+                )
+
+        slots = next_slots
+        for _ in range(refill_count):
+            if not enqueue_next():
+                break
 
 
 def _rollout_eval_batch_multi_try(
