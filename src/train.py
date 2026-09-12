@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from amp import AmpConfig, autocast_context, resolve_amp
 from augment import AugmentConfig
-from curriculum import NUM_RATING_GROUPS, CurriculumState
+from curriculum import CURRICULUM_P_GT_LOGIT_STEP, NUM_RATING_GROUPS, CurriculumState
 from dataset import PuzzleDataset, filter_rows
 from encoding import cell_acc_mask
 from model import MixerNextStateModel
@@ -499,26 +499,37 @@ def _group_puzzle_accs_from_history_row(row: dict) -> list[float | None]:
     return accs
 
 
+def curriculum_logit_step_from_args(args: dict) -> float:
+    return float(args.get("curriculum_logit_step", CURRICULUM_P_GT_LOGIT_STEP))
+
+
 def curriculum_state_from_history(run_dir: Path) -> CurriculumState:
     history_path = run_dir / "history.json"
     if not history_path.exists():
         return CurriculumState.default()
-    state = CurriculumState.default()
     history = json.loads(history_path.read_text())
+    state = CurriculumState.default(
+        logit_step=curriculum_logit_step_from_args(history.get("args", {})),
+    )
     for row in sorted(history.get("epochs", []), key=lambda entry: entry["epoch"]):
         state.update_from_group_accs(_group_puzzle_accs_from_history_row(row))
     return state
 
 
 def curriculum_state_for_resume(ckpt: dict, run_dir: Path) -> CurriculumState:
+    logit_step = curriculum_logit_step_from_args(ckpt.get("args", {}))
     if "curriculum_p_gt_logits" in ckpt:
         logits = [float(v) for v in ckpt["curriculum_p_gt_logits"]]
         if len(logits) == NUM_RATING_GROUPS:
-            return CurriculumState(logits=logits)
+            return CurriculumState(logits=logits, logit_step=logit_step)
     if "curriculum_p_gt_logit" in ckpt:
-        return CurriculumState.from_legacy_logit(float(ckpt["curriculum_p_gt_logit"]))
+        state = CurriculumState.from_legacy_logit(float(ckpt["curriculum_p_gt_logit"]))
+        state.logit_step = logit_step
+        return state
     if "curriculum_p_gt" in ckpt:
-        return CurriculumState.from_legacy_p_gt(float(ckpt["curriculum_p_gt"]))
+        state = CurriculumState.from_legacy_p_gt(float(ckpt["curriculum_p_gt"]))
+        state.logit_step = logit_step
+        return state
     return curriculum_state_from_history(run_dir)
 
 
@@ -835,6 +846,12 @@ def build_train_parser() -> argparse.ArgumentParser:
         help="Disable curriculum puzzle init (partial GT reveal) during training seed/refill",
     )
     parser.add_argument(
+        "--curriculum-logit-step",
+        type=float,
+        default=CURRICULUM_P_GT_LOGIT_STEP,
+        help="Per-epoch logit update scale for curriculum p_gt per rating group",
+    )
+    parser.add_argument(
         "--no-deep-supervision",
         action="store_true",
         help="Use final inner loop step only for cell and halt loss (default: average all steps)",
@@ -920,11 +937,12 @@ def train_run(
         )
     curriculum_training = not args.no_curriculum_training
     deep_supervision = not args.no_deep_supervision
-    curriculum_state = (
-        initial_curriculum_state
-        if initial_curriculum_state is not None
-        else CurriculumState.default()
-    )
+    curriculum_logit_step = getattr(args, "curriculum_logit_step", CURRICULUM_P_GT_LOGIT_STEP)
+    if initial_curriculum_state is not None:
+        curriculum_state = initial_curriculum_state
+        curriculum_state.logit_step = curriculum_logit_step
+    else:
+        curriculum_state = CurriculumState.default(logit_step=curriculum_logit_step)
     rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.train_max_outer_iters,

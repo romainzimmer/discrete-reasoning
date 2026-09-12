@@ -176,7 +176,7 @@ def test_curriculum_logit_drifts_up_when_acc_stays_below_target() -> None:
     logit = DEFAULT_CURRICULUM_P_GT_LOGIT
     for _ in range(5):
         logit = update_curriculum_p_gt_logit(logit, puzzle_acc=0.3)
-    assert logit == pytest.approx(0.1)
+    assert logit == pytest.approx(5 * CURRICULUM_P_GT_LOGIT_STEP * 0.2)
     assert curriculum_p_gt_from_logit(logit) > 0.5
 
 

@@ -17,7 +17,7 @@ RATING_GROUP_BOUNDS: tuple[tuple[int, int], ...] = (
 )
 
 CURRICULUM_P_GT_TARGET_ACC = 0.5
-CURRICULUM_P_GT_LOGIT_STEP = 0.1
+CURRICULUM_P_GT_LOGIT_STEP = 1.0
 DEFAULT_CURRICULUM_P_GT = 0.5
 DEFAULT_CURRICULUM_P_GT_LOGIT = 0.0
 
@@ -50,19 +50,24 @@ def update_curriculum_p_gt_logit(
     puzzle_acc: float,
     *,
     target_acc: float = CURRICULUM_P_GT_TARGET_ACC,
+    logit_step: float = CURRICULUM_P_GT_LOGIT_STEP,
 ) -> float:
     """Adjust curriculum p_gt in logit space so done puzzle accuracy stays near target_acc."""
-    return logit + CURRICULUM_P_GT_LOGIT_STEP * (target_acc - puzzle_acc)
+    return logit + logit_step * (target_acc - puzzle_acc)
 
 
 @dataclass
 class CurriculumState:
     logits: list[float]
+    logit_step: float = CURRICULUM_P_GT_LOGIT_STEP
     _p_gt_tensors: dict[str, torch.Tensor] = field(default_factory=dict, repr=False)
 
     @classmethod
-    def default(cls) -> CurriculumState:
-        return cls(logits=[DEFAULT_CURRICULUM_P_GT_LOGIT] * NUM_RATING_GROUPS)
+    def default(cls, *, logit_step: float = CURRICULUM_P_GT_LOGIT_STEP) -> CurriculumState:
+        return cls(
+            logits=[DEFAULT_CURRICULUM_P_GT_LOGIT] * NUM_RATING_GROUPS,
+            logit_step=logit_step,
+        )
 
     @classmethod
     def from_legacy_logit(cls, logit: float) -> CurriculumState:
@@ -87,7 +92,11 @@ class CurriculumState:
         for group, acc in enumerate(group_puzzle_accs):
             if acc is None:
                 continue
-            self.logits[group] = update_curriculum_p_gt_logit(self.logits[group], acc)
+            self.logits[group] = update_curriculum_p_gt_logit(
+                self.logits[group],
+                acc,
+                logit_step=self.logit_step,
+            )
         self._p_gt_tensors.clear()
 
     def p_gt_tensor(self, device: torch.device) -> torch.Tensor:
