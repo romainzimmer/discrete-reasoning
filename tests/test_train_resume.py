@@ -13,8 +13,8 @@ from train import (
     EpochStats,
     best_val_cell_acc_for_resume,
     best_val_cell_acc_from_history,
-    curriculum_puzzle_acc_for_resume,
-    curriculum_puzzle_acc_from_history,
+    curriculum_p_gt_for_resume,
+    curriculum_p_gt_from_history,
     save_checkpoint,
     save_run_config,
     update_history_args,
@@ -45,26 +45,30 @@ def test_best_val_cell_acc_from_history(tmp_path: Path) -> None:
     assert best_val_cell_acc_from_history(run_dir) == pytest.approx(0.7)
 
 
-def test_curriculum_puzzle_acc_from_history(tmp_path: Path) -> None:
+def test_curriculum_p_gt_from_history(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     history = {
         "run_id": run_dir.name,
         "args": {"epochs": 2},
         "epochs": [
-            {"epoch": 1, "train_puzzle_acc": 0.0},
-            {"epoch": 2, "train_puzzle_acc": 0.8},
+            {"epoch": 1, "train_avg_steps_per_puzzle": 6.0},
+            {"epoch": 2, "train_avg_steps_per_puzzle": 4.0},
         ],
     }
     (run_dir / "history.json").write_text(json.dumps(history))
-    assert curriculum_puzzle_acc_from_history(run_dir) == pytest.approx(0.4)
+    assert curriculum_p_gt_from_history(
+        run_dir, max_outer_iters=10
+    ) == pytest.approx(0.5)
 
 
-def test_curriculum_puzzle_acc_for_resume_prefers_checkpoint(tmp_path: Path) -> None:
+def test_curriculum_p_gt_for_resume_prefers_checkpoint(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    ckpt = {"curriculum_puzzle_acc": 0.55}
-    assert curriculum_puzzle_acc_for_resume(ckpt, run_dir) == pytest.approx(0.55)
+    ckpt = {"curriculum_p_gt": 0.55}
+    assert curriculum_p_gt_for_resume(
+        ckpt, run_dir, max_outer_iters=10
+    ) == pytest.approx(0.55)
 
 
 def test_best_val_cell_acc_for_resume_prefers_checkpoint(tmp_path: Path) -> None:
@@ -124,11 +128,11 @@ def test_last_checkpoint_roundtrip_for_resume(tmp_path: Path) -> None:
         train=TrainEpochStats(loss=1.0),
         val=EpochStats(loss=2.0, cell_acc=0.5),
         args=args,
-        curriculum_puzzle_acc=0.25,
+        curriculum_p_gt=0.25,
         best_val_cell_acc=0.5,
     )
     ckpt = torch.load(run_dir / "last.pt", weights_only=False)
     assert ckpt["epoch"] == 3
     assert ckpt["args"]["epochs"] == 5
-    assert ckpt["curriculum_puzzle_acc"] == pytest.approx(0.25)
+    assert ckpt["curriculum_p_gt"] == pytest.approx(0.25)
     assert ckpt["best_val_cell_acc"] == pytest.approx(0.5)

@@ -13,7 +13,7 @@ from train import (
     EpochStats,
     TrainMetricsAccumulator,
     save_epoch_metrics,
-    update_curriculum_puzzle_acc,
+    update_curriculum_p_gt,
 )
 
 
@@ -58,13 +58,13 @@ def test_accumulate_step_metrics_from_training_logits() -> None:
     )
     acc = TrainMetricsAccumulator.empty(torch.device("cpu"))
     acc.add_step(result, state)
-    stats = acc.finalize(inner_iters=3)
+    stats = acc.finalize()
     assert int(acc.total_cells.item()) == 81 - 1
     assert int(acc.correct_cells.item()) == int(
         (result.pred[0][clues == 0] == answer[clues == 0]).sum()
     )
     assert stats.completions_per_epoch == 1
-    assert stats.avg_steps_per_puzzle == 3.0
+    assert stats.avg_steps_per_puzzle == 1.0
     assert int(acc.correct_puzzles_done.item()) == int((result.pred[0] == answer).all())
 
 
@@ -113,13 +113,22 @@ def test_save_epoch_metrics_includes_train_acc(tmp_path: Path) -> None:
         train=TrainEpochStats(loss=1.25, cell_acc=0.9, puzzle_acc=0.4, halt_acc=0.5),
         val=EpochStats(loss=2.0, cell_acc=0.5, puzzle_acc=0.1, halt_acc=0.6),
         args=args,
+        curriculum_p_gt=0.55,
     )
     epoch = json.loads((run_dir / "history.json").read_text())["epochs"][0]
     assert epoch["train_cell_acc"] == 0.9
     assert epoch["train_puzzle_acc"] == 0.4
+    assert epoch["curriculum_p_gt"] == pytest.approx(0.55)
 
 
-def test_update_curriculum_puzzle_acc_ema() -> None:
-    assert update_curriculum_puzzle_acc(0.0, 0.0) == 0.0
-    assert update_curriculum_puzzle_acc(0.0, 0.8) == 0.4
-    assert update_curriculum_puzzle_acc(0.4, 0.8) == pytest.approx(0.6)
+def test_update_curriculum_p_gt_increases_when_slow() -> None:
+    assert update_curriculum_p_gt(0.5, 6.0, max_outer_iters=10) == pytest.approx(0.55)
+
+
+def test_update_curriculum_p_gt_decreases_when_fast() -> None:
+    assert update_curriculum_p_gt(0.5, 4.0, max_outer_iters=10) == pytest.approx(0.45)
+
+
+def test_update_curriculum_p_gt_clamps() -> None:
+    assert update_curriculum_p_gt(0.95, 10.0, max_outer_iters=10) == 1.0
+    assert update_curriculum_p_gt(0.05, 1.0, max_outer_iters=10) == 0.0

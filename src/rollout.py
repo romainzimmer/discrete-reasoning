@@ -23,7 +23,7 @@ class RolloutConfig:
     halt_threshold: float = 0.5
     curriculum_training: bool = True
     deep_supervision: bool = True
-    curriculum_puzzle_acc: float = 0.0
+    curriculum_p_gt: float = 0.5
 
     def __post_init__(self) -> None:
         if self.inner_iters < 1:
@@ -51,7 +51,7 @@ class BatchSlotState:
         *,
         generator: torch.Generator,
         curriculum_training: bool = True,
-        curriculum_puzzle_acc: float = 0.0,
+        curriculum_p_gt: float = 0.5,
     ) -> BatchSlotState:
         idx = torch.randint(len(dataset), (batch_size,), generator=generator)
         clues, answers = dataset.sample(idx)
@@ -63,7 +63,7 @@ class BatchSlotState:
                 clues,
                 answers,
                 clue_pin,
-                puzzle_acc=curriculum_puzzle_acc,
+                p_gt=curriculum_p_gt,
             )
         else:
             digit_id = _init_digit_id_from_clues(clues, clue_pin)
@@ -301,15 +301,12 @@ def _curriculum_init_digit_id(
     answer: torch.Tensor,
     clue_pin: torch.Tensor,
     *,
-    puzzle_acc: float = 0.0,
+    p_gt: float = 0.5,
 ) -> torch.Tensor:
-    """Training-only puzzle entry: partial GT reveal; unrevealed non-clue cells are random."""
+    """Training-only puzzle entry: partial GT reveal with fixed p_gt; unrevealed non-clue cells are random."""
     digit_id = clues.clone()
     non_clue = ~clue_pin
-    b, device = clues.size(0), clues.device
-
-    p_gt = torch.rand(b, device=device) * (1.0 - puzzle_acc)
-    reveal = non_clue & (torch.rand(clues.shape, device=device) < p_gt.view(b, 1, 1))
+    reveal = non_clue & (torch.rand(clues.shape, device=clues.device) < p_gt)
     digit_id = torch.where(reveal, answer, digit_id)
     return _random_fill_unpinned(digit_id, non_clue & ~reveal)
 
@@ -445,7 +442,7 @@ def refill_done_slots(
     generator: torch.Generator,
     dim: int,
     curriculum_training: bool = True,
-    curriculum_puzzle_acc: float = 0.0,
+    curriculum_p_gt: float = 0.5,
 ) -> None:
     b = done.size(0)
     device = state.digit_id.device
@@ -460,7 +457,7 @@ def refill_done_slots(
             new_clues,
             new_answers,
             new_clue_pin,
-            puzzle_acc=curriculum_puzzle_acc,
+            p_gt=curriculum_p_gt,
         )
     else:
         new_digit_id = _init_digit_id_from_clues(new_clues, new_clue_pin)

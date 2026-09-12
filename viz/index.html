@@ -378,19 +378,11 @@
       </div>
     </div>
     <div class="chart">
-      <div class="chart-title">Avg steps per puzzle</div>
+      <div class="chart-title">Avg outer steps per puzzle</div>
       <canvas id="avgStepsPerPuzzleChart"></canvas>
       <div class="axis-x-label">epoch</div>
       <div class="legend" id="avgStepsPerPuzzleLegend">
         <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
-      </div>
-    </div>
-    <div class="chart">
-      <div class="chart-title">Refills per step</div>
-      <canvas id="refillsChart"></canvas>
-      <div class="axis-x-label">epoch</div>
-      <div class="legend" id="refillsLegend">
-        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
       </div>
     </div>
     <div class="chart">
@@ -399,6 +391,14 @@
       <div class="axis-x-label">epoch</div>
       <div class="legend" id="completionsLegend">
         <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
+      </div>
+    </div>
+    <div class="chart">
+      <div class="chart-title">Curriculum p_gt</div>
+      <canvas id="curriculumPGtChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend" id="curriculumPGtLegend">
+        <div class="legend-item"><span class="dot" style="background:#7c3aed"></span> end of epoch</div>
       </div>
     </div>
     </div>
@@ -914,18 +914,18 @@
         formatY: v => Number(v).toFixed(1),
       });
       renderAccLegend("avgStepsPerPuzzleLegend", epochs, "avg_steps_per_puzzle");
-      drawSeries(document.getElementById("refillsChart"), trainOnlySeries(epochs, "refills_per_step"), {
-        yMin: 0,
-        xLabels,
-        formatY: v => Number(v).toFixed(2),
-      });
-      renderTrainOnlyLegend("refillsLegend", epochs, "refills_per_step");
       drawSeries(document.getElementById("completionsChart"), trainOnlySeries(epochs, "completions_per_epoch"), {
         yMin: 0,
         xLabels,
         formatY: v => Number(v).toFixed(0),
       });
       renderTrainOnlyLegend("completionsLegend", epochs, "completions_per_epoch");
+      drawSeries(document.getElementById("curriculumPGtChart"), scalarSeries(epochs, "curriculum_p_gt"), {
+        yMin: 0,
+        yMax: 1,
+        xLabels,
+        formatY: pct,
+      });
       renderAccLegend("cellAccLegend", epochs, "cell_acc");
       renderAccLegend("puzzleAccLegend", epochs, "puzzle_acc");
     }
@@ -1011,7 +1011,7 @@
         ["halt_acc", "Halt accuracy"],
         ["halt_rate", "Halt rate"],
         ["avg_outer_iters", "Avg outer iters"],
-        ["avg_steps_per_puzzle", "Avg steps per puzzle"],
+        ["avg_steps_per_puzzle", "Avg outer steps per puzzle"],
         ["avg_tries", "Avg tries"],
         ["loss", "Loss"],
       ];
@@ -1035,7 +1035,7 @@
       const chartsEl = document.getElementById("testCharts");
       const test = metrics?.test;
       if (!test) {
-        metaEl.innerHTML = '<p class="test-empty">No test metrics. Run: uv run eval runs/&lt;run-id&gt; --sweep</p>';
+        metaEl.innerHTML = '<p class="test-empty">No test metrics.</p>';
         chartsEl.style.display = "none";
         renderTestMaxResults(null);
         return;

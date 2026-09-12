@@ -104,7 +104,7 @@ def test_defaults():
     assert config.inner_iters == DEFAULT_INNER_ITERS
     assert config.max_outer_iters == DEFAULT_MAX_OUTER_ITERS
     assert config.deep_supervision is True
-    assert config.curriculum_puzzle_acc == 0.0
+    assert config.curriculum_p_gt == 0.5
 
 
 def test_one_outer_per_step():
@@ -234,68 +234,31 @@ def test_max_outer_forces_refill():
     assert not torch.equal(state.clues, original_clues)
 
 
-def _curriculum_rand_side_effect():
-    """Return p_gt=0, cell draws=1 so curriculum init is deterministic."""
-    values = [0.0, 1.0]
-    idx = 0
-
-    def _side_effect(shape, *, device=None):
-        nonlocal idx
-        val = values[min(idx, len(values) - 1)]
-        idx += 1
-        size = shape if isinstance(shape, tuple) else (shape,)
-        return torch.full(size, val, device=device)
-
-    return _side_effect
-
-
 def test_curriculum_init_preserves_clues():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
-    with patch("rollout.torch.rand", side_effect=_curriculum_rand_side_effect()):
-        digit_id = _curriculum_init_digit_id(clues, answer, clue_pin)
+    with patch("rollout.torch.rand", return_value=torch.ones(clues.shape)):
+        digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=0.0)
     assert torch.equal(digit_id[clue_pin], clues[clue_pin])
 
 
 def test_curriculum_init_gt_reveal():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
-    calls = 0
-
-    def _rand(shape, *, device=None):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return torch.tensor([1.0], device=device)
-        size = shape if isinstance(shape, tuple) else (shape,)
-        return torch.zeros(size, device=device)
-
-    with patch("rollout.torch.rand", side_effect=_rand):
-        digit_id = _curriculum_init_digit_id(clues, answer, clue_pin)
+    with patch("rollout.torch.rand", return_value=torch.zeros(clues.shape)):
+        digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=1.0)
     assert torch.equal(digit_id[~clue_pin], answer[~clue_pin])
 
 
 def test_curriculum_init_random_when_no_reveal():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
-    calls = 0
-
-    def _rand(shape, *, device=None):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return torch.tensor([0.0], device=device)
-        size = shape if isinstance(shape, tuple) else (shape,)
-        return torch.zeros(size, device=device)
-
-    with patch("rollout.torch.rand", side_effect=_rand):
+    with patch("rollout.torch.rand", return_value=torch.ones(clues.shape)):
         with patch(
             "rollout.torch.randint",
             return_value=torch.full(clues.shape, 7, dtype=clues.dtype),
         ):
-            digit_id = _curriculum_init_digit_id(
-                clues, answer, clue_pin, puzzle_acc=1.0
-            )
+            digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=0.0)
     assert torch.equal(digit_id[clue_pin], clues[clue_pin])
     assert torch.equal(digit_id[~clue_pin], torch.full_like(clues, 7)[~clue_pin])
 
@@ -726,19 +689,13 @@ def test_gt_reveal_not_in_encode_clue_pin():
 def test_train_seed_curriculum_reveals_gt():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
-    calls = 0
-
-    def _rand(shape, *, device=None):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return torch.tensor([1.0], device=device)
-        size = shape if isinstance(shape, tuple) else (shape,)
-        return torch.zeros(size, device=device)
-
-    with patch("rollout.torch.rand", side_effect=_rand):
+    with patch("rollout.torch.rand", return_value=torch.zeros(1, 9, 9)):
         state = BatchSlotState.seed(
-            dataset, batch_size=1, device=torch.device("cpu"), generator=gen
+            dataset,
+            batch_size=1,
+            device=torch.device("cpu"),
+            generator=gen,
+            curriculum_p_gt=1.0,
         )
     assert torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
     assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
@@ -779,24 +736,13 @@ def test_mutable_non_clue_cell_overwritable_on_commit():
 def test_curriculum_partial_reveal():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
-    calls = 0
+    out = torch.full(clues.shape, 0.7)
+    half = out.view(out.size(0), -1).size(1) // 2
+    out.view(out.size(0), -1)[:, :half] = 0.3
 
-    def _rand(shape, *, device=None):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return torch.tensor([0.5], device=device)
-        size = shape if isinstance(shape, tuple) else (shape,)
-        out = torch.full(size, 0.7, device=device)
-        half = out.view(out.size(0), -1).size(1) // 2
-        out.view(out.size(0), -1)[:, :half] = 0.3
-        return out
-
-    with patch("rollout.torch.rand", side_effect=_rand):
+    with patch("rollout.torch.rand", return_value=out):
         with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
-            digit_id = _curriculum_init_digit_id(
-                clues, answer, clue_pin, puzzle_acc=0.0
-            )
+            digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=0.5)
     revealed = (digit_id == answer) & ~clue_pin
     empty = (digit_id == 0) & ~clue_pin
     assert revealed.any()
@@ -816,18 +762,16 @@ def test_refill_curriculum_reveals_gt():
         curriculum_training=False,
     )
     assert not torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
-    calls = 0
-
-    def _rand(shape, *, device=None):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return torch.tensor([1.0], device=device)
-        size = shape if isinstance(shape, tuple) else (shape,)
-        return torch.zeros(size, device=device)
-
-    with patch("rollout.torch.rand", side_effect=_rand):
-        refill_done_slots(state, torch.tensor([True]), dataset, generator=gen, dim=32)
+    with patch("rollout.torch.rand", return_value=torch.zeros(1, 9, 9)):
+        refill_done_slots(
+            state,
+            torch.tensor([True]),
+            dataset,
+            generator=gen,
+            dim=32,
+            curriculum_training=True,
+            curriculum_p_gt=1.0,
+        )
     assert torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
 
 
@@ -1050,70 +994,44 @@ def test_deep_supervision_regression_single_step():
     assert result_off.loss.item() == result_on.loss.item()
 
 
-def test_curriculum_p_gt_at_max_skips_reveal_at_threshold():
+def test_curriculum_low_p_gt_skips_reveal_at_threshold():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
 
-    def rand_side_effect(*args, **kwargs):
-        if len(args) == 1 and isinstance(args[0], int):
-            return torch.ones(args[0])
-        shape = args[0] if len(args) == 1 else args
-        return torch.full(shape, 0.5)
-
-    with patch("rollout.torch.rand", side_effect=rand_side_effect):
+    with patch("rollout.torch.rand", return_value=torch.full(clues.shape, 0.5)):
         with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
-            digit_id = _curriculum_init_digit_id(
-                clues, answer, clue_pin, puzzle_acc=0.6
-            )
+            digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=0.4)
     assert torch.equal(digit_id[~clue_pin], torch.zeros_like(answer[~clue_pin]))
 
 
-def test_curriculum_zero_acc_reveals_all_at_max_p_gt():
+def test_curriculum_p_gt_one_reveals_all():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
 
-    def rand_side_effect(*args, **kwargs):
-        if len(args) == 1 and isinstance(args[0], int):
-            return torch.ones(args[0])
-        shape = args[0] if len(args) == 1 else args
-        return torch.full(shape, 0.5)
-
-    with patch("rollout.torch.rand", side_effect=rand_side_effect):
+    with patch("rollout.torch.rand", return_value=torch.full(clues.shape, 0.5)):
         with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
-            digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, puzzle_acc=0.0)
+            digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=1.0)
     assert torch.equal(digit_id[~clue_pin], answer[~clue_pin])
 
 
-def test_curriculum_full_acc_fills_non_clue_cells():
+def test_curriculum_p_gt_zero_fills_non_clue_cells():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
-    digit_id = _curriculum_init_digit_id(
-        clues, answer, clue_pin, puzzle_acc=1.0
-    )
+    digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=0.0)
     assert torch.equal(digit_id[clue_pin], clues[clue_pin])
     assert not torch.equal(digit_id[~clue_pin], clues[~clue_pin])
 
 
-def test_curriculum_puzzle_acc_lowers_p_gt():
+def test_curriculum_higher_p_gt_reveals_more():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
+    draws = torch.full(clues.shape, 0.4)
 
-    def rand(*args, **kwargs):
-        if len(args) == 1 and isinstance(args[0], int):
-            return torch.ones(args[0])
-        shape = args[0] if len(args) == 1 else args
-        return torch.full(shape, 0.5)
-
-    with patch("rollout.torch.rand", side_effect=rand):
+    with patch("rollout.torch.rand", return_value=draws):
         with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
-            digit_id_low_acc = _curriculum_init_digit_id(
-                clues, answer, clue_pin, puzzle_acc=0.0
-            )
-            digit_id_high_acc = _curriculum_init_digit_id(
-                clues, answer, clue_pin, puzzle_acc=0.8
-            )
-    assert torch.equal(digit_id_low_acc[~clue_pin], answer[~clue_pin])
-    assert torch.equal(digit_id_high_acc[~clue_pin], torch.zeros_like(answer[~clue_pin]))
+            digit_id_low = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=0.3)
+            digit_id_high = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=0.5)
+    assert (digit_id_high == answer)[~clue_pin].sum() > (digit_id_low == answer)[~clue_pin].sum()
 
 
 def test_build_rollout_config_new_flags():

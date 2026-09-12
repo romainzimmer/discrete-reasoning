@@ -27,11 +27,11 @@ def test_eval_metrics_accumulator():
         tries=torch.tensor([2, 3]),
     )
     acc.add_batch(result, answer, clues)
-    stats = acc.finalize(inner_iters=4)
+    stats = acc.finalize()
     assert stats.loss == 1.5
     assert stats.puzzle_acc == 0.5
     assert stats.halt_acc == 0.3
     assert stats.avg_outer_iters == 2.5
-    assert stats.avg_steps_per_puzzle == 10.0
+    assert stats.avg_steps_per_puzzle == 2.5
     assert stats.halt_rate == 0.5
     assert stats.avg_tries == 2.5
