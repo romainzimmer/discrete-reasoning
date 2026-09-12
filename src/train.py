@@ -86,6 +86,7 @@ def build_rollout_config(
     halt_threshold: float = 0.5,
     curriculum_training: bool = True,
     deep_supervision: bool = True,
+    curriculum_puzzle_acc: float = 0.0,
 ) -> RolloutConfig:
     return RolloutConfig(
         inner_iters=inner_iters,
@@ -93,6 +94,7 @@ def build_rollout_config(
         halt_threshold=halt_threshold,
         curriculum_training=curriculum_training,
         deep_supervision=deep_supervision,
+        curriculum_puzzle_acc=curriculum_puzzle_acc,
     )
 
 
@@ -392,6 +394,8 @@ def save_checkpoint(
     train: TrainEpochStats,
     val: EpochStats,
     args: argparse.Namespace,
+    curriculum_puzzle_acc: float = 0.0,
+    best_val_cell_acc: float = -1.0,
 ) -> None:
     payload = {
         "epoch": epoch,
@@ -401,6 +405,8 @@ def save_checkpoint(
         "val_loss": val.loss,
         "val_cell_acc": val.cell_acc,
         "val_puzzle_acc": val.puzzle_acc,
+        "curriculum_puzzle_acc": curriculum_puzzle_acc,
+        "best_val_cell_acc": best_val_cell_acc,
         "args": vars(args),
     }
     torch.save(payload, path)
@@ -440,6 +446,27 @@ def curriculum_puzzle_acc_from_history(run_dir: Path) -> float:
     for row in sorted(history.get("epochs", []), key=lambda entry: entry["epoch"]):
         acc = update_curriculum_puzzle_acc(acc, float(row.get("train_puzzle_acc", 0.0)))
     return acc
+
+
+def curriculum_puzzle_acc_for_resume(ckpt: dict, run_dir: Path) -> float:
+    if "curriculum_puzzle_acc" in ckpt:
+        return float(ckpt["curriculum_puzzle_acc"])
+    return curriculum_puzzle_acc_from_history(run_dir)
+
+
+def best_val_cell_acc_for_resume(ckpt: dict, run_dir: Path) -> float:
+    if "best_val_cell_acc" in ckpt:
+        return float(ckpt["best_val_cell_acc"])
+    from_history = best_val_cell_acc_from_history(run_dir)
+    if from_history >= 0.0:
+        return from_history
+    best_path = run_dir / "best.pt"
+    if best_path.is_file():
+        best_ckpt = torch.load(best_path, map_location="cpu", weights_only=False)
+        if "best_val_cell_acc" in best_ckpt:
+            return float(best_ckpt["best_val_cell_acc"])
+        return float(best_ckpt.get("val_cell_acc", -1.0))
+    return -1.0
 
 
 def update_history_args(run_dir: Path, args: argparse.Namespace) -> None:
@@ -808,11 +835,11 @@ def train_run(
 
     if start_epoch == 1:
         args.model = "looped-mixer"
-        args.amp = not args.no_amp
         save_run_config(run_dir, args)
     else:
         update_history_args(run_dir, args)
 
+    args.amp = getattr(args, "amp", not getattr(args, "no_amp", False))
     amp = resolve_amp(device, enabled=args.amp)
     if model is None:
         model = MixerNextStateModel(dim=args.dim, num_blocks=args.num_blocks).to(device)
@@ -931,18 +958,6 @@ def train_run(
             )
             update_manifest_split(manifest, split, epoch, puzzle_indices)
         save_manifest(run_dir, manifest)
-        ckpt_kwargs = {
-            "model": model,
-            "optimizer": optimizer,
-            "epoch": epoch,
-            "train": train,
-            "val": val,
-            "args": args,
-        }
-        save_checkpoint(run_dir / "last.pt", **ckpt_kwargs)
-        if val.cell_acc > best_val_cell_acc:
-            best_val_cell_acc = val.cell_acc
-            save_checkpoint(run_dir / "best.pt", **ckpt_kwargs)
         save_epoch_metrics(
             run_dir,
             epoch=epoch,
@@ -950,6 +965,22 @@ def train_run(
             val=val,
             args=args,
         )
+        new_best = val.cell_acc > best_val_cell_acc
+        if new_best:
+            best_val_cell_acc = val.cell_acc
+        ckpt_kwargs = {
+            "model": model,
+            "optimizer": optimizer,
+            "epoch": epoch,
+            "train": train,
+            "val": val,
+            "args": args,
+            "curriculum_puzzle_acc": rollout_config.curriculum_puzzle_acc,
+            "best_val_cell_acc": best_val_cell_acc,
+        }
+        save_checkpoint(run_dir / "last.pt", **ckpt_kwargs)
+        if new_best:
+            save_checkpoint(run_dir / "best.pt", **ckpt_kwargs)
         train_msg = (
             f"train_loss={train.loss:.4f} train_cell_loss={train.cell_loss:.4f} "
             f"train_halt_loss={train.halt_loss:.4f} train_halt_acc={train.halt_acc:.4f} "

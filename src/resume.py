@@ -8,8 +8,8 @@ import torch
 
 from model import MixerNextStateModel
 from train import (
-    best_val_cell_acc_from_history,
-    curriculum_puzzle_acc_from_history,
+    best_val_cell_acc_for_resume,
+    curriculum_puzzle_acc_for_resume,
     load_last_checkpoint,
     optimizer_param_groups,
     require_run_args,
@@ -50,8 +50,8 @@ def main() -> None:
     optimizer.load_state_dict(ckpt["optimizer"])
 
     curriculum_acc = (
-        curriculum_puzzle_acc_from_history(run_dir)
-        if not args.no_curriculum_training
+        curriculum_puzzle_acc_for_resume(ckpt, run_dir)
+        if not getattr(args, "no_curriculum_training", False)
         else 0.0
     )
     print(f"Resuming {run_dir.name} from epoch {completed_epoch + 1}/{cli.epochs}")
@@ -61,7 +61,7 @@ def main() -> None:
         start_epoch=completed_epoch + 1,
         model=model,
         optimizer=optimizer,
-        best_val_cell_acc=best_val_cell_acc_from_history(run_dir),
+        best_val_cell_acc=best_val_cell_acc_for_resume(ckpt, run_dir),
         initial_curriculum_puzzle_acc=curriculum_acc,
     )
 
