@@ -289,9 +289,7 @@ def _curriculum_init_digit_id(
     non_clue = ~clue_pin
     b, device = clues.size(0), clues.device
 
-    hi = 1.0 - puzzle_acc
-    lo = max(0.0, hi - 0.1)
-    p_gt = torch.rand(b, device=device) * (hi - lo) + lo
+    p_gt = torch.rand(b, device=device) * (1.0 - puzzle_acc)
     reveal = non_clue & (torch.rand(clues.shape, device=device) < p_gt.view(b, 1, 1))
     digit_id = torch.where(reveal, answer, digit_id)
     return _random_fill_unpinned(digit_id, non_clue & ~reveal)

@@ -14,18 +14,25 @@ from amp import resolve_amp
 from train import EpochStats, build_rollout_config, measure_split, require_run_args
 
 
-SWEEP_MAX_INNER = 10
-SWEEP_MAX_OUTER = 100
-SWEEP_DEFAULT_INNER = 3
-SWEEP_DEFAULT_OUTER = 30
-INNER_SWEEP_OUTER = SWEEP_DEFAULT_OUTER
-OUTER_SWEEP_INNER = SWEEP_DEFAULT_INNER
+SWEEP_INNER_START = 1
+SWEEP_INNER_STEP = 1
+SWEEP_OUTER_START = 10
+SWEEP_OUTER_STEP = 10
+SWEEP_TRIES_START = 10
+SWEEP_TRIES_STEP = 10
 
 
-def _test_point(inner_iters: int, max_outer_iters: int, stats: EpochStats) -> dict:
+def _sweep_values(start: int, stop: int, step: int) -> list[int]:
+    if stop < start:
+        return []
+    return list(range(start, stop + 1, step))
+
+
+def _test_point(inner_iters: int, max_outer_iters: int, max_tries: int, stats: EpochStats) -> dict:
     return {
         "inner_iters": inner_iters,
         "max_outer_iters": max_outer_iters,
+        "max_tries": max_tries,
         **asdict(stats),
     }
 
@@ -41,9 +48,11 @@ def save_test_metrics(
     inner_iters: int,
     max_outer_iters: int,
     max_tries: int,
+    batch_size: int,
     seed: int,
     inner_sweep: list[dict] | None = None,
     outer_sweep: list[dict] | None = None,
+    tries_sweep: list[dict] | None = None,
 ) -> None:
     history_path = run_dir / "history.json"
     if history_path.exists():
@@ -58,18 +67,27 @@ def save_test_metrics(
         "inner_iters": inner_iters,
         "max_outer_iters": max_outer_iters,
         "max_tries": max_tries,
+        "batch_size": batch_size,
         "seed": seed,
         **asdict(test),
     }
     if inner_sweep is not None:
         payload["inner_sweep"] = {
-            "max_outer_iters": INNER_SWEEP_OUTER,
+            "max_outer_iters": max_outer_iters,
+            "max_tries": max_tries,
             "points": inner_sweep,
         }
     if outer_sweep is not None:
         payload["outer_sweep"] = {
-            "inner_iters": OUTER_SWEEP_INNER,
+            "inner_iters": inner_iters,
+            "max_tries": max_tries,
             "points": outer_sweep,
+        }
+    if tries_sweep is not None:
+        payload["tries_sweep"] = {
+            "inner_iters": inner_iters,
+            "max_outer_iters": max_outer_iters,
+            "points": tries_sweep,
         }
     history["test"] = payload
     history_path.write_text(json.dumps(history, indent=2))
@@ -121,13 +139,19 @@ def main() -> None:
         default=1,
         help="Max random inits per puzzle; stop at first halt, else keep last try (default: 1)",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Eval batch size (default: val batch size from checkpoint, else train batch size)",
+    )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducible test metrics")
     parser.add_argument(
         "--sweep",
         action="store_true",
         help=(
-            "Sweep eval puzzle accuracy: inner 1–10 at outer=30, "
-            "outer 10–30 at inner=3, plus max inner × max outer (10×100)"
+            "Also sweep one param at a time up to the given values: "
+            "inner 1..N step 1, outer 10..N step 10, max-tries 10..N step 10"
         ),
     )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -148,11 +172,14 @@ def main() -> None:
         raise ValueError("No test puzzles after filters")
 
     use_cuda = device.type == "cuda"
-    batch_size = int(
+    default_batch_size = int(
         run_args.get("val_batch_size")
         or run_args.get("train_batch_size")
         or run_args.get("batch_size", 1)
     )
+    batch_size = args.batch_size if args.batch_size is not None else default_batch_size
+    if batch_size < 1:
+        raise ValueError("--batch-size must be >= 1")
     test_loader = DataLoader(
         PuzzleDataset(rows=test_rows),
         batch_size=batch_size,
@@ -171,6 +198,7 @@ def main() -> None:
     default_outer = int(run_args["eval_max_outer_iters"])
     inner_iters = args.inner_iters if args.inner_iters is not None else default_inner
     max_outer_iters = args.max_outer_iters if args.max_outer_iters is not None else default_outer
+    max_tries = args.max_tries
     halt_loss_weight = float(run_args.get("halt_loss_weight", 1.0))
 
     amp_enabled = bool(run_args.get("amp", True))
@@ -178,7 +206,7 @@ def main() -> None:
 
     epoch = int(ckpt["epoch"])
 
-    def run_eval(inner: int, outer: int) -> EpochStats:
+    def run_eval(inner: int, outer: int, tries: int) -> EpochStats:
         rollout_config = build_rollout_config(inner_iters=inner, max_outer_iters=outer)
         return measure_split(
             model,
@@ -192,37 +220,42 @@ def main() -> None:
             use_cuda=use_cuda,
             seed=args.seed,
             amp=amp,
-            max_tries=args.max_tries,
+            max_tries=tries,
         )
+
+    test = run_eval(inner_iters, max_outer_iters, max_tries)
 
     inner_sweep: list[dict] | None = None
     outer_sweep: list[dict] | None = None
+    tries_sweep: list[dict] | None = None
     if args.sweep:
-        if args.inner_iters is not None or args.max_outer_iters is not None:
-            raise ValueError("--sweep cannot be combined with --inner-iters or --max-outer-iters")
         inner_sweep = []
-        for inner in range(1, SWEEP_MAX_INNER + 1):
-            stats = run_eval(inner, INNER_SWEEP_OUTER)
-            inner_sweep.append(_test_point(inner, INNER_SWEEP_OUTER, stats))
+        for inner in _sweep_values(SWEEP_INNER_START, inner_iters, SWEEP_INNER_STEP):
+            stats = run_eval(inner, max_outer_iters, max_tries)
+            inner_sweep.append(_test_point(inner, max_outer_iters, max_tries, stats))
             print(
-                f"test sweep inner={inner} max_outer={INNER_SWEEP_OUTER}: "
+                f"test sweep inner={inner} max_outer={max_outer_iters} max_tries={max_tries}: "
                 f"puzzle_acc={stats.puzzle_acc:.4f}",
                 flush=True,
             )
         outer_sweep = []
-        for outer in range(10, SWEEP_DEFAULT_OUTER + 1, 10):
-            stats = run_eval(OUTER_SWEEP_INNER, outer)
-            outer_sweep.append(_test_point(OUTER_SWEEP_INNER, outer, stats))
+        for outer in _sweep_values(SWEEP_OUTER_START, max_outer_iters, SWEEP_OUTER_STEP):
+            stats = run_eval(inner_iters, outer, max_tries)
+            outer_sweep.append(_test_point(inner_iters, outer, max_tries, stats))
             print(
-                f"test sweep inner={OUTER_SWEEP_INNER} max_outer={outer}: "
+                f"test sweep inner={inner_iters} max_outer={outer} max_tries={max_tries}: "
                 f"puzzle_acc={stats.puzzle_acc:.4f}",
                 flush=True,
             )
-        inner_iters = SWEEP_MAX_INNER
-        max_outer_iters = SWEEP_MAX_OUTER
-        test = run_eval(inner_iters, max_outer_iters)
-    else:
-        test = run_eval(inner_iters, max_outer_iters)
+        tries_sweep = []
+        for tries in _sweep_values(SWEEP_TRIES_START, max_tries, SWEEP_TRIES_STEP):
+            stats = run_eval(inner_iters, max_outer_iters, tries)
+            tries_sweep.append(_test_point(inner_iters, max_outer_iters, tries, stats))
+            print(
+                f"test sweep inner={inner_iters} max_outer={max_outer_iters} max_tries={tries}: "
+                f"puzzle_acc={stats.puzzle_acc:.4f}",
+                flush=True,
+            )
 
     save_test_metrics(
         run_dir,
@@ -233,14 +266,16 @@ def main() -> None:
         max_rating=args.max_rating,
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
-        max_tries=args.max_tries,
+        max_tries=max_tries,
+        batch_size=batch_size,
         seed=args.seed,
         inner_sweep=inner_sweep,
         outer_sweep=outer_sweep,
+        tries_sweep=tries_sweep,
     )
     print(
         f"test (epoch {epoch}, n={len(test_rows)}, inner={inner_iters}, max_outer={max_outer_iters}, "
-        f"max_tries={args.max_tries}): "
+        f"max_tries={max_tries}): "
         f"loss={test.loss:.4f} cell_acc={test.cell_acc:.4f} "
         f"cell_loss={test.cell_loss:.4f} halt_loss={test.halt_loss:.4f} "
         f"puzzle_acc={test.puzzle_acc:.4f} halt_rate={test.halt_rate:.4f} "

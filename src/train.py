@@ -59,7 +59,7 @@ def optimizer_param_groups(
 
 
 def update_curriculum_puzzle_acc(prev: float, epoch_puzzle_acc: float) -> float:
-    """EMA of done-only train puzzle acc for adaptive curriculum p_gt band center."""
+    """EMA of done-only train puzzle acc for adaptive curriculum p_gt in U[0, 1 - acc]."""
     a = ADAPTIVE_CURRICULUM_ACC_EMA_ALPHA
     return a * epoch_puzzle_acc + (1.0 - a) * prev
 

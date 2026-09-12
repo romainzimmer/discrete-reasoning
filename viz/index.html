@@ -402,14 +402,19 @@
     <div id="testMaxResults"></div>
     <div class="charts-grid" id="testCharts">
       <div class="chart">
-        <div class="chart-title">Puzzle accuracy vs inner iters (max outer = 100)</div>
+        <div class="chart-title">Puzzle accuracy vs inner iters</div>
         <canvas id="testInnerSweepChart"></canvas>
         <div class="axis-x-label">inner iters</div>
       </div>
       <div class="chart">
-        <div class="chart-title">Puzzle accuracy vs max outer iters (inner = 10)</div>
+        <div class="chart-title">Puzzle accuracy vs max outer iters</div>
         <canvas id="testOuterSweepChart"></canvas>
         <div class="axis-x-label">max outer iters</div>
+      </div>
+      <div class="chart">
+        <div class="chart-title">Puzzle accuracy vs max tries</div>
+        <canvas id="testTriesSweepChart"></canvas>
+        <div class="axis-x-label">max tries</div>
       </div>
     </div>
   </div>
@@ -563,6 +568,7 @@
       "inner_iters",
       "max_outer_iters",
       "max_tries",
+      "batch_size",
       "seed",
     ];
 
@@ -928,21 +934,40 @@
           && !EVAL_RESULT_KEYS.has(key)
           && key !== "inner_sweep"
           && key !== "outer_sweep"
+          && key !== "tries_sweep"
       ).sort();
       return [...keys, ...extras].map(
         key => `${key}: ${formatConfigValue(key, test[key], test)}`
       ).join("\n");
     }
 
-    function renderSweepChart(canvasId, points, xKey) {
+    function sweepChartTitle(variedLabel, fixed) {
+      const parts = Object.entries(fixed)
+        .filter(([, value]) => value !== undefined)
+        .map(([label, value]) => `${label} = ${value}`);
+      return parts.length
+        ? `Puzzle accuracy vs ${variedLabel} (${parts.join(", ")})`
+        : `Puzzle accuracy vs ${variedLabel}`;
+    }
+
+    function renderSweepChart(canvasId, points, xKey, title) {
+      const canvas = document.getElementById(canvasId);
+      const chart = canvas?.closest(".chart");
       if (!points?.length) {
-        const canvas = document.getElementById(canvasId);
-        const { ctx, width, height } = setupCanvas(canvas);
-        ctx.clearRect(0, 0, width, height);
-        return;
+        if (chart) chart.style.display = "none";
+        if (canvas) {
+          const { ctx, width, height } = setupCanvas(canvas);
+          ctx.clearRect(0, 0, width, height);
+        }
+        return false;
+      }
+      if (chart) {
+        chart.style.display = "";
+        const titleEl = chart.querySelector(".chart-title");
+        if (titleEl && title) titleEl.textContent = title;
       }
       const sorted = [...points].sort((a, b) => a[xKey] - b[xKey]);
-      drawSeries(document.getElementById(canvasId), [{
+      drawSeries(canvas, [{
         color: "#7c3aed",
         values: sorted.map(p => p.puzzle_acc ?? null),
       }], {
@@ -951,6 +976,7 @@
         xLabels: sorted.map(p => p[xKey]),
         formatY: v => `${(Number(v) * 100).toFixed(0)}%`,
       });
+      return true;
     }
 
     function renderTestMaxResults(test) {
@@ -970,7 +996,7 @@
       ];
       container.innerHTML = `
         <div class="test-max-heading">
-          Max config (inner=${test.inner_iters ?? "?"}, max outer=${test.max_outer_iters ?? "?"})
+          Eval config (inner=${test.inner_iters ?? "?"}, max outer=${test.max_outer_iters ?? "?"}, max tries=${test.max_tries ?? "?"})
         </div>
         <div class="test-summary">
           ${stats.map(([key, label]) => `
@@ -999,12 +1025,34 @@
           <pre class="run-config">${escapeHtml(renderEvalConfigYaml(test))}</pre>
         </details>
       `;
-      const hasSweep = test.inner_sweep?.points?.length || test.outer_sweep?.points?.length;
-      chartsEl.style.display = hasSweep ? "" : "none";
-      if (hasSweep) {
-        renderSweepChart("testInnerSweepChart", test.inner_sweep?.points, "inner_iters");
-        renderSweepChart("testOuterSweepChart", test.outer_sweep?.points, "max_outer_iters");
-      }
+      const showedInner = renderSweepChart(
+        "testInnerSweepChart",
+        test.inner_sweep?.points,
+        "inner_iters",
+        sweepChartTitle("inner iters", {
+          "max outer": test.inner_sweep?.max_outer_iters,
+          "max tries": test.inner_sweep?.max_tries,
+        }),
+      );
+      const showedOuter = renderSweepChart(
+        "testOuterSweepChart",
+        test.outer_sweep?.points,
+        "max_outer_iters",
+        sweepChartTitle("max outer iters", {
+          inner: test.outer_sweep?.inner_iters,
+          "max tries": test.outer_sweep?.max_tries,
+        }),
+      );
+      const showedTries = renderSweepChart(
+        "testTriesSweepChart",
+        test.tries_sweep?.points,
+        "max_tries",
+        sweepChartTitle("max tries", {
+          inner: test.tries_sweep?.inner_iters,
+          "max outer": test.tries_sweep?.max_outer_iters,
+        }),
+      );
+      chartsEl.style.display = showedInner || showedOuter || showedTries ? "" : "none";
       renderTestMaxResults(test);
     }
 

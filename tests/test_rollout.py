@@ -795,7 +795,7 @@ def test_curriculum_partial_reveal():
     with patch("rollout.torch.rand", side_effect=_rand):
         with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
             digit_id = _curriculum_init_digit_id(
-                clues, answer, clue_pin, puzzle_acc=0.5
+                clues, answer, clue_pin, puzzle_acc=0.0
             )
     revealed = (digit_id == answer) & ~clue_pin
     empty = (digit_id == 0) & ~clue_pin
@@ -1050,7 +1050,7 @@ def test_deep_supervision_regression_single_step():
     assert result_off.loss.item() == result_on.loss.item()
 
 
-def test_curriculum_p_gt_at_band_hi_skips_reveal_at_threshold():
+def test_curriculum_p_gt_at_max_skips_reveal_at_threshold():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
 
@@ -1068,7 +1068,7 @@ def test_curriculum_p_gt_at_band_hi_skips_reveal_at_threshold():
     assert torch.equal(digit_id[~clue_pin], torch.zeros_like(answer[~clue_pin]))
 
 
-def test_curriculum_zero_acc_reveals_all_at_band_hi():
+def test_curriculum_zero_acc_reveals_all_at_max_p_gt():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
 
@@ -1094,43 +1094,26 @@ def test_curriculum_full_acc_fills_non_clue_cells():
     assert not torch.equal(digit_id[~clue_pin], clues[~clue_pin])
 
 
-def test_curriculum_puzzle_acc_update():
-    from dataclasses import replace
-
+def test_curriculum_puzzle_acc_lowers_p_gt():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
-    config = replace(RolloutConfig(), curriculum_puzzle_acc=0.8)
 
-    def rand_reveal(*args, **kwargs):
+    def rand(*args, **kwargs):
         if len(args) == 1 and isinstance(args[0], int):
             return torch.ones(args[0])
         shape = args[0] if len(args) == 1 else args
-        return torch.full(shape, 0.15)
+        return torch.full(shape, 0.5)
 
-    def rand_no_reveal(*args, **kwargs):
-        if len(args) == 1 and isinstance(args[0], int):
-            return torch.ones(args[0])
-        shape = args[0] if len(args) == 1 else args
-        return torch.full(shape, 0.35)
-
-    with patch("rollout.torch.rand", side_effect=rand_reveal):
+    with patch("rollout.torch.rand", side_effect=rand):
         with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
-            digit_id = _curriculum_init_digit_id(
-                clues,
-                answer,
-                clue_pin,
-                puzzle_acc=config.curriculum_puzzle_acc,
+            digit_id_low_acc = _curriculum_init_digit_id(
+                clues, answer, clue_pin, puzzle_acc=0.0
             )
-    with patch("rollout.torch.rand", side_effect=rand_no_reveal):
-        with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
-            digit_id_tight = _curriculum_init_digit_id(
-                clues,
-                answer,
-                clue_pin,
-                puzzle_acc=config.curriculum_puzzle_acc,
+            digit_id_high_acc = _curriculum_init_digit_id(
+                clues, answer, clue_pin, puzzle_acc=0.8
             )
-    assert torch.equal(digit_id[~clue_pin], answer[~clue_pin])
-    assert torch.equal(digit_id_tight[~clue_pin], torch.zeros_like(answer[~clue_pin]))
+    assert torch.equal(digit_id_low_acc[~clue_pin], answer[~clue_pin])
+    assert torch.equal(digit_id_high_acc[~clue_pin], torch.zeros_like(answer[~clue_pin]))
 
 
 def test_build_rollout_config_new_flags():
