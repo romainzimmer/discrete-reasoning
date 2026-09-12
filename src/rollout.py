@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
+from curriculum import DEFAULT_CURRICULUM_P_GT, NUM_RATING_GROUPS
 from data import tensor_to_string
 from dataset import PuzzleDataset
 from amp import LOSS_DTYPE, to_loss_dtype
@@ -23,9 +24,13 @@ class RolloutConfig:
     halt_threshold: float = 0.5
     curriculum_training: bool = True
     deep_supervision: bool = True
-    curriculum_p_gt: float = 0.25
+    curriculum_p_gt_by_group: tuple[float, ...] = (DEFAULT_CURRICULUM_P_GT,) * NUM_RATING_GROUPS
 
     def __post_init__(self) -> None:
+        if len(self.curriculum_p_gt_by_group) != NUM_RATING_GROUPS:
+            raise ValueError(
+                f"curriculum_p_gt_by_group must have length {NUM_RATING_GROUPS}"
+            )
         if self.inner_iters < 1:
             raise ValueError("inner_iters must be >= 1")
         if self.max_outer_iters < 1:
@@ -39,6 +44,7 @@ class BatchSlotState:
     answer: torch.Tensor
     clue_pin: torch.Tensor
     outer_count: torch.Tensor
+    rating_group: torch.Tensor
     memory_embed: torch.Tensor | None = None
     pending_candidate: torch.Tensor | None = None
 
@@ -51,19 +57,29 @@ class BatchSlotState:
         *,
         generator: torch.Generator,
         curriculum_training: bool = True,
-        curriculum_p_gt: float = 0.25,
+        curriculum_p_gt: torch.Tensor | None = None,
+        curriculum_p_gt_by_group: tuple[float, ...] = (
+            DEFAULT_CURRICULUM_P_GT,
+        ) * NUM_RATING_GROUPS,
     ) -> BatchSlotState:
         idx = torch.randint(len(dataset), (batch_size,), generator=generator)
-        clues, answers = dataset.sample(idx)
+        clues, answers, rating_groups = dataset.sample(idx)
         clues = clues.to(device, non_blocking=True)
         answers = answers.to(device, non_blocking=True)
+        rating_group = rating_groups.to(device, non_blocking=True)
         clue_pin = clues > 0
         if curriculum_training:
+            p_gt_caps = _curriculum_p_gt_caps(
+                curriculum_p_gt,
+                curriculum_p_gt_by_group,
+                device,
+            )
+            p_gt = _p_gt_for_rating_groups(rating_group, p_gt_caps)
             digit_id = _curriculum_init_digit_id(
                 clues,
                 answers,
                 clue_pin,
-                p_gt=curriculum_p_gt,
+                p_gt=p_gt,
             )
         else:
             digit_id = _init_digit_id_from_clues(clues, clue_pin)
@@ -72,6 +88,7 @@ class BatchSlotState:
             clues=clues,
             answer=answers,
             clue_pin=clue_pin,
+            rating_group=rating_group,
             outer_count=torch.zeros(batch_size, dtype=torch.long, device=device),
         )
 
@@ -296,17 +313,41 @@ def _init_digit_id_from_clues(
     return _random_fill_unpinned(clues.clone(), ~clue_pin, init_seed=init_seed)
 
 
+def _curriculum_p_gt_caps(
+    curriculum_p_gt: torch.Tensor | None,
+    curriculum_p_gt_by_group: tuple[float, ...],
+    device: torch.device,
+) -> torch.Tensor:
+    if curriculum_p_gt is not None:
+        return curriculum_p_gt
+    return torch.tensor(curriculum_p_gt_by_group, device=device, dtype=torch.float32)
+
+
+def _p_gt_for_rating_groups(
+    rating_group: torch.Tensor,
+    curriculum_p_gt: torch.Tensor,
+) -> torch.Tensor:
+    """Return curriculum_p_gt[group_i] for each slot."""
+    return curriculum_p_gt[rating_group]
+
+
 def _curriculum_init_digit_id(
     clues: torch.Tensor,
     answer: torch.Tensor,
     clue_pin: torch.Tensor,
     *,
-    p_gt: float = 0.25,
+    p_gt: float | torch.Tensor = 0.25,
 ) -> torch.Tensor:
-    """Training-only puzzle entry: partial GT reveal with fixed p_gt; unrevealed non-clue cells are random."""
+    """Training-only puzzle entry: partial GT reveal; unrevealed non-clue cells are random."""
     digit_id = clues.clone()
     non_clue = ~clue_pin
-    reveal = non_clue & (torch.rand(clues.shape, device=clues.device) < p_gt)
+    if isinstance(p_gt, torch.Tensor):
+        if p_gt.dim() != 1:
+            raise ValueError("per-puzzle p_gt must have shape (B,)")
+        reveal_p = p_gt.to(device=clues.device, dtype=torch.float32).view(-1, 1, 1)
+    else:
+        reveal_p = p_gt
+    reveal = non_clue & (torch.rand(clues.shape, device=clues.device) < reveal_p)
     digit_id = torch.where(reveal, answer, digit_id)
     return _random_fill_unpinned(digit_id, non_clue & ~reveal)
 
@@ -442,28 +483,39 @@ def refill_done_slots(
     generator: torch.Generator,
     dim: int,
     curriculum_training: bool = True,
-    curriculum_p_gt: float = 0.25,
+    curriculum_p_gt: torch.Tensor | None = None,
+    curriculum_p_gt_by_group: tuple[float, ...] = (
+        DEFAULT_CURRICULUM_P_GT,
+    ) * NUM_RATING_GROUPS,
 ) -> None:
     b = done.size(0)
     device = state.digit_id.device
     idx = torch.randint(len(dataset), (b,), generator=generator)
-    new_clues, new_answers = dataset.sample(idx)
+    new_clues, new_answers, new_rating_groups = dataset.sample(idx)
     new_clues = new_clues.to(device, non_blocking=True)
     new_answers = new_answers.to(device, non_blocking=True)
+    new_rating_groups = new_rating_groups.to(device, non_blocking=True)
     done_mask = done.view(b, 1, 1)
     new_clue_pin = new_clues > 0
     if curriculum_training:
+        p_gt_caps = _curriculum_p_gt_caps(
+            curriculum_p_gt,
+            curriculum_p_gt_by_group,
+            device,
+        )
+        p_gt = _p_gt_for_rating_groups(new_rating_groups, p_gt_caps)
         new_digit_id = _curriculum_init_digit_id(
             new_clues,
             new_answers,
             new_clue_pin,
-            p_gt=curriculum_p_gt,
+            p_gt=p_gt,
         )
     else:
         new_digit_id = _init_digit_id_from_clues(new_clues, new_clue_pin)
     state.digit_id = torch.where(done_mask, new_digit_id, state.digit_id)
     state.clues = torch.where(done_mask, new_clues, state.clues)
     state.answer = torch.where(done_mask, new_answers, state.answer)
+    state.rating_group = torch.where(done, new_rating_groups, state.rating_group)
     state.clue_pin = state.clues > 0
     state.outer_count = torch.where(done, torch.zeros_like(state.outer_count), state.outer_count)
     done_mask_mem = done.view(b, 1, 1, 1)

@@ -20,6 +20,7 @@ from rollout import (
     _compute_losses,
     _halt_target,
     _curriculum_init_digit_id,
+    _p_gt_for_rating_groups,
     _inner_loop,
     _predict_halt,
     predict_grid,
@@ -78,6 +79,7 @@ def _make_state(
         clues=clues,
         answer=answer,
         clue_pin=clue_pin,
+        rating_group=torch.zeros(clues.size(0), dtype=torch.long),
         outer_count=torch.zeros(clues.size(0), dtype=torch.long),
     )
 
@@ -104,7 +106,7 @@ def test_defaults():
     assert config.inner_iters == DEFAULT_INNER_ITERS
     assert config.max_outer_iters == DEFAULT_MAX_OUTER_ITERS
     assert config.deep_supervision is True
-    assert config.curriculum_p_gt == 0.25
+    assert config.curriculum_p_gt_by_group == (0.5, 0.5, 0.5, 0.5, 0.5)
 
 
 def test_one_outer_per_step():
@@ -695,7 +697,7 @@ def test_train_seed_curriculum_reveals_gt():
             batch_size=1,
             device=torch.device("cpu"),
             generator=gen,
-            curriculum_p_gt=1.0,
+            curriculum_p_gt_by_group=(1.0, 1.0, 1.0, 1.0, 1.0),
         )
     assert torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
     assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
@@ -770,7 +772,7 @@ def test_refill_curriculum_reveals_gt():
             generator=gen,
             dim=32,
             curriculum_training=True,
-            curriculum_p_gt=1.0,
+            curriculum_p_gt_by_group=(1.0, 1.0, 1.0, 1.0, 1.0),
         )
     assert torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
 
@@ -1032,6 +1034,28 @@ def test_curriculum_higher_p_gt_reveals_more():
             digit_id_low = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=0.3)
             digit_id_high = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=0.5)
     assert (digit_id_high == answer)[~clue_pin].sum() > (digit_id_low == answer)[~clue_pin].sum()
+
+
+def test_p_gt_for_rating_groups_looks_up_group_caps():
+    rating_groups = torch.tensor([0, 1, 2, 3, 4, 0])
+    caps = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5])
+    p_gt = _p_gt_for_rating_groups(rating_groups, caps)
+    assert torch.equal(p_gt, torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5, 0.1]))
+
+
+def test_curriculum_init_accepts_per_puzzle_p_gt_tensor():
+    clues, answer = _tiny_batch()
+    clues = clues.repeat(2, 1, 1)
+    answer = answer.repeat(2, 1, 1)
+    clue_pin = clues > 0
+    p_gt = torch.tensor([0.0, 1.0])
+
+    with patch("rollout.torch.rand", return_value=torch.full(clues.shape, 0.5)):
+        with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
+            digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=p_gt)
+
+    assert not torch.equal(digit_id[0, ~clue_pin[0]], answer[0, ~clue_pin[0]])
+    assert torch.equal(digit_id[1, ~clue_pin[1]], answer[1, ~clue_pin[1]])
 
 
 def test_build_rollout_config_new_flags():

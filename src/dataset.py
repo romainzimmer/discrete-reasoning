@@ -4,6 +4,7 @@ import torch
 from torch.utils.data import Dataset
 
 from augment import AugmentConfig, apply_augment
+from curriculum import rating_group
 from data import answer_to_tensor, load_split, puzzle_to_tensor
 
 
@@ -81,17 +82,23 @@ class PuzzleDataset(Dataset):
         ds._sample_counter = 0
         ds._base_clues = clues
         ds._base_answers = answers
+        ds._base_rating_groups = torch.zeros(n, dtype=torch.long)
         return ds
 
     def _materialize_base_tensors(self, *, pin_memory: bool = False) -> None:
         clues = torch.stack([puzzle_to_tensor(row["question"]) for row in self.rows])
         answers = torch.stack([answer_to_tensor(row["answer"]) for row in self.rows])
+        rating_groups = torch.tensor(
+            [rating_group(int(row["rating"])) for row in self.rows],
+            dtype=torch.long,
+        )
         # Only for main-process sampling (train refill). Unsafe with DataLoader workers.
         if pin_memory:
             clues = clues.pin_memory()
             answers = answers.pin_memory()
         self._base_clues = clues
         self._base_answers = answers
+        self._base_rating_groups = rating_groups
 
     def set_epoch(self, epoch: int) -> None:
         self._epoch = epoch
@@ -145,18 +152,19 @@ class PuzzleDataset(Dataset):
             )
         return clues, answer
 
-    def sample(self, indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def sample(self, indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         clues = self._base_clues[indices]
         answers = self._base_answers[indices]
+        rating_groups = self._base_rating_groups[indices]
         if not self.augment or self.aug_config is None:
-            return clues, answers
+            return clues, answers, rating_groups
         aug_clues: list[torch.Tensor] = []
         aug_answers: list[torch.Tensor] = []
         for offset, idx in enumerate(indices.tolist()):
             c, a = self._sample_augment_pair(idx, clues[offset], answers[offset])
             aug_clues.append(c)
             aug_answers.append(a)
-        return torch.stack(aug_clues), torch.stack(aug_answers)
+        return torch.stack(aug_clues), torch.stack(aug_answers), rating_groups
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         clues, answer = self.augment_pair(idx, self._base_clues[idx], self._base_answers[idx])

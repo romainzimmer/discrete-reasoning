@@ -329,6 +329,7 @@ def test_train_stops_when_halt_and_correct():
         clues=clues,
         answer=answer,
         clue_pin=clues > 0,
+        rating_group=torch.zeros(1, dtype=torch.long),
         outer_count=torch.zeros(1, dtype=torch.long),
     )
     config = RolloutConfig(inner_iters=1, max_outer_iters=10, deep_supervision=False)
@@ -426,6 +427,7 @@ def test_train_done_requires_model_halt_and_correct_grid():
         clues=clues,
         answer=answer,
         clue_pin=clues > 0,
+        rating_group=torch.zeros(1, dtype=torch.long),
         outer_count=torch.zeros(1, dtype=torch.long),
     )
     config = RolloutConfig(inner_iters=1, max_outer_iters=10, deep_supervision=False)

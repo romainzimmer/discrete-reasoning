@@ -397,9 +397,13 @@
       <div class="chart-title">Curriculum p_gt</div>
       <canvas id="curriculumPGtChart"></canvas>
       <div class="axis-x-label">epoch</div>
-      <div class="legend" id="curriculumPGtLegend">
-        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
-      </div>
+      <div class="legend" id="curriculumPGtLegend"></div>
+    </div>
+    <div class="chart" id="trainGroupPuzzleAccChartPanel">
+      <div class="chart-title">Train puzzle accuracy by rating group</div>
+      <canvas id="trainGroupPuzzleAccChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend" id="trainGroupPuzzleAccLegend"></div>
     </div>
     </div>
   </div>
@@ -848,6 +852,63 @@
       return [{ color, values: epochs.map(e => e[metricKey] ?? null) }];
     }
 
+    const CURRICULUM_P_GT_GROUP_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c"];
+    const CURRICULUM_P_GT_GROUP_LABELS = [
+      "G0 [0,1]",
+      "G1 [2,11]",
+      "G2 [12,23]",
+      "G3 [24,38]",
+      "G4 [39+]",
+    ];
+
+    function curriculumPGtSeries(epochs) {
+      const series = [];
+      for (let group = 0; group < CURRICULUM_P_GT_GROUP_LABELS.length; group += 1) {
+        const key = `curriculum_p_gt_g${group}`;
+        if (!epochs.some(e => e[key] != null)) continue;
+        series.push({
+          color: CURRICULUM_P_GT_GROUP_COLORS[group],
+          label: CURRICULUM_P_GT_GROUP_LABELS[group],
+          values: epochs.map(e => e[key] ?? null),
+        });
+      }
+      if (series.length) return series;
+      return scalarSeries(epochs, "curriculum_p_gt", "#2563eb");
+    }
+
+    function renderGroupSeriesLegend(elementId, series) {
+      const el = document.getElementById(elementId);
+      if (!series.length) {
+        el.innerHTML = "";
+        return;
+      }
+      el.innerHTML = series.map(s => (
+        `<div class="legend-item"><span class="dot" style="background:${s.color}"></span> ${s.label ?? "train"}</div>`
+      )).join("");
+    }
+
+    function renderCurriculumPGtLegend(elementId, epochs) {
+      renderGroupSeriesLegend(elementId, curriculumPGtSeries(epochs));
+    }
+
+    function trainGroupPuzzleAccSeries(epochs) {
+      const series = [];
+      for (let group = 0; group < CURRICULUM_P_GT_GROUP_LABELS.length; group += 1) {
+        const key = `train_group_${group}_puzzle_acc`;
+        if (!epochs.some(e => e[key] != null)) continue;
+        series.push({
+          color: CURRICULUM_P_GT_GROUP_COLORS[group],
+          label: CURRICULUM_P_GT_GROUP_LABELS[group],
+          values: epochs.map(e => e[key] ?? null),
+        });
+      }
+      return series;
+    }
+
+    function renderTrainGroupPuzzleAccLegend(elementId, epochs) {
+      renderGroupSeriesLegend(elementId, trainGroupPuzzleAccSeries(epochs));
+    }
+
     function renderTrainOnlyLegend(elementId, epochs, metricKey) {
       const el = document.getElementById(elementId);
       const trainKey = `train_${metricKey}`;
@@ -920,12 +981,35 @@
         formatY: v => Number(v).toFixed(0),
       });
       renderTrainOnlyLegend("completionsLegend", epochs, "completions_per_epoch");
-      drawSeries(document.getElementById("curriculumPGtChart"), scalarSeries(epochs, "curriculum_p_gt", "#2563eb"), {
-        yMin: 0,
-        yMax: 1,
-        xLabels,
-        formatY: pct,
-      });
+      drawSeries(
+        document.getElementById("curriculumPGtChart"),
+        curriculumPGtSeries(epochs),
+        {
+          yMin: 0,
+          yMax: 1,
+          xLabels,
+          formatY: pct,
+        },
+      );
+      renderCurriculumPGtLegend("curriculumPGtLegend", epochs);
+      const groupAccSeries = trainGroupPuzzleAccSeries(epochs);
+      const groupAccPanel = document.getElementById("trainGroupPuzzleAccChartPanel");
+      if (groupAccSeries.length) {
+        groupAccPanel.style.display = "";
+        drawSeries(
+          document.getElementById("trainGroupPuzzleAccChart"),
+          groupAccSeries,
+          {
+            yMin: 0,
+            yMax: 1,
+            xLabels,
+            formatY: pct,
+          },
+        );
+        renderTrainGroupPuzzleAccLegend("trainGroupPuzzleAccLegend", epochs);
+      } else {
+        groupAccPanel.style.display = "none";
+      }
       renderAccLegend("cellAccLegend", epochs, "cell_acc");
       renderAccLegend("puzzleAccLegend", epochs, "puzzle_acc");
     }

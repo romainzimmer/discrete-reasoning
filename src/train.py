@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from amp import AmpConfig, autocast_context, resolve_amp
 from augment import AugmentConfig
+from curriculum import NUM_RATING_GROUPS, CurriculumState
 from dataset import PuzzleDataset, filter_rows
 from encoding import cell_acc_mask
 from model import MixerNextStateModel
@@ -36,8 +37,6 @@ from viz_data import (
 )
 
 DEFAULT_RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
-DEFAULT_CURRICULUM_P_GT = 0.25
-CURRICULUM_P_GT_STEP = 0.01
 
 
 def optimizer_param_groups(
@@ -58,19 +57,6 @@ def optimizer_param_groups(
         {"params": no_decay_params, "weight_decay": 0.0},
     ]
 
-
-def update_curriculum_p_gt(
-    p_gt: float,
-    avg_steps_per_puzzle: float,
-    max_outer_iters: int,
-) -> float:
-    """Adjust fixed curriculum p_gt from prior epoch avg steps vs max_outer_iters / 2."""
-    threshold = max_outer_iters / 2.0
-    if avg_steps_per_puzzle > threshold:
-        p_gt += CURRICULUM_P_GT_STEP
-    else:
-        p_gt -= CURRICULUM_P_GT_STEP
-    return max(0.0, min(1.0, p_gt))
 
 REQUIRED_RUN_ARGS = (
     "model",
@@ -95,15 +81,17 @@ def build_rollout_config(
     halt_threshold: float = 0.5,
     curriculum_training: bool = True,
     deep_supervision: bool = True,
-    curriculum_p_gt: float = DEFAULT_CURRICULUM_P_GT,
+    curriculum_p_gt_by_group: tuple[float, ...] | None = None,
 ) -> RolloutConfig:
+    if curriculum_p_gt_by_group is None:
+        curriculum_p_gt_by_group = CurriculumState.default().p_gt_by_group()
     return RolloutConfig(
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
         halt_threshold=halt_threshold,
         curriculum_training=curriculum_training,
         deep_supervision=deep_supervision,
-        curriculum_p_gt=curriculum_p_gt,
+        curriculum_p_gt_by_group=curriculum_p_gt_by_group,
     )
 
 
@@ -123,6 +111,8 @@ class TrainEpochStats:
     avg_steps_per_puzzle: float = 0.0
     halt_rate: float = 0.0
     completions_per_epoch: int = 0
+    group_puzzle_accs: tuple[float | None, ...] = (None,) * NUM_RATING_GROUPS
+    group_puzzles_done: tuple[int, ...] = (0,) * NUM_RATING_GROUPS
 
 
 @dataclass
@@ -139,11 +129,14 @@ class TrainMetricsAccumulator:
     outer_iters_done: torch.Tensor
     halted_done: torch.Tensor
     n_steps: torch.Tensor
+    group_correct_puzzles_done: torch.Tensor
+    group_puzzles_done: torch.Tensor
 
     @classmethod
     def empty(cls, device: torch.device) -> TrainMetricsAccumulator:
         zero = torch.zeros((), device=device)
         zero_i = torch.zeros((), device=device, dtype=torch.long)
+        zero_g = torch.zeros(NUM_RATING_GROUPS, device=device, dtype=torch.long)
         return cls(
             total_loss=zero.clone(),
             total_cell_loss=zero.clone(),
@@ -157,6 +150,8 @@ class TrainMetricsAccumulator:
             outer_iters_done=zero.clone(),
             halted_done=zero_i.clone(),
             n_steps=zero_i.clone(),
+            group_correct_puzzles_done=zero_g.clone(),
+            group_puzzles_done=zero_g.clone(),
         )
 
     def add_step(self, result: RolloutResult, state: BatchSlotState) -> None:
@@ -185,6 +180,31 @@ class TrainMetricsAccumulator:
         self.puzzles_done += done.sum()
         self.outer_iters_done += (state.outer_count * done.long()).sum()
         self.halted_done += (result.halted & done).sum()
+        if done.any():
+            done_groups = state.rating_group[done].long()
+            correct_groups = puzzle_ok[done]
+            counts = torch.bincount(done_groups, minlength=NUM_RATING_GROUPS)
+            self.group_puzzles_done += counts.to(self.group_puzzles_done.dtype)
+            if correct_groups.any():
+                correct_counts = torch.bincount(
+                    done_groups[correct_groups],
+                    minlength=NUM_RATING_GROUPS,
+                )
+                self.group_correct_puzzles_done += correct_counts.to(
+                    self.group_correct_puzzles_done.dtype
+                )
+
+    def group_puzzle_accs(self) -> list[float | None]:
+        accs: list[float | None] = []
+        for group in range(NUM_RATING_GROUPS):
+            done = int(self.group_puzzles_done[group].item())
+            if done == 0:
+                accs.append(None)
+            else:
+                accs.append(
+                    self.group_correct_puzzles_done[group].item() / done
+                )
+        return accs
 
     def finalize(self) -> TrainEpochStats:
         n = int(self.n_steps.item())
@@ -195,6 +215,8 @@ class TrainMetricsAccumulator:
         puzzles_done = int(self.puzzles_done.item())
         halted_done = int(self.halted_done.item())
         avg_outer_iters = self.outer_iters_done.item() / puzzles_done if puzzles_done else 0.0
+        group_accs = tuple(self.group_puzzle_accs())
+        group_done = tuple(int(self.group_puzzles_done[g].item()) for g in range(NUM_RATING_GROUPS))
         return TrainEpochStats(
             loss=self.total_loss.item() / n,
             cell_loss=self.total_cell_loss.item() / n,
@@ -206,6 +228,8 @@ class TrainMetricsAccumulator:
             avg_steps_per_puzzle=avg_outer_iters,
             halt_rate=halted_done / puzzles_done if puzzles_done else 0.0,
             completions_per_epoch=puzzles_done,
+            group_puzzle_accs=group_accs,
+            group_puzzles_done=group_done,
         )
 
 
@@ -369,7 +393,7 @@ def save_epoch_metrics(
     train: TrainEpochStats,
     val: EpochStats,
     args: argparse.Namespace,
-    curriculum_p_gt: float | None = None,
+    curriculum_state: CurriculumState | None = None,
 ) -> None:
     history_path = run_dir / "history.json"
     if history_path.exists():
@@ -379,13 +403,22 @@ def save_epoch_metrics(
 
     history["args"] = json_safe(vars(args))
     history["epochs"] = [e for e in history["epochs"] if e["epoch"] != epoch]
+    train_fields = asdict(train)
+    group_puzzle_accs = train_fields.pop("group_puzzle_accs", ())
+    group_puzzles_done = train_fields.pop("group_puzzles_done", ())
     epoch_row = {
         "epoch": epoch,
-        **{f"train_{k}": v for k, v in asdict(train).items()},
+        **{f"train_{k}": v for k, v in train_fields.items()},
         **{f"val_{k}": v for k, v in asdict(val).items()},
     }
-    if curriculum_p_gt is not None:
-        epoch_row["curriculum_p_gt"] = curriculum_p_gt
+    for group in range(NUM_RATING_GROUPS):
+        epoch_row[f"train_group_{group}_puzzles_done"] = group_puzzles_done[group]
+        acc = group_puzzle_accs[group]
+        if acc is not None:
+            epoch_row[f"train_group_{group}_puzzle_acc"] = acc
+    if curriculum_state is not None:
+        epoch_row.update(curriculum_state.history_fields())
+        epoch_row["curriculum_p_gt"] = curriculum_state.mean_p_gt()
     history["epochs"].append(epoch_row)
     history["epochs"].sort(key=lambda row: row["epoch"])
     history_path.write_text(json.dumps(history, indent=2))
@@ -406,7 +439,7 @@ def save_checkpoint(
     train: TrainEpochStats,
     val: EpochStats,
     args: argparse.Namespace,
-    curriculum_p_gt: float = DEFAULT_CURRICULUM_P_GT,
+    curriculum_state: CurriculumState | None = None,
     best_val_cell_acc: float = -1.0,
 ) -> None:
     payload = {
@@ -417,10 +450,13 @@ def save_checkpoint(
         "val_loss": val.loss,
         "val_cell_acc": val.cell_acc,
         "val_puzzle_acc": val.puzzle_acc,
-        "curriculum_p_gt": curriculum_p_gt,
         "best_val_cell_acc": best_val_cell_acc,
         "args": vars(args),
     }
+    if curriculum_state is not None:
+        payload["curriculum_p_gt_logits"] = list(curriculum_state.logits)
+        payload["curriculum_p_gt"] = curriculum_state.mean_p_gt()
+        payload.update(curriculum_state.history_fields())
     torch.save(payload, path)
 
 
@@ -449,37 +485,41 @@ def best_val_cell_acc_from_history(run_dir: Path) -> float:
     return best
 
 
-def curriculum_p_gt_from_history(
-    run_dir: Path,
-    *,
-    max_outer_iters: int,
-) -> float:
+def _group_puzzle_accs_from_history_row(row: dict) -> list[float | None]:
+    accs: list[float | None] = []
+    for group in range(NUM_RATING_GROUPS):
+        done_key = f"train_group_{group}_puzzles_done"
+        acc_key = f"train_group_{group}_puzzle_acc"
+        if done_key in row and int(row[done_key]) == 0:
+            accs.append(None)
+        elif acc_key in row:
+            accs.append(float(row[acc_key]))
+        else:
+            accs.append(None)
+    return accs
+
+
+def curriculum_state_from_history(run_dir: Path) -> CurriculumState:
     history_path = run_dir / "history.json"
     if not history_path.exists():
-        return DEFAULT_CURRICULUM_P_GT
-    p_gt = DEFAULT_CURRICULUM_P_GT
+        return CurriculumState.default()
+    state = CurriculumState.default()
     history = json.loads(history_path.read_text())
     for row in sorted(history.get("epochs", []), key=lambda entry: entry["epoch"]):
-        p_gt = update_curriculum_p_gt(
-            p_gt,
-            float(row.get("train_avg_steps_per_puzzle", 0.0)),
-            max_outer_iters,
-        )
-    return p_gt
+        state.update_from_group_accs(_group_puzzle_accs_from_history_row(row))
+    return state
 
 
-def curriculum_p_gt_for_resume(
-    ckpt: dict,
-    run_dir: Path,
-    *,
-    max_outer_iters: int,
-) -> float:
+def curriculum_state_for_resume(ckpt: dict, run_dir: Path) -> CurriculumState:
+    if "curriculum_p_gt_logits" in ckpt:
+        logits = [float(v) for v in ckpt["curriculum_p_gt_logits"]]
+        if len(logits) == NUM_RATING_GROUPS:
+            return CurriculumState(logits=logits)
+    if "curriculum_p_gt_logit" in ckpt:
+        return CurriculumState.from_legacy_logit(float(ckpt["curriculum_p_gt_logit"]))
     if "curriculum_p_gt" in ckpt:
-        return float(ckpt["curriculum_p_gt"])
-    return curriculum_p_gt_from_history(
-        run_dir,
-        max_outer_iters=max_outer_iters,
-    )
+        return CurriculumState.from_legacy_p_gt(float(ckpt["curriculum_p_gt"]))
+    return curriculum_state_from_history(run_dir)
 
 
 def best_val_cell_acc_for_resume(ckpt: dict, run_dir: Path) -> float:
@@ -518,6 +558,7 @@ def train_epoch(
     batches_per_epoch: int,
     halt_loss_weight: float,
     refill_generator: torch.Generator,
+    curriculum_p_gt: torch.Tensor | None = None,
     profiler: TrainProfiler | None = None,
     amp: AmpConfig | None = None,
 ) -> TrainEpochStats:
@@ -560,7 +601,8 @@ def train_epoch(
                 generator=refill_generator,
                 dim=model.dim,
                 curriculum_training=rollout_config.curriculum_training,
-                curriculum_p_gt=rollout_config.curriculum_p_gt,
+                curriculum_p_gt=curriculum_p_gt,
+                curriculum_p_gt_by_group=rollout_config.curriculum_p_gt_by_group,
             )
         if profiler is not None:
             profiler.step()
@@ -826,7 +868,7 @@ def train_run(
     model: MixerNextStateModel | None = None,
     optimizer: torch.optim.Optimizer | None = None,
     best_val_cell_acc: float = -1.0,
-    initial_curriculum_p_gt: float | None = None,
+    initial_curriculum_state: CurriculumState | None = None,
 ) -> None:
     if args.seed is not None:
         torch.manual_seed(args.seed)
@@ -878,17 +920,17 @@ def train_run(
         )
     curriculum_training = not args.no_curriculum_training
     deep_supervision = not args.no_deep_supervision
-    curriculum_p_gt = (
-        initial_curriculum_p_gt
-        if initial_curriculum_p_gt is not None
-        else DEFAULT_CURRICULUM_P_GT
+    curriculum_state = (
+        initial_curriculum_state
+        if initial_curriculum_state is not None
+        else CurriculumState.default()
     )
     rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.train_max_outer_iters,
         curriculum_training=curriculum_training,
         deep_supervision=deep_supervision,
-        curriculum_p_gt=curriculum_p_gt,
+        curriculum_p_gt_by_group=curriculum_state.p_gt_by_group(),
     )
     eval_rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
@@ -920,6 +962,9 @@ def train_run(
                 f"(wait + warmup + active) but --batches-per-epoch is {args.batches_per_epoch}"
             )
 
+    curriculum_p_gt = (
+        curriculum_state.p_gt_tensor(device) if curriculum_training else None
+    )
     for epoch in range(start_epoch, args.epochs + 1):
         train_ds.set_epoch(epoch)
         if state is None:
@@ -929,7 +974,8 @@ def train_run(
                 device,
                 generator=refill_generator,
                 curriculum_training=rollout_config.curriculum_training,
-                curriculum_p_gt=rollout_config.curriculum_p_gt,
+                curriculum_p_gt=curriculum_p_gt,
+                curriculum_p_gt_by_group=rollout_config.curriculum_p_gt_by_group,
             )
 
         profiler = None
@@ -947,17 +993,16 @@ def train_run(
             batches_per_epoch=args.batches_per_epoch,
             halt_loss_weight=args.halt_loss_weight,
             refill_generator=refill_generator,
+            curriculum_p_gt=curriculum_p_gt,
             profiler=profiler,
             amp=amp,
         )
         if rollout_config.curriculum_training:
+            curriculum_state.update_from_group_accs(list(train.group_puzzle_accs))
+            curriculum_p_gt = curriculum_state.p_gt_tensor(device)
             rollout_config = replace(
                 rollout_config,
-                curriculum_p_gt=update_curriculum_p_gt(
-                    rollout_config.curriculum_p_gt,
-                    train.avg_steps_per_puzzle,
-                    args.train_max_outer_iters,
-                ),
+                curriculum_p_gt_by_group=curriculum_state.p_gt_by_group(),
             )
         val = measure_split(
             model,
@@ -998,7 +1043,7 @@ def train_run(
             train=train,
             val=val,
             args=args,
-            curriculum_p_gt=rollout_config.curriculum_p_gt,
+            curriculum_state=curriculum_state,
         )
         new_best = val.cell_acc > best_val_cell_acc
         if new_best:
@@ -1010,7 +1055,7 @@ def train_run(
             "train": train,
             "val": val,
             "args": args,
-            "curriculum_p_gt": rollout_config.curriculum_p_gt,
+            "curriculum_state": curriculum_state,
             "best_val_cell_acc": best_val_cell_acc,
         }
         save_checkpoint(run_dir / "last.pt", **ckpt_kwargs)
@@ -1029,7 +1074,7 @@ def train_run(
             f"val_halt_loss={val.halt_loss:.4f} val_halt_acc={val.halt_acc:.4f} "
             f"val_cell_acc={val.cell_acc:.4f} val_puzzle_acc={val.puzzle_acc:.4f} "
             f"val_halt_rate={val.halt_rate:.4f} val_steps_per_puzzle={val.avg_steps_per_puzzle:.1f} "
-            f"p_gt={rollout_config.curriculum_p_gt:.4f}",
+            f"p_gt={curriculum_state.format_p_gt_log()}",
             flush=True,
         )
 

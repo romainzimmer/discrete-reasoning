@@ -172,8 +172,8 @@ class TestApplyAugment:
             aug_seed=7,
         )
         ds.set_epoch(2)
-        clues_one, _ = ds.sample(torch.tensor([0]))
-        clues_two, _ = ds.sample(torch.tensor([0]))
+        clues_one, _, _ = ds.sample(torch.tensor([0]))
+        clues_two, _, _ = ds.sample(torch.tensor([0]))
         assert not torch.equal(clues_one, clues_two)
 
     def test_sample_resample_is_reproducible(self) -> None:
@@ -192,10 +192,10 @@ class TestApplyAugment:
         )
         ds_a.set_epoch(2)
         ds_b.set_epoch(2)
-        clues_a1, _ = ds_a.sample(torch.tensor([0]))
-        clues_a2, _ = ds_a.sample(torch.tensor([0]))
-        clues_b1, _ = ds_b.sample(torch.tensor([0]))
-        clues_b2, _ = ds_b.sample(torch.tensor([0]))
+        clues_a1, _, _ = ds_a.sample(torch.tensor([0]))
+        clues_a2, _, _ = ds_a.sample(torch.tensor([0]))
+        clues_b1, _, _ = ds_b.sample(torch.tensor([0]))
+        clues_b2, _, _ = ds_b.sample(torch.tensor([0]))
         assert torch.equal(clues_a1, clues_b1)
         assert torch.equal(clues_a2, clues_b2)
         assert not torch.equal(clues_a1, clues_a2)
@@ -209,9 +209,9 @@ class TestApplyAugment:
             aug_seed=7,
         )
         ds.set_epoch(1)
-        clues_one, _ = ds.sample(torch.tensor([0]))
+        clues_one, _, _ = ds.sample(torch.tensor([0]))
         ds.set_epoch(2)
-        clues_two, _ = ds.sample(torch.tensor([0]))
+        clues_two, _, _ = ds.sample(torch.tensor([0]))
         assert not torch.equal(clues_one, clues_two)
 
 
