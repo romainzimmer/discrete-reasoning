@@ -218,6 +218,7 @@ def main() -> None:
             epoch=epoch,
             epochs=epoch,
             phase="test",
+            progress_desc="test",
             rollout_config=rollout_config,
             halt_loss_weight=halt_loss_weight,
             use_cuda=use_cuda,

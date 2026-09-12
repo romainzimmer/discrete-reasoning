@@ -574,6 +574,7 @@ def measure_split(
     amp: AmpConfig | None = None,
     max_tries: int = 1,
     use_stream: bool = True,
+    progress_desc: str | None = None,
 ) -> EpochStats:
     if seed is not None:
         _seed_all(seed)
@@ -582,7 +583,7 @@ def measure_split(
     n_puzzles = clues.size(0)
     progress = tqdm(
         total=n_puzzles,
-        desc=_epoch_desc(epoch, epochs, phase),
+        desc=progress_desc or _epoch_desc(epoch, epochs, phase),
         leave=False,
         unit="puzzle",
         mininterval=0.5,
