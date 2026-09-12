@@ -1,21 +1,8 @@
-# discrete-reasoning
+# Discrete Reasoning
 
 Experiments on [sapientinc/sudoku-extreme](https://huggingface.co/datasets/sapientinc/sudoku-extreme).
 
-## Model
-
-**Looped-mixer** sudoku solver: embed grid digits → looped MLP-Mixer (`h_{t+1} = M(h_t + P)`) → unembed to logits, plus a halt head.
-
-- **`--dim`**: embedding / mixer hidden dimension (D); channel-mix uses SwiGLU with `H = round(4·D·2/3)` aligned to 256 (TRM default)
-- **`--num-blocks`**: mixer layers per inner step (not a flat FFN stack)
-- **`--inner-iters`**: looped inner steps per outer round (train, val, test, viz)
-- **`--train-max-outer-iters`**: max outer commits per puzzle before refill (training)
-- **`--eval-max-outer-iters`**: max outer commits per puzzle during val/test
-- **`--batches-per-epoch`**: optimizer steps per epoch (one outer round per step)
-- **`--halt-loss-weight`**: weight for halt BCE loss
-- **Outer-loop memory**: after each outer step, the final inner `cell_embed` is carried to the next outer step as detached fp32 `memory_embed`.
-- **Curriculum training** (on by default): at training puzzle entry (batch seed and slot refill), sample per-puzzle `p_gt` in `U[0, 1 - acc]` and reveal ground-truth on non-clue cells with probability `p_gt`; remaining non-clue cells stay empty. `acc` is an EMA (α=½) of done-only train puzzle accuracy (starts at 0 → epoch 1 uses `U[0, 1]`; at acc=1, `p_gt=0`). Revealed cells are not pinned on commit and are not encoded as clues; loss and halt still require correct model predictions on those cells. Val, test, and viz always start from clues only. Pass **`--no-curriculum-training`** to disable.
-- **Deep supervision** (on by default): average cell and halt loss over all inner loop steps during training; halt accuracy and done logic still use the final step. Logged halt loss is step-averaged. Pass **`--no-deep-supervision`** to use the final step only.
+**Looped MLP-Mixer** sudoku solver with outer commit loop, inner mixer iterations, and a learned halt head. See [docs/method.md](docs/method.md) for dataset, model, training, and test-time compute details.
 
 Runs save `args.model: looped-mixer`. Old checkpoints from before this migration cannot be loaded by `eval`.
 
@@ -49,7 +36,7 @@ uv run train \
 uv run python -m http.server 8000
 ```
 
-Open http://localhost:8000/viz/
+Open [http://localhost:8000/viz/](http://localhost:8000/viz/)
 
 Training uses **train** / **validation** / **test** splits: validation is held out from `train.csv`, test comes from `test.csv`. Charts show train vs validation; test metrics are reported separately. Trajectory viz shows one grid per **outer** rollout commit until model halt or max outer iters.
 
@@ -87,6 +74,8 @@ y = answer_to_tensor(row["answer"])    # (9, 9), 1-9
 
 ## References
 
-- [Less is More: Recursive Reasoning with Tiny Networks (TRM)](https://arxiv.org/abs/2510.04871) — MLP-Mixer blocks
-- [Looped Transformers are Better at Learning Learning Algorithms](https://arxiv.org/abs/2311.12424) — looped update `Y_{t+1} = M(Y_t + P)`
-- [Diffusion as a Training Curriculum for Timestep-Free Iterative Reasoning](https://arxiv.org/abs/2609.01449) — persistent hidden state, anytime iterative solving
+- [Hierarchical Reasoning Model (HRM)](https://arxiv.org/abs/2506.21734)
+- [Less is More: Recursive Reasoning with Tiny Networks (TRM)](https://arxiv.org/abs/2510.04871)
+- [Looped Transformers are Better at Learning Learning Algorithms](https://arxiv.org/abs/2311.12424)
+- [Diffusion as a Training Curriculum for Timestep-Free Iterative Reasoning](https://arxiv.org/abs/2609.01449)
+- [Flow Reasoning Models: Turning Flows Into Efficient Recurrent Reasoners](https://arxiv.org/abs/2606.29150)

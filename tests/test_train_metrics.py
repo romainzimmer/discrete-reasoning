@@ -58,12 +58,13 @@ def test_accumulate_step_metrics_from_training_logits() -> None:
     )
     acc = TrainMetricsAccumulator.empty(torch.device("cpu"))
     acc.add_step(result, state)
-    stats = acc.finalize()
+    stats = acc.finalize(inner_iters=3)
     assert int(acc.total_cells.item()) == 81 - 1
     assert int(acc.correct_cells.item()) == int(
         (result.pred[0][clues == 0] == answer[clues == 0]).sum()
     )
     assert stats.completions_per_epoch == 1
+    assert stats.avg_steps_per_puzzle == 3.0
     assert int(acc.correct_puzzles_done.item()) == int((result.pred[0] == answer).all())
 
 

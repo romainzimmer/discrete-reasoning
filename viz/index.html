@@ -378,6 +378,14 @@
       </div>
     </div>
     <div class="chart">
+      <div class="chart-title">Avg steps per puzzle</div>
+      <canvas id="avgStepsPerPuzzleChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend" id="avgStepsPerPuzzleLegend">
+        <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
+      </div>
+    </div>
+    <div class="chart">
       <div class="chart-title">Refills per step</div>
       <canvas id="refillsChart"></canvas>
       <div class="axis-x-label">epoch</div>
@@ -386,7 +394,7 @@
       </div>
     </div>
     <div class="chart">
-      <div class="chart-title">Completions per epoch</div>
+      <div class="chart-title">Puzzles per epoch</div>
       <canvas id="completionsChart"></canvas>
       <div class="axis-x-label">epoch</div>
       <div class="legend" id="completionsLegend">
@@ -582,6 +590,7 @@
       "puzzle_acc",
       "halt_acc",
       "avg_outer_iters",
+      "avg_steps_per_puzzle",
       "halt_rate",
       "avg_tries",
     ]);
@@ -785,10 +794,12 @@
 
         s.values.forEach((value, i) => {
           if (value === null || value === undefined) return;
+          ctx.globalAlpha = 0.7;
           ctx.fillStyle = s.color;
           ctx.beginPath();
-          ctx.arc(xAt(i), yAt(value), 4, 0, Math.PI * 2);
+          ctx.arc(xAt(i), yAt(value), 3, 0, Math.PI * 2);
           ctx.fill();
+          ctx.globalAlpha = 1;
         });
       }
     }
@@ -897,6 +908,12 @@
         formatY: v => Number(v).toFixed(1),
       });
       renderAccLegend("avgOuterItersLegend", epochs, "avg_outer_iters");
+      drawSeries(document.getElementById("avgStepsPerPuzzleChart"), accMetricSeries(epochs, "avg_steps_per_puzzle"), {
+        yMin: 0,
+        xLabels,
+        formatY: v => Number(v).toFixed(1),
+      });
+      renderAccLegend("avgStepsPerPuzzleLegend", epochs, "avg_steps_per_puzzle");
       drawSeries(document.getElementById("refillsChart"), trainOnlySeries(epochs, "refills_per_step"), {
         yMin: 0,
         xLabels,
@@ -994,6 +1011,7 @@
         ["halt_acc", "Halt accuracy"],
         ["halt_rate", "Halt rate"],
         ["avg_outer_iters", "Avg outer iters"],
+        ["avg_steps_per_puzzle", "Avg steps per puzzle"],
         ["avg_tries", "Avg tries"],
         ["loss", "Loss"],
       ];

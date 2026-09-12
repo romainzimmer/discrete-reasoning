@@ -111,6 +111,7 @@ class TrainEpochStats:
     puzzle_acc: float = 0.0
     halt_acc: float = 0.0
     avg_outer_iters: float = 0.0
+    avg_steps_per_puzzle: float = 0.0
     halt_rate: float = 0.0
     refills_per_step: float = 0.0
     completions_per_epoch: int = 0
@@ -180,7 +181,7 @@ class TrainMetricsAccumulator:
         self.outer_iters_done += (state.outer_count * done.long()).sum()
         self.halted_done += (result.halted & done).sum()
 
-    def finalize(self) -> TrainEpochStats:
+    def finalize(self, *, inner_iters: int = 1) -> TrainEpochStats:
         n = int(self.n_steps.item())
         if n == 0:
             return TrainEpochStats(loss=0.0)
@@ -188,6 +189,7 @@ class TrainMetricsAccumulator:
         total_cells = int(self.total_cells.item())
         puzzles_done = int(self.puzzles_done.item())
         halted_done = int(self.halted_done.item())
+        avg_outer_iters = self.outer_iters_done.item() / puzzles_done if puzzles_done else 0.0
         return TrainEpochStats(
             loss=self.total_loss.item() / n,
             cell_loss=self.total_cell_loss.item() / n,
@@ -195,7 +197,8 @@ class TrainMetricsAccumulator:
             cell_acc=self.correct_cells.item() / total_cells if total_cells else 0.0,
             puzzle_acc=self.correct_puzzles_done.item() / puzzles_done if puzzles_done else 0.0,
             halt_acc=self.halt_correct.item() / halt_total if halt_total else 0.0,
-            avg_outer_iters=self.outer_iters_done.item() / puzzles_done if puzzles_done else 0.0,
+            avg_outer_iters=avg_outer_iters,
+            avg_steps_per_puzzle=avg_outer_iters * inner_iters,
             halt_rate=halted_done / puzzles_done if puzzles_done else 0.0,
             refills_per_step=self.refills.item() / n,
             completions_per_epoch=puzzles_done,
@@ -211,6 +214,7 @@ class EpochStats:
     puzzle_acc: float = 0.0
     halt_acc: float = 0.0
     avg_outer_iters: float = 0.0
+    avg_steps_per_puzzle: float = 0.0
     halt_rate: float = 0.0
     avg_tries: float = 0.0
 
@@ -278,12 +282,13 @@ class EvalMetricsAccumulator:
         tries = result.tries.unsqueeze(0) if result.tries.dim() == 0 else result.tries
         self.tries_sum += tries.sum()
 
-    def finalize(self) -> EpochStats:
+    def finalize(self, *, inner_iters: int = 1) -> EpochStats:
         n = int(self.n.item())
         if n == 0:
             return EpochStats(loss=0.0)
         halt_total = int(self.halt_total.item())
         total_cells = int(self.total_cells.item())
+        avg_outer_iters = self.outer_iters_sum.item() / n
         return EpochStats(
             loss=self.total_loss.item() / n,
             cell_loss=self.total_cell_loss.item() / n,
@@ -291,7 +296,8 @@ class EvalMetricsAccumulator:
             cell_acc=self.correct_cells.item() / total_cells if total_cells else 0.0,
             puzzle_acc=self.correct_puzzles.item() / n,
             halt_acc=self.halt_correct.item() / halt_total if halt_total else 0.0,
-            avg_outer_iters=self.outer_iters_sum.item() / n,
+            avg_outer_iters=avg_outer_iters,
+            avg_steps_per_puzzle=avg_outer_iters * inner_iters,
             halt_rate=self.halted_count.item() / n,
             avg_tries=self.tries_sum.item() / n,
         )
@@ -538,7 +544,7 @@ def train_epoch(
             profiler.step()
     if profiler is not None:
         profiler.finish()
-    stats = acc.finalize()
+    stats = acc.finalize(inner_iters=rollout_config.inner_iters)
     progress.set_postfix(
         loss=f"{stats.loss:.4f}",
         cell_loss=f"{stats.cell_loss:.4f}",
@@ -692,7 +698,7 @@ def measure_split(
         )
         progress.update(n_puzzles)
     progress.close()
-    return acc.finalize()
+    return acc.finalize(inner_iters=rollout_config.inner_iters)
 
 
 def build_train_parser() -> argparse.ArgumentParser:
@@ -985,14 +991,15 @@ def train_run(
             f"train_loss={train.loss:.4f} train_cell_loss={train.cell_loss:.4f} "
             f"train_halt_loss={train.halt_loss:.4f} train_halt_acc={train.halt_acc:.4f} "
             f"train_cell_acc={train.cell_acc:.4f} train_puzzle_acc={train.puzzle_acc:.4f} "
-            f"train_halt_rate={train.halt_rate:.4f} train_refills={train.refills_per_step:.2f}"
+            f"train_halt_rate={train.halt_rate:.4f} train_refills={train.refills_per_step:.2f} "
+            f"train_steps_per_puzzle={train.avg_steps_per_puzzle:.1f}"
         )
         print(
             f"epoch {epoch}/{args.epochs}: "
             f"{train_msg} val_loss={val.loss:.4f} val_cell_loss={val.cell_loss:.4f} "
             f"val_halt_loss={val.halt_loss:.4f} val_halt_acc={val.halt_acc:.4f} "
             f"val_cell_acc={val.cell_acc:.4f} val_puzzle_acc={val.puzzle_acc:.4f} "
-            f"val_halt_rate={val.halt_rate:.4f}",
+            f"val_halt_rate={val.halt_rate:.4f} val_steps_per_puzzle={val.avg_steps_per_puzzle:.1f}",
             flush=True,
         )
 
