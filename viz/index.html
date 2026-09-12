@@ -398,7 +398,7 @@
       <canvas id="curriculumPGtChart"></canvas>
       <div class="axis-x-label">epoch</div>
       <div class="legend" id="curriculumPGtLegend">
-        <div class="legend-item"><span class="dot" style="background:#7c3aed"></span> end of epoch</div>
+        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
       </div>
     </div>
     </div>
@@ -920,7 +920,7 @@
         formatY: v => Number(v).toFixed(0),
       });
       renderTrainOnlyLegend("completionsLegend", epochs, "completions_per_epoch");
-      drawSeries(document.getElementById("curriculumPGtChart"), scalarSeries(epochs, "curriculum_p_gt"), {
+      drawSeries(document.getElementById("curriculumPGtChart"), scalarSeries(epochs, "curriculum_p_gt", "#2563eb"), {
         yMin: 0,
         yMax: 1,
         xLabels,

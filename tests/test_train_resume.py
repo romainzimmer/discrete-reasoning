@@ -59,7 +59,7 @@ def test_curriculum_p_gt_from_history(tmp_path: Path) -> None:
     (run_dir / "history.json").write_text(json.dumps(history))
     assert curriculum_p_gt_from_history(
         run_dir, max_outer_iters=10
-    ) == pytest.approx(0.5)
+    ) == pytest.approx(0.25)
 
 
 def test_curriculum_p_gt_for_resume_prefers_checkpoint(tmp_path: Path) -> None:

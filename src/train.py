@@ -36,8 +36,8 @@ from viz_data import (
 )
 
 DEFAULT_RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
-DEFAULT_CURRICULUM_P_GT = 0.5
-CURRICULUM_P_GT_STEP = 0.05
+DEFAULT_CURRICULUM_P_GT = 0.25
+CURRICULUM_P_GT_STEP = 0.01
 
 
 def optimizer_param_groups(

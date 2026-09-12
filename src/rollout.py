@@ -23,7 +23,7 @@ class RolloutConfig:
     halt_threshold: float = 0.5
     curriculum_training: bool = True
     deep_supervision: bool = True
-    curriculum_p_gt: float = 0.5
+    curriculum_p_gt: float = 0.25
 
     def __post_init__(self) -> None:
         if self.inner_iters < 1:
@@ -51,7 +51,7 @@ class BatchSlotState:
         *,
         generator: torch.Generator,
         curriculum_training: bool = True,
-        curriculum_p_gt: float = 0.5,
+        curriculum_p_gt: float = 0.25,
     ) -> BatchSlotState:
         idx = torch.randint(len(dataset), (batch_size,), generator=generator)
         clues, answers = dataset.sample(idx)
@@ -301,7 +301,7 @@ def _curriculum_init_digit_id(
     answer: torch.Tensor,
     clue_pin: torch.Tensor,
     *,
-    p_gt: float = 0.5,
+    p_gt: float = 0.25,
 ) -> torch.Tensor:
     """Training-only puzzle entry: partial GT reveal with fixed p_gt; unrevealed non-clue cells are random."""
     digit_id = clues.clone()
@@ -442,7 +442,7 @@ def refill_done_slots(
     generator: torch.Generator,
     dim: int,
     curriculum_training: bool = True,
-    curriculum_p_gt: float = 0.5,
+    curriculum_p_gt: float = 0.25,
 ) -> None:
     b = done.size(0)
     device = state.digit_id.device

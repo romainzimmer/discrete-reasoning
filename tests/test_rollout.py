@@ -104,7 +104,7 @@ def test_defaults():
     assert config.inner_iters == DEFAULT_INNER_ITERS
     assert config.max_outer_iters == DEFAULT_MAX_OUTER_ITERS
     assert config.deep_supervision is True
-    assert config.curriculum_p_gt == 0.5
+    assert config.curriculum_p_gt == 0.25
 
 
 def test_one_outer_per_step():

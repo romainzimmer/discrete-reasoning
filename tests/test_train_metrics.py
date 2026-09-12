@@ -122,13 +122,13 @@ def test_save_epoch_metrics_includes_train_acc(tmp_path: Path) -> None:
 
 
 def test_update_curriculum_p_gt_increases_when_slow() -> None:
-    assert update_curriculum_p_gt(0.5, 6.0, max_outer_iters=10) == pytest.approx(0.55)
+    assert update_curriculum_p_gt(0.5, 6.0, max_outer_iters=10) == pytest.approx(0.51)
 
 
 def test_update_curriculum_p_gt_decreases_when_fast() -> None:
-    assert update_curriculum_p_gt(0.5, 4.0, max_outer_iters=10) == pytest.approx(0.45)
+    assert update_curriculum_p_gt(0.5, 4.0, max_outer_iters=10) == pytest.approx(0.49)
 
 
 def test_update_curriculum_p_gt_clamps() -> None:
-    assert update_curriculum_p_gt(0.95, 10.0, max_outer_iters=10) == 1.0
-    assert update_curriculum_p_gt(0.05, 1.0, max_outer_iters=10) == 0.0
+    assert update_curriculum_p_gt(0.995, 10.0, max_outer_iters=10) == 1.0
+    assert update_curriculum_p_gt(0.005, 1.0, max_outer_iters=10) == 0.0
