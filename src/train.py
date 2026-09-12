@@ -406,6 +406,51 @@ def save_checkpoint(
     torch.save(payload, path)
 
 
+def load_last_checkpoint(run_dir: Path, device: torch.device) -> dict:
+    path = run_dir / "last.pt"
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found")
+    return torch.load(path, map_location=device, weights_only=False)
+
+
+def validate_resume_epochs(completed_epoch: int, new_epochs: int) -> None:
+    if new_epochs <= completed_epoch:
+        raise ValueError(
+            f"--epochs {new_epochs} must be greater than completed epoch {completed_epoch}"
+        )
+
+
+def best_val_cell_acc_from_history(run_dir: Path) -> float:
+    history_path = run_dir / "history.json"
+    if not history_path.exists():
+        return -1.0
+    history = json.loads(history_path.read_text())
+    best = -1.0
+    for row in history.get("epochs", []):
+        best = max(best, float(row.get("val_cell_acc", -1.0)))
+    return best
+
+
+def curriculum_puzzle_acc_from_history(run_dir: Path) -> float:
+    history_path = run_dir / "history.json"
+    if not history_path.exists():
+        return 0.0
+    acc = 0.0
+    history = json.loads(history_path.read_text())
+    for row in sorted(history.get("epochs", []), key=lambda entry: entry["epoch"]):
+        acc = update_curriculum_puzzle_acc(acc, float(row.get("train_puzzle_acc", 0.0)))
+    return acc
+
+
+def update_history_args(run_dir: Path, args: argparse.Namespace) -> None:
+    history_path = run_dir / "history.json"
+    if not history_path.exists():
+        raise FileNotFoundError(f"{history_path} not found")
+    history = json.loads(history_path.read_text())
+    history["args"] = json_safe(vars(args))
+    history_path.write_text(json.dumps(history, indent=2))
+
+
 def train_epoch(
     model: MixerNextStateModel,
     state: BatchSlotState,
@@ -623,7 +668,7 @@ def measure_split(
     return acc.finalize()
 
 
-def main() -> None:
+def build_train_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train rollout sudoku model")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -715,14 +760,23 @@ def main() -> None:
         action="store_true",
         help="Disable automatic mixed precision (bf16/fp16 on CUDA)",
     )
-    args = parser.parse_args()
+    return parser
 
+
+def train_run(
+    run_dir: Path,
+    args: argparse.Namespace,
+    *,
+    start_epoch: int = 1,
+    model: MixerNextStateModel | None = None,
+    optimizer: torch.optim.Optimizer | None = None,
+    best_val_cell_acc: float = -1.0,
+    initial_curriculum_puzzle_acc: float = 0.0,
+) -> None:
     if args.seed is not None:
         torch.manual_seed(args.seed)
 
     device = torch.device(args.device)
-    run_dir = make_run_dir(args.runs_dir)
-    print(f"Run dir: {run_dir}")
     ds_kwargs = {
         "min_rating": args.min_rating,
         "max_rating": args.max_rating,
@@ -752,15 +806,21 @@ def main() -> None:
     args.val_samples_count = len(val_rows)
     val_batch_size = args.val_batch_size or args.train_batch_size
 
-    args.model = "looped-mixer"
-    args.amp = not args.no_amp
-    save_run_config(run_dir, args)
+    if start_epoch == 1:
+        args.model = "looped-mixer"
+        args.amp = not args.no_amp
+        save_run_config(run_dir, args)
+    else:
+        update_history_args(run_dir, args)
+
     amp = resolve_amp(device, enabled=args.amp)
-    model = MixerNextStateModel(dim=args.dim, num_blocks=args.num_blocks).to(device)
-    optimizer = torch.optim.AdamW(
-        optimizer_param_groups(model, weight_decay=args.weight_decay),
-        lr=args.lr,
-    )
+    if model is None:
+        model = MixerNextStateModel(dim=args.dim, num_blocks=args.num_blocks).to(device)
+    if optimizer is None:
+        optimizer = torch.optim.AdamW(
+            optimizer_param_groups(model, weight_decay=args.weight_decay),
+            lr=args.lr,
+        )
     curriculum_training = not args.no_curriculum_training
     deep_supervision = not args.no_deep_supervision
     rollout_config = build_rollout_config(
@@ -768,6 +828,7 @@ def main() -> None:
         max_outer_iters=args.train_max_outer_iters,
         curriculum_training=curriculum_training,
         deep_supervision=deep_supervision,
+        curriculum_puzzle_acc=initial_curriculum_puzzle_acc,
     )
     eval_rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
@@ -775,7 +836,6 @@ def main() -> None:
         curriculum_training=False,
     )
     refill_generator = torch.Generator(device="cpu").manual_seed(args.seed)
-    best_val_cell_acc = -1.0
     manifest = load_manifest(run_dir)
     viz_rows = {
         "train": train_ds.rows[: args.viz_samples],
@@ -800,7 +860,7 @@ def main() -> None:
                 f"(wait + warmup + active) but --batches-per-epoch is {args.batches_per_epoch}"
             )
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         train_ds.set_epoch(epoch)
         if state is None:
             state = BatchSlotState.seed(
@@ -904,6 +964,13 @@ def main() -> None:
             f"val_halt_rate={val.halt_rate:.4f}",
             flush=True,
         )
+
+
+def main() -> None:
+    args = build_train_parser().parse_args()
+    run_dir = make_run_dir(args.runs_dir)
+    print(f"Run dir: {run_dir}")
+    train_run(run_dir, args)
 
 
 if __name__ == "__main__":

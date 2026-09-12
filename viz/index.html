@@ -561,6 +561,8 @@
     ];
 
     const EVAL_CONFIG_PARAM_ORDER = [
+      "run_id",
+      "checkpoint",
       "best_epoch",
       "test_samples_count",
       "min_rating",
@@ -935,6 +937,7 @@
           && key !== "inner_sweep"
           && key !== "outer_sweep"
           && key !== "tries_sweep"
+          && key !== "checkpoint_epoch"
       ).sort();
       return [...keys, ...extras].map(
         key => `${key}: ${formatConfigValue(key, test[key], test)}`

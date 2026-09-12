@@ -17,6 +17,7 @@ dev = ["pytest"]
 [project.scripts]
 download-dataset = "download:main"
 train = "train:main"
+resume = "resume:main"
 eval = "eval:main"
 
 [build-system]

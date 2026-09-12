@@ -83,6 +83,14 @@ docker compose run --rm train \
 
 Checkpoints and trajectories are written to `runs/`. Trajectory JSON is unchanged: one frame per **outer** commit in `states[]`.
 
+## Resume
+
+Continue a run from `runs/<run-id>/last.pt`. `--epochs` is the new total (not added to the previous value); it must be greater than the completed epoch:
+
+```bash
+docker compose run --rm resume runs/<run-id> --epochs 1000
+```
+
 ## Profile
 
 ### PyTorch profiler
@@ -139,10 +147,12 @@ Open the file in **NVIDIA Nsight Systems** (File → Open).
 
 ## Test
 
-Evaluate `best.pt` from a run trained after the mixer migration (`args.model: looped-mixer` in `history.json`). Reuses model and rollout settings from the checkpoint; test rating filters are independent of training:
+Evaluate a checkpoint from a run trained after the mixer migration (`args.model: looped-mixer` in `history.json`). Pass a run directory (uses `best.pt`) or a specific checkpoint path. Reuses model and rollout settings from the checkpoint; test rating filters are independent of training:
 
 ```bash
 docker compose run --rm eval runs/<run-id>
+docker compose run --rm eval runs/<run-id>/last.pt
+docker compose run --rm eval runs/<run-id>/epochs/0010.pt
 ```
 
 Cap test puzzles:

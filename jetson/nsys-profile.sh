@@ -131,4 +131,4 @@ exec docker compose run --rm \
   --force-overwrite=true \
   -o "$output" \
   -- \
-  train "$@"
+  python3 -m train "$@"
