@@ -327,18 +327,16 @@ class EvalMetricsAccumulator:
         self.tries_sum += tries.sum()
 
         if rating_groups is not None:
-            groups = rating_groups.long()
+            groups = rating_groups.long().to(self.group_puzzles_done.device)
             puzzle_ok = (preds == answers).all(dim=(-2, -1))
             counts = torch.bincount(groups, minlength=NUM_RATING_GROUPS)
-            self.group_puzzles_done += counts.to(self.group_puzzles_done.dtype)
+            self.group_puzzles_done += counts
             if puzzle_ok.any():
                 correct_counts = torch.bincount(
                     groups[puzzle_ok],
                     minlength=NUM_RATING_GROUPS,
                 )
-                self.group_correct_puzzles_done += correct_counts.to(
-                    self.group_correct_puzzles_done.dtype
-                )
+                self.group_correct_puzzles_done += correct_counts
 
     def group_puzzle_accs(self) -> list[float | None]:
         accs: list[float | None] = []
