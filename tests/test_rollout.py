@@ -20,7 +20,9 @@ from rollout import (
     _compute_losses,
     _halt_target,
     _curriculum_init_digit_id,
+    _curriculum_p_gt_for_slots,
     _p_gt_for_rating_groups,
+    _sample_uniform_p_gt,
     _inner_loop,
     _predict_halt,
     predict_grid,
@@ -99,6 +101,8 @@ def test_rollout_config_validation():
         RolloutConfig(inner_iters=0)
     with pytest.raises(ValueError):
         RolloutConfig(max_outer_iters=0)
+    with pytest.raises(ValueError, match="random_curriculum_p_gt requires curriculum_training"):
+        RolloutConfig(curriculum_training=False, random_curriculum_p_gt=True)
 
 
 def test_defaults():
@@ -206,12 +210,12 @@ def test_refill_after_done():
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
         dataset, batch_size=1, device=torch.device("cpu"), generator=gen)
-    original_clues = state.clues.clone()
+    original_digit_id = state.digit_id.clone()
     done = torch.tensor([True])
     refill_done_slots(
         state, done, dataset, generator=gen, dim=32, curriculum_training=False
     )
-    assert not torch.equal(state.clues, original_clues)
+    assert not torch.equal(state.digit_id, original_digit_id)
     assert state.outer_count.item() == 0
     assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
     assert not torch.equal(state.digit_id[~state.clue_pin], state.clues[~state.clue_pin])
@@ -229,11 +233,11 @@ def test_max_outer_forces_refill():
     result = rollout_train_step(model, state, config)
     assert result.done is not None
     assert result.done.all()
-    original_clues = state.clues.clone()
+    original_digit_id = state.digit_id.clone()
     refill_done_slots(
         state, result.done, dataset, generator=gen, dim=32, curriculum_training=False
     )
-    assert not torch.equal(state.clues, original_clues)
+    assert not torch.equal(state.digit_id, original_digit_id)
 
 
 def test_curriculum_init_preserves_clues():
@@ -703,6 +707,84 @@ def test_train_seed_curriculum_reveals_gt():
     assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
 
 
+def test_sample_uniform_p_gt_returns_batch_on_device():
+    p_gt = _sample_uniform_p_gt(3, torch.device("cpu"))
+    assert p_gt.shape == (3,)
+    assert p_gt.dtype == torch.float32
+    assert torch.all(p_gt >= 0.0)
+    assert torch.all(p_gt <= 1.0)
+
+
+def test_sample_uniform_p_gt_is_reproducible_with_generator():
+    gen1 = torch.Generator().manual_seed(11)
+    gen2 = torch.Generator().manual_seed(11)
+    p_gt_a = _sample_uniform_p_gt(4, torch.device("cpu"), generator=gen1)
+    p_gt_b = _sample_uniform_p_gt(4, torch.device("cpu"), generator=gen2)
+    assert torch.equal(p_gt_a, p_gt_b)
+
+
+def test_curriculum_init_is_reproducible_with_generator():
+    clues, answer = _tiny_batch()
+    clue_pin = clues > 0
+    gen1 = torch.Generator().manual_seed(7)
+    gen2 = torch.Generator().manual_seed(7)
+    digit_a = _curriculum_init_digit_id(
+        clues, answer, clue_pin, p_gt=0.5, generator=gen1
+    )
+    digit_b = _curriculum_init_digit_id(
+        clues, answer, clue_pin, p_gt=0.5, generator=gen2
+    )
+    assert torch.equal(digit_a, digit_b)
+
+
+def test_curriculum_p_gt_for_slots_random_ignores_rating_group():
+    with patch("rollout._p_gt_for_rating_groups", side_effect=AssertionError("adaptive lookup")):
+        p_gt = _curriculum_p_gt_for_slots(
+            batch_size=2,
+            rating_group=torch.tensor([0, 4]),
+            device=torch.device("cpu"),
+            curriculum_training=True,
+            random_curriculum_p_gt=True,
+            curriculum_p_gt=None,
+            curriculum_p_gt_by_group=(0.5,) * 5,
+        )
+    assert p_gt is not None
+    assert p_gt.shape == (2,)
+
+
+def test_train_seed_random_curriculum_samples_uniform_p_gt():
+    dataset = _tiny_dataset()
+    gen = torch.Generator().manual_seed(0)
+    with patch("rollout._sample_uniform_p_gt", return_value=torch.tensor([1.0])) as sample:
+        with patch("rollout.torch.rand", return_value=torch.zeros(1, 9, 9)):
+            state = BatchSlotState.seed(
+                dataset,
+                batch_size=1,
+                device=torch.device("cpu"),
+                generator=gen,
+                random_curriculum_p_gt=True,
+            )
+        sample.assert_called_once_with(
+            1, torch.device("cpu"), generator=gen
+        )
+    assert torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
+
+
+def test_train_seed_random_curriculum_zero_p_gt_skips_gt_reveal():
+    dataset = _tiny_dataset()
+    gen = torch.Generator().manual_seed(0)
+    with patch("rollout._sample_uniform_p_gt", return_value=torch.tensor([0.0])):
+        state = BatchSlotState.seed(
+            dataset,
+            batch_size=1,
+            device=torch.device("cpu"),
+            generator=gen,
+            random_curriculum_p_gt=True,
+        )
+    assert not torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
+    assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
+
+
 def test_train_seed_without_curriculum_keeps_clues_only():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
@@ -775,6 +857,60 @@ def test_refill_curriculum_reveals_gt():
             curriculum_p_gt_by_group=(1.0, 1.0, 1.0, 1.0, 1.0),
         )
     assert torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
+
+
+def test_refill_random_curriculum_resamples_uniform_p_gt():
+    dataset = _tiny_dataset()
+    gen = torch.Generator().manual_seed(0)
+    state = BatchSlotState.seed(
+        dataset,
+        batch_size=1,
+        device=torch.device("cpu"),
+        generator=gen,
+        curriculum_training=False,
+    )
+    with patch("rollout._sample_uniform_p_gt", return_value=torch.tensor([1.0])) as sample:
+        with patch("rollout.torch.rand", return_value=torch.zeros(1, 9, 9)):
+            refill_done_slots(
+                state,
+                torch.tensor([True]),
+                dataset,
+                generator=gen,
+                dim=32,
+                curriculum_training=True,
+                random_curriculum_p_gt=True,
+            )
+        sample.assert_called_once_with(
+            1, torch.device("cpu"), generator=gen
+        )
+    assert torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
+
+
+def test_refill_only_samples_done_slots():
+    dataset = _tiny_dataset()
+    gen = torch.Generator().manual_seed(0)
+    state = BatchSlotState.seed(
+        dataset,
+        batch_size=4,
+        device=torch.device("cpu"),
+        generator=gen,
+        curriculum_training=False,
+    )
+    before_clues = state.clues.clone()
+    state.outer_count = torch.tensor([3, 5, 7, 9])
+    with patch.object(dataset, "sample", wraps=dataset.sample) as sample_mock:
+        refill_done_slots(
+            state,
+            torch.tensor([False, True, False, True]),
+            dataset,
+            generator=gen,
+            dim=32,
+            curriculum_training=False,
+        )
+    assert sample_mock.call_args[0][0].numel() == 2
+    assert torch.equal(state.clues[0], before_clues[0])
+    assert torch.equal(state.clues[2], before_clues[2])
+    assert state.outer_count.tolist() == [3, 0, 7, 0]
 
 
 def test_predict_grid_pins_clues():

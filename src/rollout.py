@@ -23,6 +23,7 @@ class RolloutConfig:
     max_outer_iters: int = DEFAULT_MAX_OUTER_ITERS
     halt_threshold: float = 0.5
     curriculum_training: bool = True
+    random_curriculum_p_gt: bool = False
     deep_supervision: bool = True
     curriculum_p_gt_by_group: tuple[float, ...] = (DEFAULT_CURRICULUM_P_GT,) * NUM_RATING_GROUPS
 
@@ -31,6 +32,8 @@ class RolloutConfig:
             raise ValueError(
                 f"curriculum_p_gt_by_group must have length {NUM_RATING_GROUPS}"
             )
+        if self.random_curriculum_p_gt and not self.curriculum_training:
+            raise ValueError("random_curriculum_p_gt requires curriculum_training")
         if self.inner_iters < 1:
             raise ValueError("inner_iters must be >= 1")
         if self.max_outer_iters < 1:
@@ -57,6 +60,7 @@ class BatchSlotState:
         *,
         generator: torch.Generator,
         curriculum_training: bool = True,
+        random_curriculum_p_gt: bool = False,
         curriculum_p_gt: torch.Tensor | None = None,
         curriculum_p_gt_by_group: tuple[float, ...] = (
             DEFAULT_CURRICULUM_P_GT,
@@ -68,21 +72,19 @@ class BatchSlotState:
         answers = answers.to(device, non_blocking=True)
         rating_group = rating_groups.to(device, non_blocking=True)
         clue_pin = clues > 0
-        if curriculum_training:
-            p_gt_caps = _curriculum_p_gt_caps(
-                curriculum_p_gt,
-                curriculum_p_gt_by_group,
-                device,
-            )
-            p_gt = _p_gt_for_rating_groups(rating_group, p_gt_caps)
-            digit_id = _curriculum_init_digit_id(
-                clues,
-                answers,
-                clue_pin,
-                p_gt=p_gt,
-            )
-        else:
-            digit_id = _init_digit_id_from_clues(clues, clue_pin)
+        digit_id = _curriculum_digit_id_for_seed_refill(
+            clues,
+            answers,
+            clue_pin,
+            rating_group=rating_group,
+            device=device,
+            batch_size=batch_size,
+            curriculum_training=curriculum_training,
+            random_curriculum_p_gt=random_curriculum_p_gt,
+            curriculum_p_gt=curriculum_p_gt,
+            curriculum_p_gt_by_group=curriculum_p_gt_by_group,
+            generator=generator,
+        )
         return cls(
             digit_id=digit_id,
             clues=clues,
@@ -269,18 +271,54 @@ def _puzzle_init_seed(clues_row: torch.Tensor, base_seed: int) -> int:
     return mixed
 
 
+def _rand(
+    size,
+    *,
+    device: torch.device,
+    dtype: torch.dtype = torch.float32,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    if generator is None:
+        return torch.rand(size, device=device, dtype=dtype)
+    if generator.device.type == "cpu" and device.type != "cpu":
+        return torch.rand(size, dtype=dtype, generator=generator).to(device)
+    return torch.rand(size, device=device, dtype=dtype, generator=generator)
+
+
+def _randint(
+    low: int,
+    high: int,
+    size,
+    *,
+    device: torch.device,
+    dtype: torch.dtype = torch.long,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    if generator is None:
+        return torch.randint(low, high, size, device=device, dtype=dtype)
+    if generator.device.type == "cpu" and device.type != "cpu":
+        return torch.randint(low, high, size, dtype=dtype, generator=generator).to(device)
+    return torch.randint(low, high, size, device=device, dtype=dtype, generator=generator)
+
+
 def _random_fill_unpinned(
     digit_id: torch.Tensor,
     unpinned: torch.Tensor,
     *,
     init_seed: int | None = None,
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """Fill unpinned cells with uniform random digits 0-9 (0 = empty)."""
     if not unpinned.any():
         return digit_id
     if init_seed is None:
-        random_digits = torch.randint(
-            0, 10, digit_id.shape, device=digit_id.device, dtype=digit_id.dtype
+        random_digits = _randint(
+            0,
+            10,
+            digit_id.shape,
+            device=digit_id.device,
+            dtype=digit_id.dtype,
+            generator=generator,
         )
         return torch.where(unpinned, random_digits, digit_id)
     b = digit_id.size(0)
@@ -308,9 +346,83 @@ def _init_digit_id_from_clues(
     clue_pin: torch.Tensor,
     *,
     init_seed: int | None = None,
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """Clues pinned; other cells get random digits 0-9."""
-    return _random_fill_unpinned(clues.clone(), ~clue_pin, init_seed=init_seed)
+    return _random_fill_unpinned(
+        clues.clone(),
+        ~clue_pin,
+        init_seed=init_seed,
+        generator=generator,
+    )
+
+
+def _sample_uniform_p_gt(
+    batch_size: int,
+    device: torch.device,
+    *,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    return _rand((batch_size,), device=device, generator=generator)
+
+
+def _curriculum_p_gt_for_slots(
+    *,
+    batch_size: int,
+    rating_group: torch.Tensor,
+    device: torch.device,
+    curriculum_training: bool,
+    random_curriculum_p_gt: bool,
+    curriculum_p_gt: torch.Tensor | None,
+    curriculum_p_gt_by_group: tuple[float, ...],
+    generator: torch.Generator | None = None,
+) -> torch.Tensor | None:
+    if not curriculum_training:
+        return None
+    if random_curriculum_p_gt:
+        return _sample_uniform_p_gt(batch_size, device, generator=generator)
+    p_gt_caps = _curriculum_p_gt_caps(
+        curriculum_p_gt,
+        curriculum_p_gt_by_group,
+        device,
+    )
+    return _p_gt_for_rating_groups(rating_group, p_gt_caps)
+
+
+def _curriculum_digit_id_for_seed_refill(
+    clues: torch.Tensor,
+    answers: torch.Tensor,
+    clue_pin: torch.Tensor,
+    *,
+    rating_group: torch.Tensor,
+    device: torch.device,
+    batch_size: int,
+    curriculum_training: bool,
+    random_curriculum_p_gt: bool,
+    curriculum_p_gt: torch.Tensor | None,
+    curriculum_p_gt_by_group: tuple[float, ...],
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    if not curriculum_training:
+        return _init_digit_id_from_clues(clues, clue_pin, generator=generator)
+    p_gt = _curriculum_p_gt_for_slots(
+        batch_size=batch_size,
+        rating_group=rating_group,
+        device=device,
+        curriculum_training=curriculum_training,
+        random_curriculum_p_gt=random_curriculum_p_gt,
+        curriculum_p_gt=curriculum_p_gt,
+        curriculum_p_gt_by_group=curriculum_p_gt_by_group,
+        generator=generator,
+    )
+    assert p_gt is not None
+    return _curriculum_init_digit_id(
+        clues,
+        answers,
+        clue_pin,
+        p_gt=p_gt,
+        generator=generator,
+    )
 
 
 def _curriculum_p_gt_caps(
@@ -337,6 +449,7 @@ def _curriculum_init_digit_id(
     clue_pin: torch.Tensor,
     *,
     p_gt: float | torch.Tensor = 0.25,
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """Training-only puzzle entry: partial GT reveal; unrevealed non-clue cells are random."""
     digit_id = clues.clone()
@@ -347,9 +460,11 @@ def _curriculum_init_digit_id(
         reveal_p = p_gt.to(device=clues.device, dtype=torch.float32).view(-1, 1, 1)
     else:
         reveal_p = p_gt
-    reveal = non_clue & (torch.rand(clues.shape, device=clues.device) < reveal_p)
+    reveal = non_clue & (
+        _rand(clues.shape, device=clues.device, generator=generator) < reveal_p
+    )
     digit_id = torch.where(reveal, answer, digit_id)
-    return _random_fill_unpinned(digit_id, non_clue & ~reveal)
+    return _random_fill_unpinned(digit_id, non_clue & ~reveal, generator=generator)
 
 
 def _inner_loop(
@@ -483,51 +598,51 @@ def refill_done_slots(
     generator: torch.Generator,
     dim: int,
     curriculum_training: bool = True,
+    random_curriculum_p_gt: bool = False,
     curriculum_p_gt: torch.Tensor | None = None,
     curriculum_p_gt_by_group: tuple[float, ...] = (
         DEFAULT_CURRICULUM_P_GT,
     ) * NUM_RATING_GROUPS,
 ) -> None:
+    if not done.any():
+        return
     b = done.size(0)
     device = state.digit_id.device
-    idx = torch.randint(len(dataset), (b,), generator=generator)
+    done_flat = done.nonzero(as_tuple=True)[0]
+    n_done = int(done_flat.numel())
+    idx = torch.randint(len(dataset), (n_done,), generator=generator)
     new_clues, new_answers, new_rating_groups = dataset.sample(idx)
     new_clues = new_clues.to(device, non_blocking=True)
     new_answers = new_answers.to(device, non_blocking=True)
     new_rating_groups = new_rating_groups.to(device, non_blocking=True)
-    done_mask = done.view(b, 1, 1)
     new_clue_pin = new_clues > 0
-    if curriculum_training:
-        p_gt_caps = _curriculum_p_gt_caps(
-            curriculum_p_gt,
-            curriculum_p_gt_by_group,
-            device,
-        )
-        p_gt = _p_gt_for_rating_groups(new_rating_groups, p_gt_caps)
-        new_digit_id = _curriculum_init_digit_id(
-            new_clues,
-            new_answers,
-            new_clue_pin,
-            p_gt=p_gt,
-        )
-    else:
-        new_digit_id = _init_digit_id_from_clues(new_clues, new_clue_pin)
-    state.digit_id = torch.where(done_mask, new_digit_id, state.digit_id)
-    state.clues = torch.where(done_mask, new_clues, state.clues)
-    state.answer = torch.where(done_mask, new_answers, state.answer)
-    state.rating_group = torch.where(done, new_rating_groups, state.rating_group)
+    new_digit_id = _curriculum_digit_id_for_seed_refill(
+        new_clues,
+        new_answers,
+        new_clue_pin,
+        rating_group=new_rating_groups,
+        device=device,
+        batch_size=n_done,
+        curriculum_training=curriculum_training,
+        random_curriculum_p_gt=random_curriculum_p_gt,
+        curriculum_p_gt=curriculum_p_gt,
+        curriculum_p_gt_by_group=curriculum_p_gt_by_group,
+        generator=generator,
+    )
+    state.digit_id[done_flat] = new_digit_id
+    state.clues[done_flat] = new_clues
+    state.answer[done_flat] = new_answers
+    state.rating_group[done_flat] = new_rating_groups
     state.clue_pin = state.clues > 0
-    state.outer_count = torch.where(done, torch.zeros_like(state.outer_count), state.outer_count)
-    done_mask_mem = done.view(b, 1, 1, 1)
+    state.outer_count[done_flat] = 0
     if state.memory_embed is not None:
-        new_memory = zero_memory(b, dim, device)
-        state.memory_embed = torch.where(done_mask_mem, new_memory, state.memory_embed)
-    if done.any() and state.pending_candidate is not None:
+        state.memory_embed[done_flat] = zero_memory(n_done, dim, device)
+    if state.pending_candidate is not None:
         if done.all():
             state.pending_candidate = None
         else:
             state.pending_candidate = state.pending_candidate.clone()
-            state.pending_candidate[done] = 0
+            state.pending_candidate[done_flat] = 0
 
 
 def _pending_for_active(
@@ -991,6 +1106,7 @@ def rollout_eval_stream(
                     _slot_to_eval_result(slot, halt_loss_weight=halt_loss_weight),
                     slot.clues,
                     slot.answer,
+                    slot.puzzle_idx,
                 )
                 refill_count += 1
             else:

@@ -13,8 +13,13 @@ from tqdm import tqdm
 
 from amp import AmpConfig, autocast_context, resolve_amp
 from augment import AugmentConfig
-from curriculum import CURRICULUM_P_GT_LOGIT_STEP, NUM_RATING_GROUPS, CurriculumState
-from dataset import PuzzleDataset, filter_rows
+from curriculum import (
+    CURRICULUM_P_GT_LOGIT_DECAY,
+    CURRICULUM_P_GT_LOGIT_STEP,
+    NUM_RATING_GROUPS,
+    CurriculumState,
+)
+from dataset import PuzzleDataset, filter_rows, sample_rows
 from encoding import cell_acc_mask
 from model import MixerNextStateModel
 from rollout import (
@@ -80,6 +85,7 @@ def build_rollout_config(
     max_outer_iters: int,
     halt_threshold: float = 0.5,
     curriculum_training: bool = True,
+    random_curriculum_p_gt: bool = False,
     deep_supervision: bool = True,
     curriculum_p_gt_by_group: tuple[float, ...] | None = None,
 ) -> RolloutConfig:
@@ -90,6 +96,7 @@ def build_rollout_config(
         max_outer_iters=max_outer_iters,
         halt_threshold=halt_threshold,
         curriculum_training=curriculum_training,
+        random_curriculum_p_gt=random_curriculum_p_gt,
         deep_supervision=deep_supervision,
         curriculum_p_gt_by_group=curriculum_p_gt_by_group,
     )
@@ -245,6 +252,8 @@ class EpochStats:
     avg_steps_per_puzzle: float = 0.0
     halt_rate: float = 0.0
     avg_tries: float = 0.0
+    group_puzzle_accs: tuple[float | None, ...] = (None,) * NUM_RATING_GROUPS
+    group_puzzles_done: tuple[int, ...] = (0,) * NUM_RATING_GROUPS
 
 
 @dataclass
@@ -261,11 +270,14 @@ class EvalMetricsAccumulator:
     halted_count: torch.Tensor
     tries_sum: torch.Tensor
     n: torch.Tensor
+    group_correct_puzzles_done: torch.Tensor
+    group_puzzles_done: torch.Tensor
 
     @classmethod
     def empty(cls, device: torch.device) -> EvalMetricsAccumulator:
         zero = torch.zeros((), device=device)
         zero_i = torch.zeros((), device=device, dtype=torch.long)
+        zero_g = torch.zeros(NUM_RATING_GROUPS, device=device, dtype=torch.long)
         return cls(
             total_loss=zero.clone(),
             total_cell_loss=zero.clone(),
@@ -279,6 +291,8 @@ class EvalMetricsAccumulator:
             halted_count=zero_i.clone(),
             tries_sum=zero.clone(),
             n=zero_i.clone(),
+            group_correct_puzzles_done=zero_g.clone(),
+            group_puzzles_done=zero_g.clone(),
         )
 
     def add_batch(
@@ -286,6 +300,8 @@ class EvalMetricsAccumulator:
         result,
         answer: torch.Tensor,
         clues: torch.Tensor,
+        *,
+        rating_groups: torch.Tensor | None = None,
     ) -> None:
         batch_size = answer.size(0) if answer.dim() == 3 else 1
         self.n += batch_size
@@ -310,6 +326,32 @@ class EvalMetricsAccumulator:
         tries = result.tries.unsqueeze(0) if result.tries.dim() == 0 else result.tries
         self.tries_sum += tries.sum()
 
+        if rating_groups is not None:
+            groups = rating_groups.long()
+            puzzle_ok = (preds == answers).all(dim=(-2, -1))
+            counts = torch.bincount(groups, minlength=NUM_RATING_GROUPS)
+            self.group_puzzles_done += counts.to(self.group_puzzles_done.dtype)
+            if puzzle_ok.any():
+                correct_counts = torch.bincount(
+                    groups[puzzle_ok],
+                    minlength=NUM_RATING_GROUPS,
+                )
+                self.group_correct_puzzles_done += correct_counts.to(
+                    self.group_correct_puzzles_done.dtype
+                )
+
+    def group_puzzle_accs(self) -> list[float | None]:
+        accs: list[float | None] = []
+        for group in range(NUM_RATING_GROUPS):
+            done = int(self.group_puzzles_done[group].item())
+            if done == 0:
+                accs.append(None)
+            else:
+                accs.append(
+                    self.group_correct_puzzles_done[group].item() / done
+                )
+        return accs
+
     def finalize(self) -> EpochStats:
         n = int(self.n.item())
         if n == 0:
@@ -317,6 +359,8 @@ class EvalMetricsAccumulator:
         halt_total = int(self.halt_total.item())
         total_cells = int(self.total_cells.item())
         avg_outer_iters = self.outer_iters_sum.item() / n
+        group_accs = tuple(self.group_puzzle_accs())
+        group_done = tuple(int(self.group_puzzles_done[g].item()) for g in range(NUM_RATING_GROUPS))
         return EpochStats(
             loss=self.total_loss.item() / n,
             cell_loss=self.total_cell_loss.item() / n,
@@ -328,6 +372,8 @@ class EvalMetricsAccumulator:
             avg_steps_per_puzzle=avg_outer_iters,
             halt_rate=self.halted_count.item() / n,
             avg_tries=self.tries_sum.item() / n,
+            group_puzzle_accs=group_accs,
+            group_puzzles_done=group_done,
         )
 
 
@@ -375,12 +421,13 @@ def split_train_val(
     max_samples: int | None,
     seed: int | None = None,
 ) -> tuple[list[dict], list[dict]]:
-    pool = rows[:max_samples] if max_samples is not None else rows
+    pool = sample_rows(rows, max_samples=max_samples, seed=seed)
     if not pool:
         return [], []
     n_val = min(val_samples, len(pool) - 1) if len(pool) > 1 else 1
     indices = list(range(len(pool)))
-    random.Random(seed).shuffle(indices)
+    rng = random.Random(seed)
+    rng.shuffle(indices)
     val_rows = [pool[i] for i in indices[:n_val]]
     train_rows = [pool[i] for i in indices[n_val:]]
     return train_rows, val_rows
@@ -404,18 +451,25 @@ def save_epoch_metrics(
     history["args"] = json_safe(vars(args))
     history["epochs"] = [e for e in history["epochs"] if e["epoch"] != epoch]
     train_fields = asdict(train)
-    group_puzzle_accs = train_fields.pop("group_puzzle_accs", ())
-    group_puzzles_done = train_fields.pop("group_puzzles_done", ())
+    train_group_puzzle_accs = train_fields.pop("group_puzzle_accs", ())
+    train_group_puzzles_done = train_fields.pop("group_puzzles_done", ())
+    val_fields = asdict(val)
+    val_group_puzzle_accs = val_fields.pop("group_puzzle_accs", ())
+    val_group_puzzles_done = val_fields.pop("group_puzzles_done", ())
     epoch_row = {
         "epoch": epoch,
         **{f"train_{k}": v for k, v in train_fields.items()},
-        **{f"val_{k}": v for k, v in asdict(val).items()},
+        **{f"val_{k}": v for k, v in val_fields.items()},
     }
     for group in range(NUM_RATING_GROUPS):
-        epoch_row[f"train_group_{group}_puzzles_done"] = group_puzzles_done[group]
-        acc = group_puzzle_accs[group]
-        if acc is not None:
-            epoch_row[f"train_group_{group}_puzzle_acc"] = acc
+        epoch_row[f"train_group_{group}_puzzles_done"] = train_group_puzzles_done[group]
+        train_acc = train_group_puzzle_accs[group]
+        if train_acc is not None:
+            epoch_row[f"train_group_{group}_puzzle_acc"] = train_acc
+        epoch_row[f"val_group_{group}_puzzles_done"] = val_group_puzzles_done[group]
+        val_acc = val_group_puzzle_accs[group]
+        if val_acc is not None:
+            epoch_row[f"val_group_{group}_puzzle_acc"] = val_acc
     if curriculum_state is not None:
         epoch_row.update(curriculum_state.history_fields())
         epoch_row["curriculum_p_gt"] = curriculum_state.mean_p_gt()
@@ -503,13 +557,19 @@ def curriculum_logit_step_from_args(args: dict) -> float:
     return float(args.get("curriculum_logit_step", CURRICULUM_P_GT_LOGIT_STEP))
 
 
+def curriculum_logit_decay_from_args(args: dict) -> float:
+    return float(args.get("curriculum_logit_decay", CURRICULUM_P_GT_LOGIT_DECAY))
+
+
 def curriculum_state_from_history(run_dir: Path) -> CurriculumState:
     history_path = run_dir / "history.json"
     if not history_path.exists():
         return CurriculumState.default()
     history = json.loads(history_path.read_text())
+    run_args = history.get("args", {})
     state = CurriculumState.default(
-        logit_step=curriculum_logit_step_from_args(history.get("args", {})),
+        logit_step=curriculum_logit_step_from_args(run_args),
+        logit_decay=curriculum_logit_decay_from_args(run_args),
     )
     for row in sorted(history.get("epochs", []), key=lambda entry: entry["epoch"]):
         state.update_from_group_accs(_group_puzzle_accs_from_history_row(row))
@@ -517,18 +577,26 @@ def curriculum_state_from_history(run_dir: Path) -> CurriculumState:
 
 
 def curriculum_state_for_resume(ckpt: dict, run_dir: Path) -> CurriculumState:
-    logit_step = curriculum_logit_step_from_args(ckpt.get("args", {}))
+    run_args = ckpt.get("args", {})
+    logit_step = curriculum_logit_step_from_args(run_args)
+    logit_decay = curriculum_logit_decay_from_args(run_args)
     if "curriculum_p_gt_logits" in ckpt:
         logits = [float(v) for v in ckpt["curriculum_p_gt_logits"]]
         if len(logits) == NUM_RATING_GROUPS:
-            return CurriculumState(logits=logits, logit_step=logit_step)
+            return CurriculumState(
+                logits=logits,
+                logit_step=logit_step,
+                logit_decay=logit_decay,
+            )
     if "curriculum_p_gt_logit" in ckpt:
         state = CurriculumState.from_legacy_logit(float(ckpt["curriculum_p_gt_logit"]))
         state.logit_step = logit_step
+        state.logit_decay = logit_decay
         return state
     if "curriculum_p_gt" in ckpt:
         state = CurriculumState.from_legacy_p_gt(float(ckpt["curriculum_p_gt"]))
         state.logit_step = logit_step
+        state.logit_decay = logit_decay
         return state
     return curriculum_state_from_history(run_dir)
 
@@ -612,6 +680,7 @@ def train_epoch(
                 generator=refill_generator,
                 dim=model.dim,
                 curriculum_training=rollout_config.curriculum_training,
+                random_curriculum_p_gt=rollout_config.random_curriculum_p_gt,
                 curriculum_p_gt=curriculum_p_gt,
                 curriculum_p_gt_by_group=rollout_config.curriculum_p_gt_by_group,
             )
@@ -649,6 +718,7 @@ def _accumulate_static_eval_batches(
     seed: int | None,
     amp: AmpConfig,
     max_tries: int,
+    rating_groups: torch.Tensor | None = None,
 ) -> EvalMetricsAccumulator:
     acc = EvalMetricsAccumulator.empty(device)
     clues = clues.to(device, non_blocking=use_cuda)
@@ -667,7 +737,8 @@ def _accumulate_static_eval_batches(
                 init_seed=seed,
                 max_tries=max_tries,
             )
-        acc.add_batch(result, batch_answers, batch_clues)
+        batch_groups = rating_groups[start:end] if rating_groups is not None else None
+        acc.add_batch(result, batch_answers, batch_clues, rating_groups=batch_groups)
     return acc
 
 
@@ -685,12 +756,13 @@ def _accumulate_stream_eval(
     amp: AmpConfig,
     max_tries: int,
     progress,
+    rating_groups: torch.Tensor | None = None,
 ) -> EvalMetricsAccumulator:
     acc = EvalMetricsAccumulator.empty(device)
     clues = clues.to(device, non_blocking=use_cuda)
     answers = answers.to(device, non_blocking=use_cuda)
     with autocast_context(device, amp):
-        for result, row_clues, row_answer in rollout_eval_stream(
+        for result, row_clues, row_answer, puzzle_idx in rollout_eval_stream(
             model,
             clues,
             answers,
@@ -700,10 +772,16 @@ def _accumulate_stream_eval(
             init_seed=seed,
             max_tries=max_tries,
         ):
+            puzzle_group = (
+                rating_groups[puzzle_idx].unsqueeze(0)
+                if rating_groups is not None
+                else None
+            )
             acc.add_batch(
                 result,
                 row_answer.unsqueeze(0),
                 row_clues.unsqueeze(0),
+                rating_groups=puzzle_group,
             )
             progress.update(1)
     return acc
@@ -728,6 +806,7 @@ def measure_split(
     max_tries: int = 1,
     use_stream: bool = True,
     progress_desc: str | None = None,
+    rating_groups: torch.Tensor | None = None,
 ) -> EpochStats:
     if seed is not None:
         _seed_all(seed)
@@ -756,6 +835,7 @@ def measure_split(
             amp=amp,
             max_tries=max_tries,
             progress=progress,
+            rating_groups=rating_groups,
         )
     else:
         acc = _accumulate_static_eval_batches(
@@ -770,6 +850,7 @@ def measure_split(
             seed=seed,
             amp=amp,
             max_tries=max_tries,
+            rating_groups=rating_groups,
         )
         progress.update(n_puzzles)
     progress.close()
@@ -828,7 +909,12 @@ def build_train_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--min-rating", type=int, default=None)
     parser.add_argument("--max-rating", type=int, default=None)
-    parser.add_argument("--max-samples", type=int, default=None, help="Max puzzles from train.csv before train/val split")
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Random subsample size from train.csv before train/val split (seeded by --seed)",
+    )
     parser.add_argument("--val-samples", type=int, default=100, help="Validation puzzles from train.csv pool")
     parser.add_argument("--viz-samples", type=int, default=10, help="Puzzles per split to save for viz")
     parser.add_argument(
@@ -846,10 +932,24 @@ def build_train_parser() -> argparse.ArgumentParser:
         help="Disable curriculum puzzle init (partial GT reveal) during training seed/refill",
     )
     parser.add_argument(
+        "--no-adaptive-curriculum",
+        action="store_true",
+        help=(
+            "Sample p_gt ~ U[0, 1] per puzzle at each seed/refill instead of "
+            "adaptive per-rating-group p_gt"
+        ),
+    )
+    parser.add_argument(
         "--curriculum-logit-step",
         type=float,
         default=CURRICULUM_P_GT_LOGIT_STEP,
         help="Per-epoch logit update scale for curriculum p_gt per rating group",
+    )
+    parser.add_argument(
+        "--curriculum-logit-decay",
+        type=float,
+        default=CURRICULUM_P_GT_LOGIT_DECAY,
+        help="Per-epoch multiplicative decay on curriculum logits before the acc update",
     )
     parser.add_argument(
         "--no-deep-supervision",
@@ -887,6 +987,10 @@ def train_run(
     best_val_cell_acc: float = -1.0,
     initial_curriculum_state: CurriculumState | None = None,
 ) -> None:
+    if args.no_curriculum_training and args.no_adaptive_curriculum:
+        raise ValueError(
+            "--no-adaptive-curriculum cannot be combined with --no-curriculum-training"
+        )
     if args.seed is not None:
         torch.manual_seed(args.seed)
 
@@ -936,19 +1040,31 @@ def train_run(
             lr=args.lr,
         )
     curriculum_training = not args.no_curriculum_training
+    random_curriculum_p_gt = curriculum_training and args.no_adaptive_curriculum
+    adaptive_curriculum = curriculum_training and not args.no_adaptive_curriculum
     deep_supervision = not args.no_deep_supervision
     curriculum_logit_step = getattr(args, "curriculum_logit_step", CURRICULUM_P_GT_LOGIT_STEP)
-    if initial_curriculum_state is not None:
-        curriculum_state = initial_curriculum_state
-        curriculum_state.logit_step = curriculum_logit_step
-    else:
-        curriculum_state = CurriculumState.default(logit_step=curriculum_logit_step)
+    curriculum_logit_decay = getattr(args, "curriculum_logit_decay", CURRICULUM_P_GT_LOGIT_DECAY)
+    curriculum_state: CurriculumState | None = None
+    if adaptive_curriculum:
+        if initial_curriculum_state is not None:
+            curriculum_state = initial_curriculum_state
+            curriculum_state.logit_step = curriculum_logit_step
+            curriculum_state.logit_decay = curriculum_logit_decay
+        else:
+            curriculum_state = CurriculumState.default(
+                logit_step=curriculum_logit_step,
+                logit_decay=curriculum_logit_decay,
+            )
     rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.train_max_outer_iters,
         curriculum_training=curriculum_training,
+        random_curriculum_p_gt=random_curriculum_p_gt,
         deep_supervision=deep_supervision,
-        curriculum_p_gt_by_group=curriculum_state.p_gt_by_group(),
+        curriculum_p_gt_by_group=(
+            curriculum_state.p_gt_by_group() if curriculum_state is not None else None
+        ),
     )
     eval_rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
@@ -981,7 +1097,7 @@ def train_run(
             )
 
     curriculum_p_gt = (
-        curriculum_state.p_gt_tensor(device) if curriculum_training else None
+        curriculum_state.p_gt_tensor(device) if adaptive_curriculum else None
     )
     for epoch in range(start_epoch, args.epochs + 1):
         train_ds.set_epoch(epoch)
@@ -992,6 +1108,7 @@ def train_run(
                 device,
                 generator=refill_generator,
                 curriculum_training=rollout_config.curriculum_training,
+                random_curriculum_p_gt=rollout_config.random_curriculum_p_gt,
                 curriculum_p_gt=curriculum_p_gt,
                 curriculum_p_gt_by_group=rollout_config.curriculum_p_gt_by_group,
             )
@@ -1015,7 +1132,7 @@ def train_run(
             profiler=profiler,
             amp=amp,
         )
-        if rollout_config.curriculum_training:
+        if adaptive_curriculum and curriculum_state is not None:
             curriculum_state.update_from_group_accs(list(train.group_puzzle_accs))
             curriculum_p_gt = curriculum_state.p_gt_tensor(device)
             rollout_config = replace(
@@ -1036,6 +1153,7 @@ def train_run(
             use_cuda=use_cuda,
             seed=args.seed,
             amp=amp,
+            rating_groups=val_ds._base_rating_groups,
         )
         save_epoch_checkpoint(run_dir, epoch, model)
         model.eval()
@@ -1091,8 +1209,12 @@ def train_run(
             f"{train_msg} val_loss={val.loss:.4f} val_cell_loss={val.cell_loss:.4f} "
             f"val_halt_loss={val.halt_loss:.4f} val_halt_acc={val.halt_acc:.4f} "
             f"val_cell_acc={val.cell_acc:.4f} val_puzzle_acc={val.puzzle_acc:.4f} "
-            f"val_halt_rate={val.halt_rate:.4f} val_steps_per_puzzle={val.avg_steps_per_puzzle:.1f} "
-            f"p_gt={curriculum_state.format_p_gt_log()}",
+            f"val_halt_rate={val.halt_rate:.4f} val_steps_per_puzzle={val.avg_steps_per_puzzle:.1f}"
+            + (
+                f" p_gt={curriculum_state.format_p_gt_log()}"
+                if curriculum_state is not None
+                else ""
+            ),
             flush=True,
         )
 

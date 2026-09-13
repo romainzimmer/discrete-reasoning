@@ -49,10 +49,12 @@ def main() -> None:
     )
     optimizer.load_state_dict(ckpt["optimizer"])
 
+    adaptive_curriculum = (
+        not getattr(args, "no_curriculum_training", False)
+        and not getattr(args, "no_adaptive_curriculum", False)
+    )
     curriculum_state = (
-        curriculum_state_for_resume(ckpt, run_dir)
-        if not getattr(args, "no_curriculum_training", False)
-        else None
+        curriculum_state_for_resume(ckpt, run_dir) if adaptive_curriculum else None
     )
     print(f"Resuming {run_dir.name} from epoch {completed_epoch + 1}/{cli.epochs}")
     train_run(

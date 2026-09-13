@@ -9,6 +9,7 @@ import torch
 
 from rollout import BatchSlotState
 from curriculum import (
+    CURRICULUM_P_GT_LOGIT_DECAY,
     CURRICULUM_P_GT_LOGIT_STEP,
     CURRICULUM_P_GT_TARGET_ACC,
     DEFAULT_CURRICULUM_P_GT_LOGIT,
@@ -22,7 +23,10 @@ from train import (
     TrainEpochStats,
     EpochStats,
     TrainMetricsAccumulator,
+    build_rollout_config,
     save_epoch_metrics,
+    train_run,
+    build_train_parser,
 )
 
 
@@ -114,6 +118,58 @@ def test_accumulate_step_uses_pred_with_clue_mask() -> None:
     assert int(acc.correct_puzzles_done.item()) == 0
 
 
+def test_build_rollout_config_random_curriculum_flag() -> None:
+    config = build_rollout_config(
+        inner_iters=2,
+        max_outer_iters=3,
+        random_curriculum_p_gt=True,
+    )
+    assert config.random_curriculum_p_gt is True
+    assert config.curriculum_training is True
+
+
+def test_save_epoch_metrics_omits_curriculum_without_state(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    args = Namespace(epochs=1, no_adaptive_curriculum=True)
+    save_epoch_metrics(
+        run_dir,
+        epoch=1,
+        train=TrainEpochStats(loss=1.0, puzzle_acc=0.2),
+        val=EpochStats(loss=2.0, puzzle_acc=0.1),
+        args=args,
+        curriculum_state=None,
+    )
+    epoch = json.loads((run_dir / "history.json").read_text())["epochs"][0]
+    assert "curriculum_p_gt" not in epoch
+    assert "curriculum_p_gt_g0" not in epoch
+
+
+def test_train_run_rejects_conflicting_curriculum_flags(tmp_path: Path) -> None:
+    args = build_train_parser().parse_args(
+        [
+            "--epochs",
+            "1",
+            "--max-samples",
+            "5",
+            "--batches-per-epoch",
+            "1",
+            "--train-batch-size",
+            "2",
+            "--val-samples",
+            "1",
+            "--dim",
+            "32",
+            "--num-blocks",
+            "1",
+            "--no-curriculum-training",
+            "--no-adaptive-curriculum",
+        ]
+    )
+    with pytest.raises(ValueError, match="cannot be combined"):
+        train_run(tmp_path / "run", args)
+
+
 def test_save_epoch_metrics_includes_train_acc(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -147,9 +203,17 @@ def test_update_curriculum_p_gt_logit_decreases_when_acc_above_target() -> None:
     assert curriculum_p_gt_from_logit(updated) < curriculum_p_gt_from_logit(logit)
 
 
-def test_update_curriculum_p_gt_logit_is_unchanged_at_target_acc() -> None:
+def test_update_curriculum_p_gt_logit_decays_toward_zero_at_target_acc() -> None:
     logit = 0.2
-    assert update_curriculum_p_gt_logit(logit, puzzle_acc=0.5) == pytest.approx(logit)
+    assert update_curriculum_p_gt_logit(logit, puzzle_acc=0.5) == pytest.approx(
+        logit * CURRICULUM_P_GT_LOGIT_DECAY
+    )
+
+
+def test_curriculum_state_uses_configured_logit_decay() -> None:
+    state = CurriculumState.default(logit_decay=0.5)
+    state.update_from_group_accs([0.5, None, None, None, None])
+    assert state.logits[0] == pytest.approx(0.0)
 
 
 def test_default_curriculum_p_gt_logit_is_zero_and_maps_to_half() -> None:
@@ -160,7 +224,7 @@ def test_default_curriculum_p_gt_logit_is_zero_and_maps_to_half() -> None:
 def test_update_curriculum_p_gt_logit_uses_target_minus_acc() -> None:
     logit = 0.1
     puzzle_acc = 0.35
-    expected = logit + CURRICULUM_P_GT_LOGIT_STEP * (
+    expected = logit * CURRICULUM_P_GT_LOGIT_DECAY + CURRICULUM_P_GT_LOGIT_STEP * (
         CURRICULUM_P_GT_TARGET_ACC - puzzle_acc
     )
     assert update_curriculum_p_gt_logit(logit, puzzle_acc) == pytest.approx(expected)
@@ -176,15 +240,18 @@ def test_curriculum_logit_drifts_up_when_acc_stays_below_target() -> None:
     logit = DEFAULT_CURRICULUM_P_GT_LOGIT
     for _ in range(5):
         logit = update_curriculum_p_gt_logit(logit, puzzle_acc=0.3)
-    assert logit == pytest.approx(5 * CURRICULUM_P_GT_LOGIT_STEP * 0.2)
+    steady = CURRICULUM_P_GT_LOGIT_STEP * (CURRICULUM_P_GT_TARGET_ACC - 0.3) / (
+        1.0 - CURRICULUM_P_GT_LOGIT_DECAY
+    )
+    assert logit < steady
     assert curriculum_p_gt_from_logit(logit) > 0.5
 
 
-def test_curriculum_logit_stays_fixed_when_acc_matches_target() -> None:
-    logit = DEFAULT_CURRICULUM_P_GT_LOGIT
+def test_curriculum_logit_decays_to_zero_when_acc_matches_target() -> None:
+    logit = 1.0
     for _ in range(5):
         logit = update_curriculum_p_gt_logit(logit, puzzle_acc=CURRICULUM_P_GT_TARGET_ACC)
-    assert logit == pytest.approx(DEFAULT_CURRICULUM_P_GT_LOGIT)
+    assert logit == pytest.approx(1.0 * (CURRICULUM_P_GT_LOGIT_DECAY**5))
 
 
 def test_rating_group_bins_are_quintiles() -> None:

@@ -32,6 +32,7 @@ uv run train \
   --train-batch-size 8 --batches-per-epoch 100
 # Add --no-augment to disable on-the-fly training augmentations (ablation)
 # Add --no-curriculum-training to start training puzzles from clues only
+# Add --no-adaptive-curriculum to sample p_gt ~ U[0, 1] per puzzle at seed/refill
 # Add --no-deep-supervision to use final inner step only for cell + halt loss
 uv run python -m http.server 8000
 ```

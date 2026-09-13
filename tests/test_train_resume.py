@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 import torch
 
-from curriculum import CurriculumState, curriculum_p_gt_from_logit
+from curriculum import (
+    CurriculumState,
+    curriculum_p_gt_from_logit,
+    update_curriculum_p_gt_logit,
+)
 from model import MixerNextStateModel
 from train import (
     TrainEpochStats,
@@ -67,7 +71,10 @@ def test_curriculum_state_from_history(tmp_path: Path) -> None:
     }
     (run_dir / "history.json").write_text(json.dumps(history))
     state = curriculum_state_from_history(run_dir)
-    assert state.p_gt_by_group()[0] == pytest.approx(0.5)
+    logit = 0.0
+    logit = update_curriculum_p_gt_logit(logit, 0.3)
+    logit = update_curriculum_p_gt_logit(logit, 0.7)
+    assert state.p_gt_by_group()[0] == pytest.approx(curriculum_p_gt_from_logit(logit))
 
 
 def test_curriculum_state_for_resume_prefers_group_logits(tmp_path: Path) -> None:

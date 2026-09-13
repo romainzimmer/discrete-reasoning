@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+
 import torch
 from torch.utils.data import Dataset
 
@@ -8,21 +10,32 @@ from curriculum import rating_group
 from data import answer_to_tensor, load_split, puzzle_to_tensor
 
 
+def sample_rows(
+    rows: list[dict],
+    *,
+    max_samples: int | None = None,
+    seed: int | None = None,
+) -> list[dict]:
+    if max_samples is None or max_samples >= len(rows):
+        return rows
+    rng = random.Random(seed)
+    return rng.sample(rows, max_samples)
+
+
 def filter_rows(
     split: str,
     *,
     min_rating: int | None = None,
     max_rating: int | None = None,
     max_samples: int | None = None,
+    seed: int | None = None,
 ) -> list[dict]:
     rows = load_split(split)
     if min_rating is not None:
         rows = [r for r in rows if r["rating"] >= min_rating]
     if max_rating is not None:
         rows = [r for r in rows if r["rating"] <= max_rating]
-    if max_samples is not None:
-        rows = rows[:max_samples]
-    return rows
+    return sample_rows(rows, max_samples=max_samples, seed=seed)
 
 
 class PuzzleDataset(Dataset):
@@ -36,6 +49,7 @@ class PuzzleDataset(Dataset):
         min_rating: int | None = None,
         max_rating: int | None = None,
         max_samples: int | None = None,
+        sample_seed: int | None = None,
         augment: bool = False,
         aug_config: AugmentConfig | None = None,
         aug_seed: int | None = None,
@@ -49,6 +63,7 @@ class PuzzleDataset(Dataset):
                 min_rating=min_rating,
                 max_rating=max_rating,
                 max_samples=max_samples,
+                seed=sample_seed,
             )
         self.augment = augment
         self.aug_config = aug_config

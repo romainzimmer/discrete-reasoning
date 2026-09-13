@@ -405,6 +405,12 @@
       <div class="axis-x-label">epoch</div>
       <div class="legend" id="trainGroupPuzzleAccLegend"></div>
     </div>
+    <div class="chart" id="valGroupPuzzleAccChartPanel">
+      <div class="chart-title">Validation puzzle accuracy by rating group</div>
+      <canvas id="valGroupPuzzleAccChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend" id="valGroupPuzzleAccLegend"></div>
+    </div>
     </div>
   </div>
 
@@ -551,7 +557,9 @@
       "eval_max_outer_iters",
       "halt_loss_weight",
       "no_curriculum_training",
+      "no_adaptive_curriculum",
       "curriculum_logit_step",
+      "curriculum_logit_decay",
       "no_deep_supervision",
       "epochs",
       "train_batch_size",
@@ -892,22 +900,51 @@
       renderGroupSeriesLegend(elementId, curriculumPGtSeries(epochs));
     }
 
-    function trainGroupPuzzleAccSeries(epochs) {
+    function groupPuzzleAccSeries(epochs, prefix) {
       const series = [];
       for (let group = 0; group < CURRICULUM_P_GT_GROUP_LABELS.length; group += 1) {
-        const key = `train_group_${group}_puzzle_acc`;
-        if (!epochs.some(e => e[key] != null)) continue;
+        const doneKey = `${prefix}_group_${group}_puzzles_done`;
+        const accKey = `${prefix}_group_${group}_puzzle_acc`;
+        if (!epochs.some(e => (e[doneKey] ?? 0) >= 1)) continue;
         series.push({
           color: CURRICULUM_P_GT_GROUP_COLORS[group],
           label: CURRICULUM_P_GT_GROUP_LABELS[group],
-          values: epochs.map(e => e[key] ?? null),
+          values: epochs.map(e => ((e[doneKey] ?? 0) >= 1 ? (e[accKey] ?? null) : null)),
         });
       }
       return series;
     }
 
+    function trainGroupPuzzleAccSeries(epochs) {
+      return groupPuzzleAccSeries(epochs, "train");
+    }
+
+    function valGroupPuzzleAccSeries(epochs) {
+      return groupPuzzleAccSeries(epochs, "val");
+    }
+
     function renderTrainGroupPuzzleAccLegend(elementId, epochs) {
       renderGroupSeriesLegend(elementId, trainGroupPuzzleAccSeries(epochs));
+    }
+
+    function renderValGroupPuzzleAccLegend(elementId, epochs) {
+      renderGroupSeriesLegend(elementId, valGroupPuzzleAccSeries(epochs));
+    }
+
+    function renderGroupPuzzleAccChart(panelId, canvasId, legendId, series, epochs, xLabels, formatY) {
+      const panel = document.getElementById(panelId);
+      if (series.length) {
+        panel.style.display = "";
+        drawSeries(document.getElementById(canvasId), series, {
+          yMin: 0,
+          yMax: 1,
+          xLabels,
+          formatY,
+        });
+        renderGroupSeriesLegend(legendId, series);
+      } else {
+        panel.style.display = "none";
+      }
     }
 
     function renderTrainOnlyLegend(elementId, epochs, metricKey) {
@@ -993,24 +1030,24 @@
         },
       );
       renderCurriculumPGtLegend("curriculumPGtLegend", epochs);
-      const groupAccSeries = trainGroupPuzzleAccSeries(epochs);
-      const groupAccPanel = document.getElementById("trainGroupPuzzleAccChartPanel");
-      if (groupAccSeries.length) {
-        groupAccPanel.style.display = "";
-        drawSeries(
-          document.getElementById("trainGroupPuzzleAccChart"),
-          groupAccSeries,
-          {
-            yMin: 0,
-            yMax: 1,
-            xLabels,
-            formatY: pct,
-          },
-        );
-        renderTrainGroupPuzzleAccLegend("trainGroupPuzzleAccLegend", epochs);
-      } else {
-        groupAccPanel.style.display = "none";
-      }
+      renderGroupPuzzleAccChart(
+        "trainGroupPuzzleAccChartPanel",
+        "trainGroupPuzzleAccChart",
+        "trainGroupPuzzleAccLegend",
+        trainGroupPuzzleAccSeries(epochs),
+        epochs,
+        xLabels,
+        pct,
+      );
+      renderGroupPuzzleAccChart(
+        "valGroupPuzzleAccChartPanel",
+        "valGroupPuzzleAccChart",
+        "valGroupPuzzleAccLegend",
+        valGroupPuzzleAccSeries(epochs),
+        epochs,
+        xLabels,
+        pct,
+      );
       renderAccLegend("cellAccLegend", epochs, "cell_acc");
       renderAccLegend("puzzleAccLegend", epochs, "puzzle_acc");
     }

@@ -265,7 +265,7 @@ def test_stream_yield_clues_match_dataset_puzzles():
             )
         )
     matched = set()
-    for _, row_clues, row_answer in results:
+    for _, row_clues, row_answer, _puzzle_idx in results:
         for idx in range(dataset._base_clues.size(0)):
             if torch.equal(row_clues, dataset._base_clues[idx]) and torch.equal(
                 row_answer, dataset._base_answers[idx]

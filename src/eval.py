@@ -151,7 +151,7 @@ def main() -> None:
         "--max-test-samples",
         type=int,
         default=None,
-        help="Max puzzles from test.csv after filters (default: all)",
+        help="Random subsample size from test.csv after filters (seeded by --seed; default: all)",
     )
     parser.add_argument(
         "--min-rating",
@@ -213,6 +213,7 @@ def main() -> None:
         min_rating=args.min_rating,
         max_rating=args.max_rating,
         max_samples=args.max_test_samples,
+        seed=args.seed,
     )
     if not test_rows:
         raise ValueError("No test puzzles after filters")
