@@ -393,12 +393,6 @@
         <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
       </div>
     </div>
-    <div class="chart">
-      <div class="chart-title">Curriculum p_gt</div>
-      <canvas id="curriculumPGtChart"></canvas>
-      <div class="axis-x-label">epoch</div>
-      <div class="legend" id="curriculumPGtLegend"></div>
-    </div>
     <div class="chart" id="trainGroupPuzzleAccChartPanel">
       <div class="chart-title">Train puzzle accuracy by rating group</div>
       <canvas id="trainGroupPuzzleAccChart"></canvas>
@@ -556,10 +550,7 @@
       "train_max_outer_iters",
       "eval_max_outer_iters",
       "halt_loss_weight",
-      "no_curriculum_training",
-      "no_adaptive_curriculum",
-      "curriculum_logit_step",
-      "curriculum_logit_decay",
+      "no_gt_reveal",
       "no_deep_supervision",
       "epochs",
       "train_batch_size",
@@ -861,29 +852,14 @@
       return [{ color, values: epochs.map(e => e[metricKey] ?? null) }];
     }
 
-    const CURRICULUM_P_GT_GROUP_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c"];
-    const CURRICULUM_P_GT_GROUP_LABELS = [
+    const RATING_GROUP_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c"];
+    const RATING_GROUP_LABELS = [
       "G0 [0,1]",
       "G1 [2,11]",
       "G2 [12,23]",
       "G3 [24,38]",
       "G4 [39+]",
     ];
-
-    function curriculumPGtSeries(epochs) {
-      const series = [];
-      for (let group = 0; group < CURRICULUM_P_GT_GROUP_LABELS.length; group += 1) {
-        const key = `curriculum_p_gt_g${group}`;
-        if (!epochs.some(e => e[key] != null)) continue;
-        series.push({
-          color: CURRICULUM_P_GT_GROUP_COLORS[group],
-          label: CURRICULUM_P_GT_GROUP_LABELS[group],
-          values: epochs.map(e => e[key] ?? null),
-        });
-      }
-      if (series.length) return series;
-      return scalarSeries(epochs, "curriculum_p_gt", "#2563eb");
-    }
 
     function renderGroupSeriesLegend(elementId, series) {
       const el = document.getElementById(elementId);
@@ -896,19 +872,15 @@
       )).join("");
     }
 
-    function renderCurriculumPGtLegend(elementId, epochs) {
-      renderGroupSeriesLegend(elementId, curriculumPGtSeries(epochs));
-    }
-
     function groupPuzzleAccSeries(epochs, prefix) {
       const series = [];
-      for (let group = 0; group < CURRICULUM_P_GT_GROUP_LABELS.length; group += 1) {
+      for (let group = 0; group < RATING_GROUP_LABELS.length; group += 1) {
         const doneKey = `${prefix}_group_${group}_puzzles_done`;
         const accKey = `${prefix}_group_${group}_puzzle_acc`;
         if (!epochs.some(e => (e[doneKey] ?? 0) >= 1)) continue;
         series.push({
-          color: CURRICULUM_P_GT_GROUP_COLORS[group],
-          label: CURRICULUM_P_GT_GROUP_LABELS[group],
+          color: RATING_GROUP_COLORS[group],
+          label: RATING_GROUP_LABELS[group],
           values: epochs.map(e => ((e[doneKey] ?? 0) >= 1 ? (e[accKey] ?? null) : null)),
         });
       }
@@ -1019,17 +991,6 @@
         formatY: v => Number(v).toFixed(0),
       });
       renderTrainOnlyLegend("completionsLegend", epochs, "completions_per_epoch");
-      drawSeries(
-        document.getElementById("curriculumPGtChart"),
-        curriculumPGtSeries(epochs),
-        {
-          yMin: 0,
-          yMax: 1,
-          xLabels,
-          formatY: pct,
-        },
-      );
-      renderCurriculumPGtLegend("curriculumPGtLegend", epochs);
       renderGroupPuzzleAccChart(
         "trainGroupPuzzleAccChartPanel",
         "trainGroupPuzzleAccChart",

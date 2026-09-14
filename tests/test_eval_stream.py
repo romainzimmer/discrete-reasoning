@@ -46,7 +46,7 @@ def _run_measure(
     use_stream: bool,
     max_tries: int = 1,
 ) -> dict:
-    config = build_rollout_config(inner_iters=1, max_outer_iters=3, curriculum_training=False)
+    config = build_rollout_config(inner_iters=1, max_outer_iters=3, gt_reveal=False)
     stats = measure_split(
         model,
         dataset._base_clues,
@@ -136,7 +136,7 @@ def test_rollout_eval_batch_row_independent_of_batch_size():
     dataset = _three_puzzle_dataset()
     clues = dataset._base_clues
     answers = dataset._base_answers
-    config = RolloutConfig(inner_iters=1, max_outer_iters=2, curriculum_training=False)
+    config = RolloutConfig(inner_iters=1, max_outer_iters=2, gt_reveal=False)
 
     solo_preds = []
     for i in range(clues.size(0)):
@@ -173,7 +173,7 @@ def test_eval_halt_without_correct_grid_stops():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _three_puzzle_dataset()._base_clues[:1], _three_puzzle_dataset()._base_answers[:1]
-    config = RolloutConfig(inner_iters=1, max_outer_iters=10, curriculum_training=False)
+    config = RolloutConfig(inner_iters=1, max_outer_iters=10, gt_reveal=False)
     with patch("rollout._predict_halt", return_value=torch.tensor([True])):
         result = rollout_eval_batch(model, clues, answer, config=config)
     assert result.outer_steps.item() == 1
@@ -206,7 +206,7 @@ def test_eval_stream_never_passes_answer_to_inner_loop():
                     dataset._base_clues,
                     dataset._base_answers,
                     slot_batch_size=2,
-                    config=RolloutConfig(inner_iters=1, max_outer_iters=2, curriculum_training=False),
+                    config=RolloutConfig(inner_iters=1, max_outer_iters=2, gt_reveal=False),
                     init_seed=0,
                 )
             )
@@ -238,7 +238,7 @@ def test_stream_refill_mixed_memory_slots():
                 dataset._base_clues,
                 dataset._base_answers,
                 slot_batch_size=2,
-                config=RolloutConfig(inner_iters=1, max_outer_iters=3, curriculum_training=False),
+                config=RolloutConfig(inner_iters=1, max_outer_iters=3, gt_reveal=False),
                 init_seed=0,
             )
         )
@@ -260,7 +260,7 @@ def test_stream_yield_clues_match_dataset_puzzles():
                 dataset._base_clues,
                 dataset._base_answers,
                 slot_batch_size=2,
-                config=RolloutConfig(inner_iters=1, max_outer_iters=1, curriculum_training=False),
+                config=RolloutConfig(inner_iters=1, max_outer_iters=1, gt_reveal=False),
                 init_seed=0,
             )
         )
@@ -280,7 +280,7 @@ def test_stream_max_tries_retries_before_new_puzzle():
     clues = torch.zeros(1, 9, 9, dtype=torch.long)
     clues[0, 0, 0] = 5
     answers = torch.full((1, 9, 9), 1, dtype=torch.long)
-    config = RolloutConfig(inner_iters=1, max_outer_iters=1, curriculum_training=False)
+    config = RolloutConfig(inner_iters=1, max_outer_iters=1, gt_reveal=False)
 
     with patch("rollout._predict_halt", return_value=torch.tensor([False])):
         stream_results = list(
@@ -312,7 +312,7 @@ def test_eval_stops_at_max_outer_without_halt():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _three_puzzle_dataset()._base_clues[:1], _three_puzzle_dataset()._base_answers[:1]
-    config = RolloutConfig(inner_iters=1, max_outer_iters=2, curriculum_training=False)
+    config = RolloutConfig(inner_iters=1, max_outer_iters=2, gt_reveal=False)
     with patch("rollout._predict_halt", return_value=torch.tensor([False])):
         result = rollout_eval_batch(model, clues, answer, config=config)
     assert result.outer_steps.item() == 2
@@ -357,7 +357,7 @@ def test_eval_stream_evaluates_all_puzzles():
                 dataset._base_clues,
                 dataset._base_answers,
                 slot_batch_size=2,
-                config=RolloutConfig(inner_iters=1, max_outer_iters=5, curriculum_training=False),
+                config=RolloutConfig(inner_iters=1, max_outer_iters=5, gt_reveal=False),
                 init_seed=0,
             )
         )
@@ -445,7 +445,7 @@ def test_stream_accumulator_matches_manual_add_batch():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     dataset = _three_puzzle_dataset()
-    config = build_rollout_config(inner_iters=1, max_outer_iters=2, curriculum_training=False)
+    config = build_rollout_config(inner_iters=1, max_outer_iters=2, gt_reveal=False)
     amp = type("Amp", (), {"enabled": False, "dtype": None, "scaler": None})()
 
     class _Progress:

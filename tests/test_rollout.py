@@ -19,9 +19,7 @@ from rollout import (
     _compute_halt_loss,
     _compute_losses,
     _halt_target,
-    _curriculum_init_digit_id,
-    _curriculum_p_gt_for_slots,
-    _p_gt_for_rating_groups,
+    _gt_reveal_init_digit_id,
     _sample_uniform_p_gt,
     _inner_loop,
     _predict_halt,
@@ -101,8 +99,6 @@ def test_rollout_config_validation():
         RolloutConfig(inner_iters=0)
     with pytest.raises(ValueError):
         RolloutConfig(max_outer_iters=0)
-    with pytest.raises(ValueError, match="random_curriculum_p_gt requires curriculum_training"):
-        RolloutConfig(curriculum_training=False, random_curriculum_p_gt=True)
 
 
 def test_defaults():
@@ -110,7 +106,7 @@ def test_defaults():
     assert config.inner_iters == DEFAULT_INNER_ITERS
     assert config.max_outer_iters == DEFAULT_MAX_OUTER_ITERS
     assert config.deep_supervision is True
-    assert config.curriculum_p_gt_by_group == (0.5, 0.5, 0.5, 0.5, 0.5)
+    assert config.gt_reveal is True
 
 
 def test_one_outer_per_step():
@@ -165,7 +161,7 @@ def test_clues_init_without_curriculum():
         batch_size=2,
         device=torch.device("cpu"),
         generator=gen,
-        curriculum_training=False,
+        gt_reveal=False,
     )
     assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
     assert not torch.equal(state.digit_id[~state.clue_pin], state.clues[~state.clue_pin])
@@ -213,7 +209,7 @@ def test_refill_after_done():
     original_digit_id = state.digit_id.clone()
     done = torch.tensor([True])
     refill_done_slots(
-        state, done, dataset, generator=gen, dim=32, curriculum_training=False
+        state, done, dataset, generator=gen, dim=32, gt_reveal=False
     )
     assert not torch.equal(state.digit_id, original_digit_id)
     assert state.outer_count.item() == 0
@@ -235,7 +231,7 @@ def test_max_outer_forces_refill():
     assert result.done.all()
     original_digit_id = state.digit_id.clone()
     refill_done_slots(
-        state, result.done, dataset, generator=gen, dim=32, curriculum_training=False
+        state, result.done, dataset, generator=gen, dim=32, gt_reveal=False
     )
     assert not torch.equal(state.digit_id, original_digit_id)
 
@@ -244,7 +240,7 @@ def test_curriculum_init_preserves_clues():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
     with patch("rollout.torch.rand", return_value=torch.ones(clues.shape)):
-        digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=0.0)
+        digit_id = _gt_reveal_init_digit_id(clues, answer, clue_pin, p_gt=0.0)
     assert torch.equal(digit_id[clue_pin], clues[clue_pin])
 
 
@@ -252,7 +248,7 @@ def test_curriculum_init_gt_reveal():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
     with patch("rollout.torch.rand", return_value=torch.zeros(clues.shape)):
-        digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=1.0)
+        digit_id = _gt_reveal_init_digit_id(clues, answer, clue_pin, p_gt=1.0)
     assert torch.equal(digit_id[~clue_pin], answer[~clue_pin])
 
 
@@ -264,7 +260,7 @@ def test_curriculum_init_random_when_no_reveal():
             "rollout.torch.randint",
             return_value=torch.full(clues.shape, 7, dtype=clues.dtype),
         ):
-            digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=0.0)
+            digit_id = _gt_reveal_init_digit_id(clues, answer, clue_pin, p_gt=0.0)
     assert torch.equal(digit_id[clue_pin], clues[clue_pin])
     assert torch.equal(digit_id[~clue_pin], torch.full_like(clues, 7)[~clue_pin])
 
@@ -287,7 +283,7 @@ def test_curriculum_refill_fills_cells():
         batch_size=1,
         device=torch.device("cpu"),
         generator=gen,
-        curriculum_training=False,
+        gt_reveal=False,
     )
     torch.manual_seed(42)
     refill_done_slots(state, torch.tensor([True]), dataset, generator=gen, dim=32)
@@ -692,17 +688,17 @@ def test_gt_reveal_not_in_encode_clue_pin():
     assert not (passed_clue_pin & revealed).any()
 
 
-def test_train_seed_curriculum_reveals_gt():
+def test_train_seed_gt_reveal_reveals_gt():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
-    with patch("rollout.torch.rand", return_value=torch.zeros(1, 9, 9)):
-        state = BatchSlotState.seed(
-            dataset,
-            batch_size=1,
-            device=torch.device("cpu"),
-            generator=gen,
-            curriculum_p_gt_by_group=(1.0, 1.0, 1.0, 1.0, 1.0),
-        )
+    with patch("rollout._sample_uniform_p_gt", return_value=torch.tensor([1.0])):
+        with patch("rollout.torch.rand", return_value=torch.zeros(1, 9, 9)):
+            state = BatchSlotState.seed(
+                dataset,
+                batch_size=1,
+                device=torch.device("cpu"),
+                generator=gen,
+            )
     assert torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
     assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
 
@@ -728,31 +724,16 @@ def test_curriculum_init_is_reproducible_with_generator():
     clue_pin = clues > 0
     gen1 = torch.Generator().manual_seed(7)
     gen2 = torch.Generator().manual_seed(7)
-    digit_a = _curriculum_init_digit_id(
+    digit_a = _gt_reveal_init_digit_id(
         clues, answer, clue_pin, p_gt=0.5, generator=gen1
     )
-    digit_b = _curriculum_init_digit_id(
+    digit_b = _gt_reveal_init_digit_id(
         clues, answer, clue_pin, p_gt=0.5, generator=gen2
     )
     assert torch.equal(digit_a, digit_b)
 
 
-def test_curriculum_p_gt_for_slots_random_ignores_rating_group():
-    with patch("rollout._p_gt_for_rating_groups", side_effect=AssertionError("adaptive lookup")):
-        p_gt = _curriculum_p_gt_for_slots(
-            batch_size=2,
-            rating_group=torch.tensor([0, 4]),
-            device=torch.device("cpu"),
-            curriculum_training=True,
-            random_curriculum_p_gt=True,
-            curriculum_p_gt=None,
-            curriculum_p_gt_by_group=(0.5,) * 5,
-        )
-    assert p_gt is not None
-    assert p_gt.shape == (2,)
-
-
-def test_train_seed_random_curriculum_samples_uniform_p_gt():
+def test_train_seed_gt_reveal_samples_uniform_p_gt():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     with patch("rollout._sample_uniform_p_gt", return_value=torch.tensor([1.0])) as sample:
@@ -762,7 +743,6 @@ def test_train_seed_random_curriculum_samples_uniform_p_gt():
                 batch_size=1,
                 device=torch.device("cpu"),
                 generator=gen,
-                random_curriculum_p_gt=True,
             )
         sample.assert_called_once_with(
             1, torch.device("cpu"), generator=gen
@@ -770,7 +750,7 @@ def test_train_seed_random_curriculum_samples_uniform_p_gt():
     assert torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
 
 
-def test_train_seed_random_curriculum_zero_p_gt_skips_gt_reveal():
+def test_train_seed_gt_reveal_zero_p_gt_skips_gt_reveal():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     with patch("rollout._sample_uniform_p_gt", return_value=torch.tensor([0.0])):
@@ -779,13 +759,12 @@ def test_train_seed_random_curriculum_zero_p_gt_skips_gt_reveal():
             batch_size=1,
             device=torch.device("cpu"),
             generator=gen,
-            random_curriculum_p_gt=True,
         )
     assert not torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
     assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
 
 
-def test_train_seed_without_curriculum_keeps_clues_only():
+def test_train_seed_without_gt_reveal_keeps_clues_only():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
@@ -793,7 +772,7 @@ def test_train_seed_without_curriculum_keeps_clues_only():
         batch_size=1,
         device=torch.device("cpu"),
         generator=gen,
-        curriculum_training=False,
+        gt_reveal=False,
     )
     assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
     assert not torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
@@ -826,7 +805,7 @@ def test_curriculum_partial_reveal():
 
     with patch("rollout.torch.rand", return_value=out):
         with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
-            digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=0.5)
+            digit_id = _gt_reveal_init_digit_id(clues, answer, clue_pin, p_gt=0.5)
     revealed = (digit_id == answer) & ~clue_pin
     empty = (digit_id == 0) & ~clue_pin
     assert revealed.any()
@@ -835,7 +814,7 @@ def test_curriculum_partial_reveal():
     assert not (revealed & clue_pin).any()
 
 
-def test_refill_curriculum_reveals_gt():
+def test_refill_gt_reveal_reveals_gt():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
@@ -843,23 +822,23 @@ def test_refill_curriculum_reveals_gt():
         batch_size=1,
         device=torch.device("cpu"),
         generator=gen,
-        curriculum_training=False,
+        gt_reveal=False,
     )
     assert not torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
-    with patch("rollout.torch.rand", return_value=torch.zeros(1, 9, 9)):
-        refill_done_slots(
-            state,
-            torch.tensor([True]),
-            dataset,
-            generator=gen,
-            dim=32,
-            curriculum_training=True,
-            curriculum_p_gt_by_group=(1.0, 1.0, 1.0, 1.0, 1.0),
-        )
+    with patch("rollout._sample_uniform_p_gt", return_value=torch.tensor([1.0])):
+        with patch("rollout.torch.rand", return_value=torch.zeros(1, 9, 9)):
+            refill_done_slots(
+                state,
+                torch.tensor([True]),
+                dataset,
+                generator=gen,
+                dim=32,
+                gt_reveal=True,
+            )
     assert torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
 
 
-def test_refill_random_curriculum_resamples_uniform_p_gt():
+def test_refill_gt_reveal_resamples_uniform_p_gt():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
@@ -867,7 +846,7 @@ def test_refill_random_curriculum_resamples_uniform_p_gt():
         batch_size=1,
         device=torch.device("cpu"),
         generator=gen,
-        curriculum_training=False,
+        gt_reveal=False,
     )
     with patch("rollout._sample_uniform_p_gt", return_value=torch.tensor([1.0])) as sample:
         with patch("rollout.torch.rand", return_value=torch.zeros(1, 9, 9)):
@@ -877,8 +856,7 @@ def test_refill_random_curriculum_resamples_uniform_p_gt():
                 dataset,
                 generator=gen,
                 dim=32,
-                curriculum_training=True,
-                random_curriculum_p_gt=True,
+                gt_reveal=True,
             )
         sample.assert_called_once_with(
             1, torch.device("cpu"), generator=gen
@@ -894,7 +872,7 @@ def test_refill_only_samples_done_slots():
         batch_size=4,
         device=torch.device("cpu"),
         generator=gen,
-        curriculum_training=False,
+        gt_reveal=False,
     )
     before_clues = state.clues.clone()
     state.outer_count = torch.tensor([3, 5, 7, 9])
@@ -905,7 +883,7 @@ def test_refill_only_samples_done_slots():
             dataset,
             generator=gen,
             dim=32,
-            curriculum_training=False,
+            gt_reveal=False,
         )
     assert sample_mock.call_args[0][0].numel() == 2
     assert torch.equal(state.clues[0], before_clues[0])
@@ -965,16 +943,16 @@ def test_build_rollout_config():
     )
     assert config.inner_iters == 2
     assert config.max_outer_iters == 3
-    assert config.curriculum_training is True
+    assert config.gt_reveal is True
 
 
-def test_eval_rollout_config_disables_curriculum():
+def test_eval_rollout_config_disables_gt_reveal():
     from train import build_rollout_config
 
-    train_config = build_rollout_config(inner_iters=2, max_outer_iters=3, curriculum_training=True)
-    eval_config = build_rollout_config(inner_iters=2, max_outer_iters=3, curriculum_training=False)
-    assert train_config.curriculum_training is True
-    assert eval_config.curriculum_training is False
+    train_config = build_rollout_config(inner_iters=2, max_outer_iters=3, gt_reveal=True)
+    eval_config = build_rollout_config(inner_iters=2, max_outer_iters=3, gt_reveal=False)
+    assert train_config.gt_reveal is True
+    assert eval_config.gt_reveal is False
 
 
 def test_train_metrics_done_only_puzzle_acc():
@@ -1138,7 +1116,7 @@ def test_curriculum_low_p_gt_skips_reveal_at_threshold():
 
     with patch("rollout.torch.rand", return_value=torch.full(clues.shape, 0.5)):
         with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
-            digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=0.4)
+            digit_id = _gt_reveal_init_digit_id(clues, answer, clue_pin, p_gt=0.4)
     assert torch.equal(digit_id[~clue_pin], torch.zeros_like(answer[~clue_pin]))
 
 
@@ -1148,14 +1126,14 @@ def test_curriculum_p_gt_one_reveals_all():
 
     with patch("rollout.torch.rand", return_value=torch.full(clues.shape, 0.5)):
         with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
-            digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=1.0)
+            digit_id = _gt_reveal_init_digit_id(clues, answer, clue_pin, p_gt=1.0)
     assert torch.equal(digit_id[~clue_pin], answer[~clue_pin])
 
 
 def test_curriculum_p_gt_zero_fills_non_clue_cells():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
-    digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=0.0)
+    digit_id = _gt_reveal_init_digit_id(clues, answer, clue_pin, p_gt=0.0)
     assert torch.equal(digit_id[clue_pin], clues[clue_pin])
     assert not torch.equal(digit_id[~clue_pin], clues[~clue_pin])
 
@@ -1167,19 +1145,12 @@ def test_curriculum_higher_p_gt_reveals_more():
 
     with patch("rollout.torch.rand", return_value=draws):
         with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
-            digit_id_low = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=0.3)
-            digit_id_high = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=0.5)
+            digit_id_low = _gt_reveal_init_digit_id(clues, answer, clue_pin, p_gt=0.3)
+            digit_id_high = _gt_reveal_init_digit_id(clues, answer, clue_pin, p_gt=0.5)
     assert (digit_id_high == answer)[~clue_pin].sum() > (digit_id_low == answer)[~clue_pin].sum()
 
 
-def test_p_gt_for_rating_groups_looks_up_group_caps():
-    rating_groups = torch.tensor([0, 1, 2, 3, 4, 0])
-    caps = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5])
-    p_gt = _p_gt_for_rating_groups(rating_groups, caps)
-    assert torch.equal(p_gt, torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5, 0.1]))
-
-
-def test_curriculum_init_accepts_per_puzzle_p_gt_tensor():
+def test_gt_reveal_init_accepts_per_puzzle_p_gt_tensor():
     clues, answer = _tiny_batch()
     clues = clues.repeat(2, 1, 1)
     answer = answer.repeat(2, 1, 1)
@@ -1188,7 +1159,7 @@ def test_curriculum_init_accepts_per_puzzle_p_gt_tensor():
 
     with patch("rollout.torch.rand", return_value=torch.full(clues.shape, 0.5)):
         with patch("rollout.torch.randint", return_value=torch.zeros_like(clues)):
-            digit_id = _curriculum_init_digit_id(clues, answer, clue_pin, p_gt=p_gt)
+            digit_id = _gt_reveal_init_digit_id(clues, answer, clue_pin, p_gt=p_gt)
 
     assert not torch.equal(digit_id[0, ~clue_pin[0]], answer[0, ~clue_pin[0]])
     assert torch.equal(digit_id[1, ~clue_pin[1]], answer[1, ~clue_pin[1]])

@@ -9,7 +9,6 @@ import torch
 from model import MixerNextStateModel
 from train import (
     best_val_cell_acc_for_resume,
-    curriculum_state_for_resume,
     load_last_checkpoint,
     optimizer_param_groups,
     require_run_args,
@@ -49,13 +48,6 @@ def main() -> None:
     )
     optimizer.load_state_dict(ckpt["optimizer"])
 
-    adaptive_curriculum = (
-        not getattr(args, "no_curriculum_training", False)
-        and not getattr(args, "no_adaptive_curriculum", False)
-    )
-    curriculum_state = (
-        curriculum_state_for_resume(ckpt, run_dir) if adaptive_curriculum else None
-    )
     print(f"Resuming {run_dir.name} from epoch {completed_epoch + 1}/{cli.epochs}")
     train_run(
         run_dir,
@@ -64,7 +56,6 @@ def main() -> None:
         model=model,
         optimizer=optimizer,
         best_val_cell_acc=best_val_cell_acc_for_resume(ckpt, run_dir),
-        initial_curriculum_state=curriculum_state,
     )
 
 

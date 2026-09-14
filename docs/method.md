@@ -15,8 +15,8 @@ Looped MLP-Mixer sudoku solver on [sapientinc/sudoku-extreme](https://huggingfac
 | `B` | Parallel training slots (`--train-batch-size`) |
 | `λ_h` | Halt loss weight (`--halt-loss-weight`) |
 | `N_try` | Max random restarts per puzzle at eval (`--max-tries`) |
-| `p_{gt,g}` | Per rating-group GT reveal probability at seed/refill |
-| `g` | Rating group `0…4` (quintile bins on train `rating`) |
+| `p_{gt}` | Per-puzzle GT reveal probability at seed/refill |
+| `g` | Rating group `0…4` (quintile bins on train `rating`; metrics only) |
 
 ## Dataset
 
@@ -79,9 +79,23 @@ Decode: clue cells keep clue value; other cells use argmax over logits.
 
 Training slot finishes when **(halt predicted AND grid correct)** OR `train-max-outer-iters` reached. Refill with a new random training puzzle. One epoch = `--batches-per-epoch` optimizer steps (one outer round each).
 
-### Curriculum initialization
+### GT reveal initialization
 
-Training puzzles are grouped by difficulty into **5 rating quintiles** (from `train.csv` distribution):
+At slot **seed/refill** (default), sample **`p_{gt} ~ U[0, 1]`** once per puzzle. For each non-clue cell independently:
+
+- with probability `p_{gt}`: initialize to ground truth
+- otherwise: random digit `0…9`
+
+Revealed cells are **not** pinned as clues; loss still requires correct predictions on them. Val/test always start from clues + random non-clue fill (no GT reveal).
+
+| Flag | Behavior |
+|------|----------|
+| (default) | Sample `p_{gt} ~ U[0, 1]` per puzzle at each seed/refill |
+| `--no-gt-reveal` | No GT reveal; clues + random non-clue digits only |
+
+Training seed/refill RNG (`p_{gt}` sampling, GT reveal, random digit fill) uses the run `--seed` generator for reproducibility.
+
+Puzzles are grouped by difficulty into **5 rating quintiles** for per-group train/val puzzle accuracy logging:
 
 | Group | Rating range |
 |-------|----------------|
@@ -91,40 +105,9 @@ Training puzzles are grouped by difficulty into **5 rating quintiles** (from `tr
 | G3 | 24–38 |
 | G4 | 39+ |
 
-Each group `g` has its own scalar **`p_{gt,g}`** (GT reveal probability). At slot **seed/refill**, for each non-clue cell independently:
-
-- with probability `p_{gt,g}`: initialize to ground truth
-- otherwise: random digit `0…9`
-
-Revealed cells are **not** pinned as clues; loss still requires correct predictions on them. Val/test always start from clues + random non-clue fill (no GT reveal).
-
-Three training init modes:
-
-| Flag | Behavior |
-|------|----------|
-| (default) | Adaptive per-group `p_{gt,g}` (controller below) |
-| `--no-adaptive-curriculum` | Sample `p_gt ~ U[0, 1]` independently per puzzle at each seed/refill |
-| `--no-curriculum-training` | No GT reveal; clues + random non-clue digits only |
-
-**Adaptive controller** (default). Each group maintains a logit `ℓ_g` with `p_{gt,g} = σ(ℓ_g)`. Default init: `ℓ_g = 0` → `p_{gt,g} = 0.5`.
-
-At the **end of each epoch**, update from that epoch’s **done-only train puzzle accuracy** per group (`acc_g`, or skip if no completions in group `g`):
-
-```
-ℓ_g ← 0.99 · ℓ_g + η · (0.5 − acc_g)
-```
-
-- **Target** `0.5`: if the model solves too few done puzzles in a group, `p_{gt,g}` rises (more GT hints); if too many, it falls.
-- **Decay** `γ`: `--curriculum-logit-decay` (default `0.99`); prevents logits drifting unbounded.
-- **Step** `η`: `--curriculum-logit-step` (default `1.0`).
-
-Training seed/refill RNG (`p_gt` sampling, GT reveal, random digit fill) uses the run `--seed` generator for reproducibility.
-
-Per-group `p_{gt,g}` and train/val puzzle accuracy by group are logged each epoch. Checkpoints store the 5 logits (`curriculum_p_gt_logits`).
-
 ### Optimization
 
-AdamW (weight decay on weights, not biases). AMP enabled by default (`--no-amp` to disable). Checkpoints store weights, optimizer, hyperparameters, and curriculum logits.
+AdamW (weight decay on weights, not biases). AMP enabled by default (`--no-amp` to disable). Checkpoints store weights, optimizer, and hyperparameters.
 
 ## Test-time compute
 
@@ -153,7 +136,7 @@ One-dimensional ablations via `eval`: inner `1…N` step 1 (outer=30, tries=10);
 | File | Role |
 |------|------|
 | `src/model.py` | Looped MLP-Mixer |
-| `src/curriculum.py` | Rating groups, per-group `p_gt` controller |
+| `src/rating_groups.py` | Rating quintile bins for metrics |
 | `src/rollout.py` | Train/eval rollouts |
 | `src/train.py` | Training loop, val, checkpoints |
 | `src/eval.py` | Test eval and compute sweeps |

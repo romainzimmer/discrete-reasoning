@@ -6,7 +6,7 @@ import torch
 from torch.utils.data import Dataset
 
 from augment import AugmentConfig, apply_augment
-from curriculum import rating_group
+from rating_groups import rating_group
 from data import answer_to_tensor, load_split, puzzle_to_tensor
 
 

@@ -287,7 +287,8 @@ def main() -> None:
             print(
                 f"test sweep inner={inner} max_outer={SWEEP_DEFAULT_OUTER} "
                 f"max_tries={SWEEP_DEFAULT_TRIES}: "
-                f"puzzle_acc={stats.puzzle_acc:.4f}",
+                f"puzzle_acc={stats.puzzle_acc:.4f} "
+                f"steps_per_puzzle={stats.avg_steps_per_puzzle:.1f}",
                 flush=True,
             )
         outer_sweep = []
@@ -299,7 +300,8 @@ def main() -> None:
             print(
                 f"test sweep inner={SWEEP_DEFAULT_INNER} max_outer={outer} "
                 f"max_tries={SWEEP_DEFAULT_TRIES}: "
-                f"puzzle_acc={stats.puzzle_acc:.4f}",
+                f"puzzle_acc={stats.puzzle_acc:.4f} "
+                f"steps_per_puzzle={stats.avg_steps_per_puzzle:.1f}",
                 flush=True,
             )
         tries_sweep = []
@@ -311,7 +313,8 @@ def main() -> None:
             print(
                 f"test sweep inner={SWEEP_DEFAULT_INNER} max_outer={SWEEP_DEFAULT_OUTER} "
                 f"max_tries={tries}: "
-                f"puzzle_acc={stats.puzzle_acc:.4f}",
+                f"puzzle_acc={stats.puzzle_acc:.4f} "
+                f"steps_per_puzzle={stats.avg_steps_per_puzzle:.1f}",
                 flush=True,
             )
 
@@ -338,6 +341,7 @@ def main() -> None:
         f"loss={test.loss:.4f} cell_acc={test.cell_acc:.4f} "
         f"cell_loss={test.cell_loss:.4f} halt_loss={test.halt_loss:.4f} "
         f"puzzle_acc={test.puzzle_acc:.4f} halt_rate={test.halt_rate:.4f} "
+        f"steps_per_puzzle={test.avg_steps_per_puzzle:.1f} "
         f"avg_tries={test.avg_tries:.4f}",
         flush=True,
     )

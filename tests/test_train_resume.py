@@ -7,19 +7,12 @@ from pathlib import Path
 import pytest
 import torch
 
-from curriculum import (
-    CurriculumState,
-    curriculum_p_gt_from_logit,
-    update_curriculum_p_gt_logit,
-)
 from model import MixerNextStateModel
 from train import (
     TrainEpochStats,
     EpochStats,
     best_val_cell_acc_for_resume,
     best_val_cell_acc_from_history,
-    curriculum_state_for_resume,
-    curriculum_state_from_history,
     save_checkpoint,
     save_run_config,
     update_history_args,
@@ -48,49 +41,6 @@ def test_best_val_cell_acc_from_history(tmp_path: Path) -> None:
     }
     (run_dir / "history.json").write_text(json.dumps(history))
     assert best_val_cell_acc_from_history(run_dir) == pytest.approx(0.7)
-
-
-def test_curriculum_state_from_history(tmp_path: Path) -> None:
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    history = {
-        "run_id": run_dir.name,
-        "args": {"epochs": 2},
-        "epochs": [
-            {
-                "epoch": 1,
-                "train_group_0_puzzle_acc": 0.3,
-                "train_group_0_puzzles_done": 10,
-            },
-            {
-                "epoch": 2,
-                "train_group_0_puzzle_acc": 0.7,
-                "train_group_0_puzzles_done": 10,
-            },
-        ],
-    }
-    (run_dir / "history.json").write_text(json.dumps(history))
-    state = curriculum_state_from_history(run_dir)
-    logit = 0.0
-    logit = update_curriculum_p_gt_logit(logit, 0.3)
-    logit = update_curriculum_p_gt_logit(logit, 0.7)
-    assert state.p_gt_by_group()[0] == pytest.approx(curriculum_p_gt_from_logit(logit))
-
-
-def test_curriculum_state_for_resume_prefers_group_logits(tmp_path: Path) -> None:
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    ckpt = {"curriculum_p_gt_logits": [0.1, 0.2, 0.0, -0.1, 0.3]}
-    state = curriculum_state_for_resume(ckpt, run_dir)
-    assert state.logits == pytest.approx([0.1, 0.2, 0.0, -0.1, 0.3])
-
-
-def test_curriculum_state_for_resume_legacy_p_gt(tmp_path: Path) -> None:
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    ckpt = {"curriculum_p_gt": 0.55}
-    state = curriculum_state_for_resume(ckpt, run_dir)
-    assert state.p_gt_by_group()[0] == pytest.approx(0.55)
 
 
 def test_best_val_cell_acc_for_resume_prefers_checkpoint(tmp_path: Path) -> None:
@@ -142,7 +92,6 @@ def test_last_checkpoint_roundtrip_for_resume(tmp_path: Path) -> None:
         weight_decay=0.01,
         model="looped-mixer",
     )
-    curriculum_state = CurriculumState(logits=[0.1, 0.0, -0.1, 0.2, 0.05])
     save_checkpoint(
         run_dir / "last.pt",
         model=model,
@@ -151,12 +100,9 @@ def test_last_checkpoint_roundtrip_for_resume(tmp_path: Path) -> None:
         train=TrainEpochStats(loss=1.0),
         val=EpochStats(loss=2.0, cell_acc=0.5),
         args=args,
-        curriculum_state=curriculum_state,
         best_val_cell_acc=0.5,
     )
     ckpt = torch.load(run_dir / "last.pt", weights_only=False)
     assert ckpt["epoch"] == 3
     assert ckpt["args"]["epochs"] == 5
-    assert ckpt["curriculum_p_gt_logits"] == pytest.approx([0.1, 0.0, -0.1, 0.2, 0.05])
-    assert ckpt["curriculum_p_gt"] == pytest.approx(curriculum_state.mean_p_gt())
     assert ckpt["best_val_cell_acc"] == pytest.approx(0.5)

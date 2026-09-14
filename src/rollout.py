@@ -5,7 +5,6 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from curriculum import DEFAULT_CURRICULUM_P_GT, NUM_RATING_GROUPS
 from data import tensor_to_string
 from dataset import PuzzleDataset
 from amp import LOSS_DTYPE, to_loss_dtype
@@ -22,18 +21,10 @@ class RolloutConfig:
     inner_iters: int = DEFAULT_INNER_ITERS
     max_outer_iters: int = DEFAULT_MAX_OUTER_ITERS
     halt_threshold: float = 0.5
-    curriculum_training: bool = True
-    random_curriculum_p_gt: bool = False
+    gt_reveal: bool = True
     deep_supervision: bool = True
-    curriculum_p_gt_by_group: tuple[float, ...] = (DEFAULT_CURRICULUM_P_GT,) * NUM_RATING_GROUPS
 
     def __post_init__(self) -> None:
-        if len(self.curriculum_p_gt_by_group) != NUM_RATING_GROUPS:
-            raise ValueError(
-                f"curriculum_p_gt_by_group must have length {NUM_RATING_GROUPS}"
-            )
-        if self.random_curriculum_p_gt and not self.curriculum_training:
-            raise ValueError("random_curriculum_p_gt requires curriculum_training")
         if self.inner_iters < 1:
             raise ValueError("inner_iters must be >= 1")
         if self.max_outer_iters < 1:
@@ -59,12 +50,7 @@ class BatchSlotState:
         device: torch.device,
         *,
         generator: torch.Generator,
-        curriculum_training: bool = True,
-        random_curriculum_p_gt: bool = False,
-        curriculum_p_gt: torch.Tensor | None = None,
-        curriculum_p_gt_by_group: tuple[float, ...] = (
-            DEFAULT_CURRICULUM_P_GT,
-        ) * NUM_RATING_GROUPS,
+        gt_reveal: bool = True,
     ) -> BatchSlotState:
         idx = torch.randint(len(dataset), (batch_size,), generator=generator)
         clues, answers, rating_groups = dataset.sample(idx)
@@ -72,17 +58,13 @@ class BatchSlotState:
         answers = answers.to(device, non_blocking=True)
         rating_group = rating_groups.to(device, non_blocking=True)
         clue_pin = clues > 0
-        digit_id = _curriculum_digit_id_for_seed_refill(
+        digit_id = _gt_reveal_digit_id_for_seed_refill(
             clues,
             answers,
             clue_pin,
-            rating_group=rating_group,
             device=device,
             batch_size=batch_size,
-            curriculum_training=curriculum_training,
-            random_curriculum_p_gt=random_curriculum_p_gt,
-            curriculum_p_gt=curriculum_p_gt,
-            curriculum_p_gt_by_group=curriculum_p_gt_by_group,
+            gt_reveal=gt_reveal,
             generator=generator,
         )
         return cls(
@@ -366,57 +348,20 @@ def _sample_uniform_p_gt(
     return _rand((batch_size,), device=device, generator=generator)
 
 
-def _curriculum_p_gt_for_slots(
-    *,
-    batch_size: int,
-    rating_group: torch.Tensor,
-    device: torch.device,
-    curriculum_training: bool,
-    random_curriculum_p_gt: bool,
-    curriculum_p_gt: torch.Tensor | None,
-    curriculum_p_gt_by_group: tuple[float, ...],
-    generator: torch.Generator | None = None,
-) -> torch.Tensor | None:
-    if not curriculum_training:
-        return None
-    if random_curriculum_p_gt:
-        return _sample_uniform_p_gt(batch_size, device, generator=generator)
-    p_gt_caps = _curriculum_p_gt_caps(
-        curriculum_p_gt,
-        curriculum_p_gt_by_group,
-        device,
-    )
-    return _p_gt_for_rating_groups(rating_group, p_gt_caps)
-
-
-def _curriculum_digit_id_for_seed_refill(
+def _gt_reveal_digit_id_for_seed_refill(
     clues: torch.Tensor,
     answers: torch.Tensor,
     clue_pin: torch.Tensor,
     *,
-    rating_group: torch.Tensor,
     device: torch.device,
     batch_size: int,
-    curriculum_training: bool,
-    random_curriculum_p_gt: bool,
-    curriculum_p_gt: torch.Tensor | None,
-    curriculum_p_gt_by_group: tuple[float, ...],
+    gt_reveal: bool,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
-    if not curriculum_training:
+    if not gt_reveal:
         return _init_digit_id_from_clues(clues, clue_pin, generator=generator)
-    p_gt = _curriculum_p_gt_for_slots(
-        batch_size=batch_size,
-        rating_group=rating_group,
-        device=device,
-        curriculum_training=curriculum_training,
-        random_curriculum_p_gt=random_curriculum_p_gt,
-        curriculum_p_gt=curriculum_p_gt,
-        curriculum_p_gt_by_group=curriculum_p_gt_by_group,
-        generator=generator,
-    )
-    assert p_gt is not None
-    return _curriculum_init_digit_id(
+    p_gt = _sample_uniform_p_gt(batch_size, device, generator=generator)
+    return _gt_reveal_init_digit_id(
         clues,
         answers,
         clue_pin,
@@ -425,25 +370,7 @@ def _curriculum_digit_id_for_seed_refill(
     )
 
 
-def _curriculum_p_gt_caps(
-    curriculum_p_gt: torch.Tensor | None,
-    curriculum_p_gt_by_group: tuple[float, ...],
-    device: torch.device,
-) -> torch.Tensor:
-    if curriculum_p_gt is not None:
-        return curriculum_p_gt
-    return torch.tensor(curriculum_p_gt_by_group, device=device, dtype=torch.float32)
-
-
-def _p_gt_for_rating_groups(
-    rating_group: torch.Tensor,
-    curriculum_p_gt: torch.Tensor,
-) -> torch.Tensor:
-    """Return curriculum_p_gt[group_i] for each slot."""
-    return curriculum_p_gt[rating_group]
-
-
-def _curriculum_init_digit_id(
+def _gt_reveal_init_digit_id(
     clues: torch.Tensor,
     answer: torch.Tensor,
     clue_pin: torch.Tensor,
@@ -597,12 +524,7 @@ def refill_done_slots(
     *,
     generator: torch.Generator,
     dim: int,
-    curriculum_training: bool = True,
-    random_curriculum_p_gt: bool = False,
-    curriculum_p_gt: torch.Tensor | None = None,
-    curriculum_p_gt_by_group: tuple[float, ...] = (
-        DEFAULT_CURRICULUM_P_GT,
-    ) * NUM_RATING_GROUPS,
+    gt_reveal: bool = True,
 ) -> None:
     if not done.any():
         return
@@ -616,17 +538,13 @@ def refill_done_slots(
     new_answers = new_answers.to(device, non_blocking=True)
     new_rating_groups = new_rating_groups.to(device, non_blocking=True)
     new_clue_pin = new_clues > 0
-    new_digit_id = _curriculum_digit_id_for_seed_refill(
+    new_digit_id = _gt_reveal_digit_id_for_seed_refill(
         new_clues,
         new_answers,
         new_clue_pin,
-        rating_group=new_rating_groups,
         device=device,
         batch_size=n_done,
-        curriculum_training=curriculum_training,
-        random_curriculum_p_gt=random_curriculum_p_gt,
-        curriculum_p_gt=curriculum_p_gt,
-        curriculum_p_gt_by_group=curriculum_p_gt_by_group,
+        gt_reveal=gt_reveal,
         generator=generator,
     )
     state.digit_id[done_flat] = new_digit_id
