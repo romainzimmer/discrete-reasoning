@@ -17,17 +17,28 @@ x-app-base: &app-base
 services:
   download:
     <<: *app-base
-    entrypoint: ["download-dataset"]
+    entrypoint: ["python3", "-m", "download"]
 
   train:
     <<: *app-base
     runtime: nvidia
-    entrypoint: ["train"]
+    entrypoint: ["python3", "-m", "train"]
+
+  train-profile:
+    <<: *app-base
+    runtime: nvidia
+    privileged: true
+    entrypoint: ["python3", "-m", "train"]
+
+  resume:
+    <<: *app-base
+    runtime: nvidia
+    entrypoint: ["python3", "-m", "resume"]
 
   eval:
     <<: *app-base
     runtime: nvidia
-    entrypoint: ["eval"]
+    entrypoint: ["python3", "-m", "eval"]
 
   viz:
     <<: *app-base

@@ -1,67 +1,122 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from encoding import NUM_STATE_CHANNELS
+from encoding import GRID_SIZE, NUM_VOCAB, SEQ_LEN
 
-GRID_SIZE = 9
-NUM_CLASSES = 9
-INPUT_DIM = GRID_SIZE * GRID_SIZE * NUM_STATE_CHANNELS
-OUTPUT_DIM = GRID_SIZE * GRID_SIZE * NUM_CLASSES
+SWIGLU_EXPANSION = 4
 
 
-def _ffn_intermediate_dim(width: int) -> int:
-    hidden = int(2 * (4 * width) / 3)
-    return ((hidden + 7) // 8) * 8
+def _round_up_multiple(value: int, multiple: int) -> int:
+    return (-(value // -multiple)) * multiple
 
 
-class FFNBlock(nn.Module):
-    """Pre-norm SwiGLU block: x + down(silu(gate(norm(x))) * up(norm(x)))."""
+def _swiglu_hidden_dim(dim: int, *, expansion: float = SWIGLU_EXPANSION, multiple: int = 256) -> int:
+    """TRM/HRM-style SwiGLU width: round(expansion * dim * 2/3) to a hardware multiple."""
+    return _round_up_multiple(round(expansion * dim * 2 / 3), multiple)
 
-    def __init__(self, width: int, intermediate_dim: int | None = None):
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
-        hidden = intermediate_dim if intermediate_dim is not None else _ffn_intermediate_dim(width)
-        self.norm = nn.LayerNorm(width)
-        self.gate = nn.Linear(width, hidden, bias=False)
-        self.up = nn.Linear(width, hidden, bias=False)
-        self.down = nn.Linear(hidden, width, bias=False)
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.norm(x)
+        rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()
+        return x * rms * self.weight
+
+
+class StateEncoder(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.digit_embed = nn.Embedding(NUM_VOCAB, dim)
+        self.clue_type_embed = nn.Embedding(2, dim)
+
+    def encode_input(self, digit_id: torch.Tensor, clue_pin: torch.Tensor) -> torch.Tensor:
+        """digit_id, clue_pin: (B, 9, 9) -> (B, 81, D). clue_pin: 0 = non-clue, 1 = clue."""
+        b = digit_id.size(0)
+        clue_type = clue_pin.reshape(b, SEQ_LEN).long()
+        h = self.digit_embed(digit_id.reshape(b, SEQ_LEN))
+        return h + self.clue_type_embed(clue_type)
+
+
+class MixerBlock(nn.Module):
+    """Pre-norm RMSNorm + token-mix Linear(81, 81) + channel-mix SwiGLU."""
+
+    def __init__(self, seq_len: int, dim: int):
+        super().__init__()
+        hidden = _swiglu_hidden_dim(dim)
+        self.norm1 = RMSNorm(dim)
+        self.token_mix = nn.Linear(seq_len, seq_len, bias=False)
+        self.norm2 = RMSNorm(dim)
+        self.gate = nn.Linear(dim, hidden, bias=False)
+        self.up = nn.Linear(dim, hidden, bias=False)
+        self.down = nn.Linear(hidden, dim, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        t = self.norm1(x)
+        t = self.token_mix(t.transpose(1, 2)).transpose(1, 2)
+        x = x + t
+        h = self.norm2(x)
         return x + self.down(F.silu(self.gate(h)) * self.up(h))
 
 
-class OutputHead(nn.Module):
-    def __init__(self, width: int, out_dim: int):
+class UnembedHead(nn.Module):
+    def __init__(self, dim: int):
         super().__init__()
-        self.norm = nn.LayerNorm(width)
-        self.proj = nn.Linear(width, out_dim)
+        self.norm = RMSNorm(dim)
+        self.proj = nn.Linear(dim, NUM_VOCAB, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.proj(self.norm(x))
 
 
-class NextStateModel(nn.Module):
-    """Predict solved grid logits from current one-hot state + clue mask."""
+@dataclass
+class ModelOutput:
+    cell_embed: torch.Tensor
+    logits: torch.Tensor
+    halt_logit: torch.Tensor  # (B,)
 
-    def __init__(self, *, width: int = 512, num_blocks: int = 2):
+
+class MixerNextStateModel(nn.Module):
+    """Looped MLP-Mixer with triple readout: h_{t+1} = LN_h(z), logits = unembed(LN_o(z)), halt = head(LN_a(z)), z = M(P + h_t)."""
+
+    def __init__(self, *, dim: int, num_blocks: int):
         super().__init__()
-        if width <= 0:
-            raise ValueError("width must be positive")
+        if dim <= 0:
+            raise ValueError("dim must be positive")
         if num_blocks <= 0:
             raise ValueError("num_blocks must be positive")
 
-        layers: list[nn.Module] = [nn.Linear(INPUT_DIM, width)]
-        layers.extend(FFNBlock(width) for _ in range(num_blocks))
-        layers.append(OutputHead(width, OUTPUT_DIM))
-        self.net = nn.Sequential(*layers)
-        self.width = width
-        self.num_blocks = num_blocks
+        self.encoder = StateEncoder(dim)
+        self.blocks = nn.ModuleList(MixerBlock(SEQ_LEN, dim) for _ in range(num_blocks))
+        self.norm_memory = RMSNorm(dim)
+        self.unembed = UnembedHead(dim)
+        self.norm_halt = RMSNorm(dim)
+        self.halt_head = nn.Linear(dim, 1, bias=True)
+        self.dim = dim
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (B, 9, 9, 10) -> logits (B, 9, 9, 9). Last channel is clue mask."""
-        b = x.size(0)
-        logits = self.net(x.reshape(b, INPUT_DIM))
-        return logits.reshape(b, GRID_SIZE, GRID_SIZE, NUM_CLASSES)
+    def encode_input(self, digit_id: torch.Tensor, clue_pin: torch.Tensor) -> torch.Tensor:
+        return self.encoder.encode_input(digit_id, clue_pin)
+
+    def forward(
+        self,
+        *,
+        input_embed: torch.Tensor,
+        cell_embed: torch.Tensor | None = None,
+    ) -> ModelOutput:
+        b = input_embed.size(0)
+        h = cell_embed.reshape(b, SEQ_LEN, self.dim) if cell_embed is not None else 0
+        z = input_embed + h
+        for block in self.blocks:
+            z = block(z)
+        memory = self.norm_memory(z)
+        cell_embed = memory.view(b, GRID_SIZE, GRID_SIZE, self.dim)
+        logits = self.unembed(z).view(b, GRID_SIZE, GRID_SIZE, NUM_VOCAB)
+        halt_logit = self.halt_head(self.norm_halt(z).mean(dim=1)).squeeze(-1)
+        return ModelOutput(cell_embed=cell_embed, logits=logits, halt_logit=halt_logit)

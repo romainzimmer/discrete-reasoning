@@ -9,33 +9,33 @@
     body {
       font-family: system-ui, sans-serif;
       margin: 0 auto;
-      padding: 1.25rem 1.5rem;
+      padding: 24px;
       max-width: 1400px;
       background: #fafafa;
       color: #111;
     }
-    h1 { font-size: 1.25rem; margin: 0 0 1rem; }
+    h1 { font-size: 1.25rem; margin: 0 0 16px; }
     .panel {
       background: #fff;
       border: 1px solid #ddd;
       border-radius: 8px;
-      padding: 1rem;
-      margin-bottom: 1rem;
+      padding: 16px;
+      margin-bottom: 16px;
     }
     label {
       display: block;
       font-size: 0.85rem;
-      margin-bottom: 0.75rem;
+      margin-bottom: 16px;
     }
     select, button {
       font: inherit;
-      padding: 0.4rem 0.5rem;
+      padding: 8px;
     }
-    select { width: 100%; margin-top: 0.25rem; }
+    select { width: 100%; margin-top: 8px; }
     button {
       cursor: pointer;
       border: 1px solid #ccc;
-      border-radius: 6px;
+      border-radius: 8px;
       background: #fff;
     }
     button:hover { background: #f3f4f6; }
@@ -44,55 +44,72 @@
       margin-bottom: 0;
     }
     .run-details {
-      margin-top: 0.85rem;
-      padding-top: 0.85rem;
+      margin-top: 16px;
+      padding-top: 16px;
       border-top: 1px solid #eee;
+    }
+    .run-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 16px;
     }
     .run-heading {
       font-size: 0.95rem;
       font-weight: 600;
-      margin-bottom: 0.75rem;
     }
-    .run-stat-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
-      gap: 0.5rem;
+    .run-id {
+      font-size: 0.85rem;
+      color: #555;
+      text-align: right;
+      flex-shrink: 0;
     }
-    .run-stat {
+    .run-config-details summary {
+      cursor: pointer;
+      font-size: 0.85rem;
+      color: #555;
+      user-select: none;
+      list-style: none;
+    }
+    .run-config-details summary::-webkit-details-marker {
+      display: none;
+    }
+    .run-config-details summary::before {
+      content: "▸ ";
+    }
+    .run-config-details[open] summary::before {
+      content: "▾ ";
+    }
+    .run-config {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.8rem;
+      line-height: 1.5;
       background: #f9fafb;
       border: 1px solid #eee;
-      border-radius: 6px;
-      padding: 0.55rem 0.7rem;
-    }
-    .run-stat-label {
-      display: block;
-      font-size: 0.68rem;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      color: #888;
-      margin-bottom: 0.2rem;
-    }
-    .run-stat-value {
-      font-size: 0.92rem;
-      font-weight: 500;
-      color: #111;
+      border-radius: 8px;
+      padding: 8px 16px;
+      margin: 8px 0 0;
+      overflow-x: auto;
+      white-space: pre;
+      color: #333;
     }
     .section-title {
       font-size: 0.95rem;
       font-weight: 600;
-      margin: 0 0 0.75rem;
+      margin: 0 0 16px;
     }
     .charts-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 1rem;
+      gap: 16px;
     }
     .chart { min-width: 0; }
-    .chart-title { font-size: 0.85rem; color: #555; margin-bottom: 0.35rem; }
+    .chart-title { font-size: 0.85rem; color: #555; margin-bottom: 8px; }
     canvas {
       display: block;
       width: 100%;
-      height: 180px;
+      height: 176px;
       border: 1px solid #eee;
       background: #fff;
     }
@@ -100,65 +117,63 @@
       text-align: center;
       font-size: 0.8rem;
       color: #888;
-      margin-top: 0.25rem;
+      margin-top: 8px;
     }
     .legend {
       display: flex;
-      gap: 1rem;
+      gap: 16px;
       font-size: 0.8rem;
-      margin-top: 0.35rem;
+      margin-top: 8px;
     }
     .legend-item {
       display: flex;
       align-items: center;
-      gap: 0.35rem;
+      gap: 8px;
     }
     .dot {
       display: inline-block;
       flex-shrink: 0;
-      width: 0.65rem;
-      height: 0.65rem;
+      width: 8px;
+      height: 8px;
       border-radius: 50%;
-    }
-    .test-note {
-      font-size: 0.85rem;
-      color: #555;
-      margin-bottom: 0.75rem;
-    }
-    .test-stat-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
-      gap: 0.5rem;
     }
     .trajectory-controls {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 1rem;
-      margin-bottom: 1rem;
+      gap: 16px;
+      margin-bottom: 16px;
     }
     .trajectory-controls label { margin-bottom: 0; }
     .trajectory-meta {
       font-size: 0.85rem;
       color: #555;
-      margin-bottom: 0.75rem;
+      margin-bottom: 16px;
     }
     .trajectory-layout {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 1rem;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(224px, 0.75fr);
+      gap: 16px;
       align-items: stretch;
     }
     .trajectory-panel {
       background: #f9fafb;
       border: 1px solid #eee;
       border-radius: 8px;
-      padding: 1rem;
+      padding: 16px;
       min-height: 100%;
     }
     .trajectory-panel-grid {
       display: flex;
+      flex-direction: column;
       align-items: center;
       justify-content: center;
+      gap: 8px;
+    }
+    .grid-panel-title {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #444;
+      text-align: center;
     }
     .trajectory-panel-controls {
       display: flex;
@@ -190,7 +205,7 @@
     .step-controls {
       display: flex;
       flex-direction: column;
-      gap: 2.25rem;
+      gap: 32px;
       width: 100%;
       max-width: 320px;
       margin: 0 auto;
@@ -202,19 +217,19 @@
     .step-buttons {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
-      gap: 1rem;
+      gap: 16px;
     }
     .step-buttons button {
       width: 100%;
-      padding: 0.75rem;
+      padding: 8px;
     }
     #stepPlay {
       grid-column: span 4;
       font-weight: 600;
-      margin-top: 0.75rem;
+      margin-top: 16px;
     }
     .speed-control {
-      padding-top: 1rem;
+      padding-top: 16px;
     }
     .speed-control label {
       margin-bottom: 0;
@@ -222,10 +237,59 @@
     }
     .speed-control input[type="range"] {
       width: 100%;
-      margin-top: 1rem;
+      margin-top: 16px;
     }
     input[type="range"] { width: 100%; }
-    .error { color: #b91c1c; font-size: 0.9rem; margin-top: 0.75rem; }
+    .error { color: #b91c1c; font-size: 0.9rem; margin-top: 16px; }
+    .test-empty {
+      font-size: 0.85rem;
+      color: #888;
+      margin: 0;
+    }
+    #testMeta .run-config-details {
+      margin-top: 8px;
+    }
+    #testMeta .run-config {
+      margin-bottom: 0;
+    }
+    #testMaxResults:not(:empty) {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid #eee;
+    }
+    #testMaxResults:not(:empty) + #testCharts,
+    #testMeta:not(:empty) + #testCharts {
+      margin-top: 24px;
+      padding-top: 24px;
+      border-top: 1px solid #eee;
+    }
+    .test-summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(144px, 1fr));
+      gap: 16px;
+    }
+    .test-stat {
+      background: #f9fafb;
+      border: 1px solid #eee;
+      border-radius: 8px;
+      padding: 8px 16px;
+    }
+    .test-stat-label {
+      font-size: 0.75rem;
+      color: #888;
+      margin-bottom: 8px;
+    }
+    .test-stat-value {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: #111;
+    }
+    .test-max-heading {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #444;
+      margin: 0 0 16px;
+    }
     @media (max-width: 900px) {
       .charts-grid { grid-template-columns: 1fr; }
       .trajectory-layout { grid-template-columns: 1fr; }
@@ -244,11 +308,29 @@
   </div>
 
   <div class="panel">
-    <div class="section-title">Metrics</div>
+    <div class="section-title">Train</div>
     <div class="charts-grid">
     <div class="chart">
-      <div class="chart-title">Loss</div>
+      <div class="chart-title">Total loss</div>
       <canvas id="lossChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend">
+        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
+        <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
+      </div>
+    </div>
+    <div class="chart">
+      <div class="chart-title">Cell loss</div>
+      <canvas id="cellLossChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend">
+        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
+        <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
+      </div>
+    </div>
+    <div class="chart">
+      <div class="chart-title">Halt loss</div>
+      <canvas id="haltLossChart"></canvas>
       <div class="axis-x-label">epoch</div>
       <div class="legend">
         <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
@@ -259,7 +341,7 @@
       <div class="chart-title">Cell accuracy</div>
       <canvas id="cellAccChart"></canvas>
       <div class="axis-x-label">epoch</div>
-      <div class="legend">
+      <div class="legend" id="cellAccLegend">
         <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
       </div>
     </div>
@@ -267,45 +349,90 @@
       <div class="chart-title">Puzzle accuracy</div>
       <canvas id="puzzleAccChart"></canvas>
       <div class="axis-x-label">epoch</div>
-      <div class="legend">
+      <div class="legend" id="puzzleAccLegend">
         <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
       </div>
     </div>
     <div class="chart">
-      <div class="chart-title">Avg rollout steps</div>
-      <canvas id="rolloutChart"></canvas>
+      <div class="chart-title">Halt accuracy</div>
+      <canvas id="haltAccChart"></canvas>
       <div class="axis-x-label">epoch</div>
-      <div class="legend">
+      <div class="legend" id="haltAccLegend">
         <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
       </div>
     </div>
     <div class="chart">
-      <div class="chart-title">Max-iter rollout %</div>
-      <canvas id="maxIterChart"></canvas>
+      <div class="chart-title">Halt rate</div>
+      <canvas id="haltRateChart"></canvas>
       <div class="axis-x-label">epoch</div>
-      <div class="legend">
+      <div class="legend" id="haltRateLegend">
         <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
       </div>
     </div>
     <div class="chart">
-      <div class="chart-title">Avg cycle length</div>
-      <canvas id="cycleLengthChart"></canvas>
+      <div class="chart-title">Avg outer iters</div>
+      <canvas id="avgOuterItersChart"></canvas>
       <div class="axis-x-label">epoch</div>
-      <div class="legend">
+      <div class="legend" id="avgOuterItersLegend">
         <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
       </div>
     </div>
+    <div class="chart">
+      <div class="chart-title">Avg outer steps per puzzle</div>
+      <canvas id="avgStepsPerPuzzleChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend" id="avgStepsPerPuzzleLegend">
+        <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
+      </div>
     </div>
-  </div>
-
-  <div class="panel" id="testPanel">
-    <div class="section-title">Test results</div>
-    <div class="test-note" id="testSectionNote"></div>
-    <div class="test-stat-grid" id="testSummary"></div>
+    <div class="chart">
+      <div class="chart-title">Puzzles per epoch</div>
+      <canvas id="completionsChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend" id="completionsLegend">
+        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
+      </div>
+    </div>
+    <div class="chart" id="trainGroupPuzzleAccChartPanel">
+      <div class="chart-title">Train puzzle accuracy by rating group</div>
+      <canvas id="trainGroupPuzzleAccChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend" id="trainGroupPuzzleAccLegend"></div>
+    </div>
+    <div class="chart" id="valGroupPuzzleAccChartPanel">
+      <div class="chart-title">Validation puzzle accuracy by rating group</div>
+      <canvas id="valGroupPuzzleAccChart"></canvas>
+      <div class="axis-x-label">epoch</div>
+      <div class="legend" id="valGroupPuzzleAccLegend"></div>
+    </div>
+    </div>
   </div>
 
   <div class="panel">
-    <div class="section-title">Trajectory</div>
+    <div class="section-title">Test</div>
+    <div id="testMeta"></div>
+    <div id="testMaxResults"></div>
+    <div class="charts-grid" id="testCharts">
+      <div class="chart">
+        <div class="chart-title">Puzzle accuracy vs inner iters</div>
+        <canvas id="testInnerSweepChart"></canvas>
+        <div class="axis-x-label">inner iters</div>
+      </div>
+      <div class="chart">
+        <div class="chart-title">Puzzle accuracy vs max outer iters</div>
+        <canvas id="testOuterSweepChart"></canvas>
+        <div class="axis-x-label">max outer iters</div>
+      </div>
+      <div class="chart">
+        <div class="chart-title">Puzzle accuracy vs max tries</div>
+        <canvas id="testTriesSweepChart"></canvas>
+        <div class="axis-x-label">max tries</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="section-title">Trajectories</div>
     <div class="trajectory-controls">
       <label>Split
         <select id="splitSelect"></select>
@@ -320,7 +447,12 @@
     <div class="trajectory-meta" id="trajectoryMeta">Select a puzzle</div>
     <div class="trajectory-layout">
       <div class="trajectory-panel trajectory-panel-grid">
-        <div class="grid" id="grid"></div>
+        <div class="grid-panel-title">Model input</div>
+        <div class="grid" id="inputGrid"></div>
+      </div>
+      <div class="trajectory-panel trajectory-panel-grid">
+        <div class="grid-panel-title">Model output</div>
+        <div class="grid" id="predGrid"></div>
       </div>
       <div class="trajectory-panel trajectory-panel-controls">
         <div class="step-controls">
@@ -384,18 +516,6 @@
       return parts.join(" · ");
     }
 
-    function formatRatingRange(minRating, maxRating) {
-      if (minRating == null && maxRating == null) return "all";
-      const lo = minRating ?? "…";
-      const hi = maxRating ?? "…";
-      return `${lo} – ${hi}`;
-    }
-
-    function formatRating(args) {
-      if (args.min_rating == null && args.max_rating == null) return null;
-      return formatRatingRange(args.min_rating, args.max_rating);
-    }
-
     function formatDuration(seconds) {
       const s = Number(seconds);
       if (!Number.isFinite(s)) return "—";
@@ -418,51 +538,125 @@
       return (history?.epochs || []).reduce((sum, e) => sum + (e.epoch_seconds ?? 0), 0);
     }
 
-    function formatHiddenSizes(args) {
-      if (args.width != null && args.num_blocks != null) {
-        return `${args.width} x${args.num_blocks}`;
+    const CONFIG_PARAM_ORDER = [
+      "model",
+      "dim",
+      "num_blocks",
+      "lr",
+      "weight_decay",
+      "amp",
+      "device",
+      "inner_iters",
+      "train_max_outer_iters",
+      "eval_max_outer_iters",
+      "halt_loss_weight",
+      "no_gt_reveal",
+      "no_deep_supervision",
+      "epochs",
+      "train_batch_size",
+      "batches_per_epoch",
+      "val_batch_size",
+      "num_workers",
+      "seed",
+      "min_rating",
+      "max_rating",
+      "max_samples",
+      "val_samples",
+      "train_samples",
+      "val_samples_count",
+      "viz_samples",
+      "viz_batch_size",
+      "no_augment",
+      "aug_digit_proba",
+      "aug_rot_proba",
+      "aug_band_proba",
+    ];
+
+    const EVAL_CONFIG_PARAM_ORDER = [
+      "run_id",
+      "checkpoint",
+      "best_epoch",
+      "test_samples_count",
+      "min_rating",
+      "max_rating",
+      "inner_iters",
+      "max_outer_iters",
+      "max_tries",
+      "batch_size",
+      "seed",
+    ];
+
+    const EVAL_RESULT_KEYS = new Set([
+      "loss",
+      "cell_loss",
+      "halt_loss",
+      "cell_acc",
+      "puzzle_acc",
+      "halt_acc",
+      "avg_outer_iters",
+      "avg_steps_per_puzzle",
+      "halt_rate",
+      "avg_tries",
+    ]);
+
+    const CONFIG_PARAM_HIDDEN = new Set(["runs_dir"]);
+
+    function isHiddenConfigKey(key) {
+      return CONFIG_PARAM_HIDDEN.has(key) || key.startsWith("profile_");
+    }
+
+    function formatConfigValue(key, value, args) {
+      if (value === null || value === undefined) {
+        if (key === "val_batch_size" || key === "viz_batch_size") {
+          return `null (= ${args.train_batch_size ?? "train batch size"})`;
+        }
+        if (key === "min_rating" || key === "max_rating" || key === "max_samples") {
+          return "null (no filter)";
+        }
+        return "null";
       }
-      if (args.hidden_sizes?.length) return args.hidden_sizes.join(" → ");
-      if (args.hidden != null) return String(args.hidden);
-      return "—";
+      if (typeof value === "boolean") return value ? "true" : "false";
+      if (typeof value === "number") {
+        if (Number.isInteger(value)) return String(value);
+        if (Math.abs(value) >= 0.001 && Math.abs(value) < 1000) return String(value);
+        return value.toExponential(3);
+      }
+      return String(value);
     }
 
-    function buildRunStats(args, history) {
-      const trainN = args.train_samples ?? args.max_samples;
-      const valN = args.val_samples_count ?? args.val_samples;
-      const testN = args.test_samples_count ?? args.test_samples ?? args.max_samples;
-      const stats = [
-        { label: "Learning rate", value: args.lr },
-        { label: "Weight decay", value: args.weight_decay ?? 0 },
-        { label: "Hidden layers", value: formatHiddenSizes(args) },
-        {
-          label: "Train rollout iter",
-          value: args.train_rollout_iter ?? args.train_max_rollout_iter,
-        },
-        {
-          label: "Eval max rollout iter",
-          value: args.eval_max_rollout_iter ?? args.max_rollout_iter ?? 100,
-        },
-        { label: "Epochs", value: args.epochs },
-      ];
+    function yamlScalar(key, value, args) {
+      const raw = args[key];
+      if (raw === null || raw === undefined) return "null";
+      if (typeof raw === "boolean") return raw ? "true" : "false";
+      if (typeof raw === "number") return formatConfigValue(key, raw, args);
+      const text = String(raw);
+      if (/[:#\[\]{}]|^\s|\s$/.test(text)) return JSON.stringify(text);
+      return text;
+    }
+
+    function escapeHtml(text) {
+      return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+
+    function orderedConfigKeys(args) {
+      const keys = Object.keys(args || {}).filter(key => !isHiddenConfigKey(key));
+      const ordered = CONFIG_PARAM_ORDER.filter(key => keys.includes(key));
+      const extras = keys.filter(key => !CONFIG_PARAM_ORDER.includes(key)).sort();
+      return [...ordered, ...extras];
+    }
+
+    function renderConfigYaml(args, history) {
+      const lines = orderedConfigKeys(args).map(
+        key => `${key}: ${yamlScalar(key, args[key], args)}`
+      );
       const totalSeconds = totalRunSeconds(history);
-      if (totalSeconds > 0) stats.push({ label: "Total time", value: formatDuration(totalSeconds) });
-      const rating = formatRating(args);
-      if (rating) stats.push({ label: "Rating", value: rating });
-      if (trainN != null) stats.push({ label: "Train", value: trainN });
-      if (valN != null) stats.push({ label: "Validation", value: valN });
-      if (testN != null) stats.push({ label: "Test", value: testN });
-      if (args.device) stats.push({ label: "Device", value: args.device });
-      return stats;
-    }
-
-    function renderStatGrid(stats) {
-      return stats.map(stat => `
-        <div class="run-stat">
-          <span class="run-stat-label">${stat.label}</span>
-          <span class="run-stat-value">${stat.value}</span>
-        </div>
-      `).join("");
+      if (totalSeconds > 0) {
+        lines.push(`total_time: ${formatDuration(totalSeconds)}`);
+      }
+      return lines.join("\n");
     }
 
     function epochValMetric(epoch, trainKey, valKey) {
@@ -488,7 +682,22 @@
       return Array.from({ length: count }, (_, i) => min + (range * i) / (count - 1));
     }
 
-    const CHART_HEIGHT = 180;
+    function xTickIndices(n, plotW, minLabelPx = 48) {
+      if (n <= 0) return [];
+      if (n === 1) return [0];
+      const minGap = Math.max(1, Math.ceil((minLabelPx * (n - 1)) / plotW));
+      const indices = [0];
+      let i = 0;
+      while (i + minGap < n - 1) {
+        i += minGap;
+        indices.push(i);
+      }
+      if (n - 1 - indices.at(-1) < minGap) indices.pop();
+      if (indices.at(-1) !== n - 1) indices.push(n - 1);
+      return indices;
+    }
+
+    const CHART_HEIGHT = 176;
     const MIN_CANVAS_SCALE = 2;
 
     function setupCanvas(canvas) {
@@ -520,10 +729,10 @@
       ctx.clearRect(0, 0, width, height);
       if (!series.length || !series[0].values.length) return;
 
-      const padLeft = 52;
+      const padLeft = 56;
       const padRight = 16;
-      const padTop = 12;
-      const padBottom = 28;
+      const padTop = 16;
+      const padBottom = 32;
       const plotW = width - padLeft - padRight;
       const plotH = height - padTop - padBottom;
 
@@ -551,7 +760,7 @@
         ctx.stroke();
         ctx.textAlign = "right";
         ctx.textBaseline = "middle";
-        ctx.fillText(formatY(tick), padLeft - 6, y);
+        ctx.fillText(formatY(tick), padLeft - 8, y);
       }
 
       ctx.strokeStyle = "#999";
@@ -561,11 +770,12 @@
       ctx.lineTo(width - padRight, padTop + plotH);
       ctx.stroke();
 
-      for (let i = 0; i < n; i++) {
+      const xIndices = xTickIndices(n, plotW);
+      for (const i of xIndices) {
         const x = xAt(i);
         ctx.beginPath();
         ctx.moveTo(x, padTop + plotH);
-        ctx.lineTo(x, padTop + plotH + 4);
+        ctx.lineTo(x, padTop + plotH + 8);
         ctx.stroke();
         ctx.textAlign = "center";
         ctx.textBaseline = "top";
@@ -588,10 +798,12 @@
 
         s.values.forEach((value, i) => {
           if (value === null || value === undefined) return;
+          ctx.globalAlpha = 0.7;
           ctx.fillStyle = s.color;
           ctx.beginPath();
           ctx.arc(xAt(i), yAt(value), 3, 0, Math.PI * 2);
           ctx.fill();
+          ctx.globalAlpha = 1;
         });
       }
     }
@@ -607,56 +819,125 @@
       return [{ color: "#dc2626", values: epochs.map(e => epochValMetric(e, null, valKey)) }];
     }
 
-    function renderTestSummary() {
-      const gridEl = document.getElementById("testSummary");
-      const noteEl = document.getElementById("testSectionNote");
-      const panelEl = document.getElementById("testPanel");
-      const test = metrics?.test ?? legacyTestMetrics(metrics);
-      if (!test) {
-        gridEl.innerHTML = "";
-        noteEl.textContent = "";
-        panelEl.hidden = true;
-        return;
+    function accMetricSeries(epochs, metricKey) {
+      const trainKey = `train_${metricKey}`;
+      const valKey = `val_${metricKey}`;
+      const series = [];
+      if (epochs.some(e => e[trainKey] != null)) {
+        series.push({ color: "#2563eb", values: epochs.map(e => e[trainKey] ?? null) });
       }
-      panelEl.hidden = false;
-      const epoch = test.best_epoch ?? metrics?.epochs?.at(-1)?.epoch;
-      noteEl.textContent = `Held-out test split · best validation epoch ${epoch}`;
-      const pct = v => `${(Number(v) * 100).toFixed(1)}%`;
-      const stats = [
-        { label: "Puzzles", value: test.test_samples_count },
-        {
-          label: "Rating",
-          value: formatRatingRange(test.min_rating, test.max_rating),
-        },
-        { label: "Loss", value: test.loss, format: v => Number(v).toFixed(4) },
-        { label: "Cell accuracy", value: test.cell_acc, format: pct },
-        { label: "Puzzle accuracy", value: test.puzzle_acc, format: pct },
-        { label: "Avg rollout steps", value: test.avg_rollout_steps, format: v => Number(v).toFixed(1) },
-        { label: "Avg cycle length", value: test.avg_cycle_length, format: v => Number(v).toFixed(1) },
-        { label: "Max-iter rollout", value: test.max_iter_pct, format: pct },
-      ]
-        .filter(stat => stat.value != null)
-        .map(stat => ({
-          label: stat.label,
-          value: stat.format ? stat.format(stat.value) : stat.value,
-        }));
-      gridEl.innerHTML = renderStatGrid(stats);
+      series.push({ color: "#dc2626", values: epochs.map(e => epochValMetric(e, trainKey, valKey)) });
+      return series;
     }
 
-    function legacyTestMetrics(metrics) {
-      const last = metrics?.epochs?.at(-1);
-      if (!last) return null;
-      const loss = last.test_loss ?? last.eval_loss;
-      if (loss == null) return null;
-      return {
-        best_epoch: last.epoch,
-        loss,
-        cell_acc: last.test_cell_acc ?? last.eval_cell_acc,
-        puzzle_acc: last.test_puzzle_acc ?? last.eval_puzzle_acc,
-        avg_rollout_steps: last.test_avg_rollout_steps ?? last.eval_avg_rollout_steps,
-        avg_cycle_length: last.test_avg_cycle_length ?? last.eval_avg_cycle_length,
-        max_iter_pct: last.test_max_iter_pct ?? last.eval_max_iter_pct,
-      };
+    function renderAccLegend(elementId, epochs, metricKey) {
+      const el = document.getElementById(elementId);
+      const trainKey = `train_${metricKey}`;
+      const items = [];
+      if (epochs.some(e => e[trainKey] != null)) {
+        items.push('<div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>');
+      }
+      items.push('<div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>');
+      el.innerHTML = items.join("");
+    }
+
+    function trainOnlySeries(epochs, metricKey) {
+      const trainKey = `train_${metricKey}`;
+      if (!epochs.some(e => e[trainKey] != null)) return [];
+      return [{ color: "#2563eb", values: epochs.map(e => e[trainKey] ?? null) }];
+    }
+
+    function scalarSeries(epochs, metricKey, color = "#7c3aed") {
+      if (!epochs.some(e => e[metricKey] != null)) return [];
+      return [{ color, values: epochs.map(e => e[metricKey] ?? null) }];
+    }
+
+    const RATING_GROUP_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c"];
+    const RATING_GROUP_LABELS = [
+      "G0 [0,1]",
+      "G1 [2,11]",
+      "G2 [12,23]",
+      "G3 [24,38]",
+      "G4 [39+]",
+    ];
+
+    function renderGroupSeriesLegend(elementId, series) {
+      const el = document.getElementById(elementId);
+      if (!series.length) {
+        el.innerHTML = "";
+        return;
+      }
+      el.innerHTML = series.map(s => (
+        `<div class="legend-item"><span class="dot" style="background:${s.color}"></span> ${s.label ?? "train"}</div>`
+      )).join("");
+    }
+
+    function groupPuzzleAccSeries(epochs, prefix) {
+      const series = [];
+      for (let group = 0; group < RATING_GROUP_LABELS.length; group += 1) {
+        const doneKey = `${prefix}_group_${group}_puzzles_done`;
+        const accKey = `${prefix}_group_${group}_puzzle_acc`;
+        if (!epochs.some(e => (e[doneKey] ?? 0) >= 1)) continue;
+        series.push({
+          color: RATING_GROUP_COLORS[group],
+          label: RATING_GROUP_LABELS[group],
+          values: epochs.map(e => ((e[doneKey] ?? 0) >= 1 ? (e[accKey] ?? null) : null)),
+        });
+      }
+      return series;
+    }
+
+    function trainGroupPuzzleAccSeries(epochs) {
+      return groupPuzzleAccSeries(epochs, "train");
+    }
+
+    function valGroupPuzzleAccSeries(epochs) {
+      return groupPuzzleAccSeries(epochs, "val");
+    }
+
+    function renderTrainGroupPuzzleAccLegend(elementId, epochs) {
+      renderGroupSeriesLegend(elementId, trainGroupPuzzleAccSeries(epochs));
+    }
+
+    function renderValGroupPuzzleAccLegend(elementId, epochs) {
+      renderGroupSeriesLegend(elementId, valGroupPuzzleAccSeries(epochs));
+    }
+
+    function renderGroupPuzzleAccChart(panelId, canvasId, legendId, series, epochs, xLabels, formatY) {
+      const panel = document.getElementById(panelId);
+      if (series.length) {
+        panel.style.display = "";
+        drawSeries(document.getElementById(canvasId), series, {
+          yMin: 0,
+          yMax: 1,
+          xLabels,
+          formatY,
+        });
+        renderGroupSeriesLegend(legendId, series);
+      } else {
+        panel.style.display = "none";
+      }
+    }
+
+    function renderTrainOnlyLegend(elementId, epochs, metricKey) {
+      const el = document.getElementById(elementId);
+      const trainKey = `train_${metricKey}`;
+      if (!epochs.some(e => e[trainKey] != null)) {
+        el.innerHTML = "";
+        return;
+      }
+      el.innerHTML = '<div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>';
+    }
+
+    function renderPctChart(canvasId, legendId, epochs, metricKey) {
+      const pct = v => `${(Number(v) * 100).toFixed(0)}%`;
+      drawSeries(document.getElementById(canvasId), accMetricSeries(epochs, metricKey), {
+        yMin: 0,
+        yMax: 1,
+        xLabels: epochs.map(e => e.epoch),
+        formatY: pct,
+      });
+      renderAccLegend(legendId, epochs, metricKey);
     }
 
     function renderCharts() {
@@ -665,89 +946,253 @@
       const xLabels = epochs.map(e => e.epoch);
       const pct = v => `${(Number(v) * 100).toFixed(0)}%`;
 
+      const lossFormatY = v => Number(v).toFixed(3);
       drawSeries(document.getElementById("lossChart"), metricSeries(epochs, "train_loss", "val_loss"), {
         xLabels,
-        formatY: v => Number(v).toFixed(3),
+        formatY: lossFormatY,
       });
-      drawSeries(document.getElementById("cellAccChart"), valMetricSeries(epochs, "val_cell_acc"), {
+      drawSeries(document.getElementById("cellLossChart"), metricSeries(epochs, "train_cell_loss", "val_cell_loss"), {
+        xLabels,
+        formatY: lossFormatY,
+      });
+      drawSeries(document.getElementById("haltLossChart"), metricSeries(epochs, "train_halt_loss", "val_halt_loss"), {
+        xLabels,
+        formatY: lossFormatY,
+      });
+      drawSeries(document.getElementById("cellAccChart"), accMetricSeries(epochs, "cell_acc"), {
         yMin: 0,
         yMax: 1,
         xLabels,
         formatY: pct,
       });
-      drawSeries(document.getElementById("puzzleAccChart"), valMetricSeries(epochs, "val_puzzle_acc"), {
+      drawSeries(document.getElementById("puzzleAccChart"), accMetricSeries(epochs, "puzzle_acc"), {
         yMin: 0,
         yMax: 1,
         xLabels,
         formatY: pct,
       });
-      drawSeries(document.getElementById("rolloutChart"), valMetricSeries(epochs, "val_avg_rollout_steps"), {
+      renderPctChart("haltAccChart", "haltAccLegend", epochs, "halt_acc");
+      renderPctChart("haltRateChart", "haltRateLegend", epochs, "halt_rate");
+      drawSeries(document.getElementById("avgOuterItersChart"), accMetricSeries(epochs, "avg_outer_iters"), {
+        yMin: 0,
         xLabels,
         formatY: v => Number(v).toFixed(1),
       });
-      drawSeries(document.getElementById("maxIterChart"), valMetricSeries(epochs, "val_max_iter_pct"), {
+      renderAccLegend("avgOuterItersLegend", epochs, "avg_outer_iters");
+      drawSeries(document.getElementById("avgStepsPerPuzzleChart"), accMetricSeries(epochs, "avg_steps_per_puzzle"), {
         yMin: 0,
-        yMax: 1,
-        xLabels,
-        formatY: pct,
-      });
-      drawSeries(document.getElementById("cycleLengthChart"), valMetricSeries(epochs, "val_avg_cycle_length"), {
         xLabels,
         formatY: v => Number(v).toFixed(1),
       });
-      renderTestSummary();
+      renderAccLegend("avgStepsPerPuzzleLegend", epochs, "avg_steps_per_puzzle");
+      drawSeries(document.getElementById("completionsChart"), trainOnlySeries(epochs, "completions_per_epoch"), {
+        yMin: 0,
+        xLabels,
+        formatY: v => Number(v).toFixed(0),
+      });
+      renderTrainOnlyLegend("completionsLegend", epochs, "completions_per_epoch");
+      renderGroupPuzzleAccChart(
+        "trainGroupPuzzleAccChartPanel",
+        "trainGroupPuzzleAccChart",
+        "trainGroupPuzzleAccLegend",
+        trainGroupPuzzleAccSeries(epochs),
+        epochs,
+        xLabels,
+        pct,
+      );
+      renderGroupPuzzleAccChart(
+        "valGroupPuzzleAccChartPanel",
+        "valGroupPuzzleAccChart",
+        "valGroupPuzzleAccLegend",
+        valGroupPuzzleAccSeries(epochs),
+        epochs,
+        xLabels,
+        pct,
+      );
+      renderAccLegend("cellAccLegend", epochs, "cell_acc");
+      renderAccLegend("puzzleAccLegend", epochs, "puzzle_acc");
+    }
+
+    function formatPct(value) {
+      if (value == null) return "—";
+      return `${(Number(value) * 100).toFixed(1)}%`;
+    }
+
+    function formatTestStatValue(key, value) {
+      if (value == null) return "—";
+      if (key.endsWith("_acc") || key === "halt_rate") return formatPct(value);
+      if (typeof value === "number") {
+        if (Number.isInteger(value)) return String(value);
+        return Number(value).toFixed(4);
+      }
+      return String(value);
+    }
+
+    function renderEvalConfigYaml(test) {
+      const keys = EVAL_CONFIG_PARAM_ORDER.filter(key => test[key] !== undefined);
+      const extras = Object.keys(test).filter(
+        key =>
+          !EVAL_CONFIG_PARAM_ORDER.includes(key)
+          && !EVAL_RESULT_KEYS.has(key)
+          && key !== "inner_sweep"
+          && key !== "outer_sweep"
+          && key !== "tries_sweep"
+          && key !== "checkpoint_epoch"
+      ).sort();
+      return [...keys, ...extras].map(
+        key => `${key}: ${formatConfigValue(key, test[key], test)}`
+      ).join("\n");
+    }
+
+    function sweepChartTitle(variedLabel, fixed) {
+      const parts = Object.entries(fixed)
+        .filter(([, value]) => value !== undefined)
+        .map(([label, value]) => `${label} = ${value}`);
+      return parts.length
+        ? `Puzzle accuracy vs ${variedLabel} (${parts.join(", ")})`
+        : `Puzzle accuracy vs ${variedLabel}`;
+    }
+
+    function renderSweepChart(canvasId, points, xKey, title) {
+      const canvas = document.getElementById(canvasId);
+      const chart = canvas?.closest(".chart");
+      if (!points?.length) {
+        if (chart) chart.style.display = "none";
+        if (canvas) {
+          const { ctx, width, height } = setupCanvas(canvas);
+          ctx.clearRect(0, 0, width, height);
+        }
+        return false;
+      }
+      if (chart) {
+        chart.style.display = "";
+        const titleEl = chart.querySelector(".chart-title");
+        if (titleEl && title) titleEl.textContent = title;
+      }
+      const sorted = [...points].sort((a, b) => a[xKey] - b[xKey]);
+      drawSeries(canvas, [{
+        color: "#7c3aed",
+        values: sorted.map(p => p.puzzle_acc ?? null),
+      }], {
+        yMin: 0,
+        yMax: 1,
+        xLabels: sorted.map(p => p[xKey]),
+        formatY: v => `${(Number(v) * 100).toFixed(0)}%`,
+      });
+      return true;
+    }
+
+    function renderTestMaxResults(test) {
+      const container = document.getElementById("testMaxResults");
+      if (!test) {
+        container.innerHTML = "";
+        return;
+      }
+      const stats = [
+        ["puzzle_acc", "Puzzle accuracy"],
+        ["cell_acc", "Cell accuracy"],
+        ["halt_acc", "Halt accuracy"],
+        ["halt_rate", "Halt rate"],
+        ["avg_outer_iters", "Avg outer iters"],
+        ["avg_steps_per_puzzle", "Avg outer steps per puzzle"],
+        ["avg_tries", "Avg tries"],
+        ["loss", "Loss"],
+      ];
+      container.innerHTML = `
+        <div class="test-max-heading">
+          Eval config (inner=${test.inner_iters ?? "?"}, max outer=${test.max_outer_iters ?? "?"}, max tries=${test.max_tries ?? "?"})
+        </div>
+        <div class="test-summary">
+          ${stats.map(([key, label]) => `
+            <div class="test-stat">
+              <div class="test-stat-label">${label}</div>
+              <div class="test-stat-value">${formatTestStatValue(key, test[key])}</div>
+            </div>
+          `).join("")}
+        </div>
+      `;
+    }
+
+    function renderTest() {
+      const metaEl = document.getElementById("testMeta");
+      const chartsEl = document.getElementById("testCharts");
+      const test = metrics?.test;
+      if (!test) {
+        metaEl.innerHTML = '<p class="test-empty">No test metrics.</p>';
+        chartsEl.style.display = "none";
+        renderTestMaxResults(null);
+        return;
+      }
+      metaEl.innerHTML = `
+        <details class="run-config-details">
+          <summary>Eval config</summary>
+          <pre class="run-config">${escapeHtml(renderEvalConfigYaml(test))}</pre>
+        </details>
+      `;
+      const showedInner = renderSweepChart(
+        "testInnerSweepChart",
+        test.inner_sweep?.points,
+        "inner_iters",
+        sweepChartTitle("inner iters", {
+          "max outer": test.inner_sweep?.max_outer_iters,
+          "max tries": test.inner_sweep?.max_tries,
+        }),
+      );
+      const showedOuter = renderSweepChart(
+        "testOuterSweepChart",
+        test.outer_sweep?.points,
+        "max_outer_iters",
+        sweepChartTitle("max outer iters", {
+          inner: test.outer_sweep?.inner_iters,
+          "max tries": test.outer_sweep?.max_tries,
+        }),
+      );
+      const showedTries = renderSweepChart(
+        "testTriesSweepChart",
+        test.tries_sweep?.points,
+        "max_tries",
+        sweepChartTitle("max tries", {
+          inner: test.tries_sweep?.inner_iters,
+          "max outer": test.tries_sweep?.max_outer_iters,
+        }),
+      );
+      chartsEl.style.display = showedInner || showedOuter || showedTries ? "" : "none";
+      renderTestMaxResults(test);
     }
 
     function renderRunMeta() {
       const container = document.getElementById("runMeta");
+      const runId = document.getElementById("runSelect").value;
       const args = metrics?.args;
-      if (!args) {
+      if (!runId) {
         container.innerHTML = "";
         return;
       }
-      const runId = document.getElementById("runSelect").value;
       const parsed = parseRunId(runId);
+      const config = args
+        ? `
+          <details class="run-config-details">
+            <summary>Config</summary>
+            <pre class="run-config">${escapeHtml(renderConfigYaml(args, metrics))}</pre>
+          </details>
+        `
+        : "";
       container.innerHTML = `
-        <div class="run-heading">${parsed.label}</div>
-        <div class="run-stat-grid">${renderStatGrid(buildRunStats(args, metrics))}</div>
+        <div class="run-header">
+          <div class="run-heading">${parsed.label}</div>
+          <div class="run-id">${runId}</div>
+        </div>
+        ${config}
       `;
     }
 
-    function renderTrajectory() {
-      const gridEl = document.getElementById("grid");
-      const metaEl = document.getElementById("trajectoryMeta");
-      const stepIndexEl = document.getElementById("stepIndex");
-      const slider = document.getElementById("stepSlider");
+    function trajectoryFrameCount(tr) {
+      const preds = tr.predictions || tr.states || [];
+      const inputs = tr.inputs || preds;
+      return Math.min(inputs.length, preds.length);
+    }
 
-      if (!trajectory) {
-        gridEl.innerHTML = "";
-        metaEl.textContent = "Select a puzzle";
-        stepIndexEl.textContent = "";
-        document.getElementById("stepPlay").disabled = true;
-        return;
-      }
-
-      const clues = parseGrid(trajectory.question);
-      const answer = parseGrid(trajectory.answer);
-      const grid = parseGrid(trajectory.states[stepIdx]);
-      const meta = trajectory.meta || {};
-
-      metaEl.textContent = [
-        meta.rating !== undefined ? `rating ${meta.rating}` : null,
-        meta.source ? `source ${meta.source}` : null,
-        `rollout steps ${trajectory.states.length - 1}`,
-      ].filter(Boolean).join(" · ");
-
-      slider.max = trajectory.states.length - 1;
-      slider.value = stepIdx;
-      stepIndexEl.textContent = `step ${stepIdx} / ${trajectory.states.length - 1}`;
-
-      document.getElementById("stepFirst").disabled = stepIdx === 0;
-      document.getElementById("stepPrev").disabled = stepIdx === 0;
-      document.getElementById("stepNext").disabled = stepIdx === trajectory.states.length - 1;
-      document.getElementById("stepLast").disabled = stepIdx === trajectory.states.length - 1;
-      document.getElementById("stepPlay").disabled = trajectory.states.length <= 1;
-
+    function renderSudokuGrid(gridEl, grid, clues, answer) {
       gridEl.innerHTML = "";
       for (let r = 0; r < 9; r++) {
         for (let c = 0; c < 9; c++) {
@@ -770,6 +1215,56 @@
       }
     }
 
+    function renderTrajectory() {
+      const inputGridEl = document.getElementById("inputGrid");
+      const predGridEl = document.getElementById("predGrid");
+      const metaEl = document.getElementById("trajectoryMeta");
+      const stepIndexEl = document.getElementById("stepIndex");
+      const slider = document.getElementById("stepSlider");
+
+      if (!trajectory) {
+        inputGridEl.innerHTML = "";
+        predGridEl.innerHTML = "";
+        metaEl.textContent = "Select a puzzle";
+        stepIndexEl.textContent = "";
+        document.getElementById("stepPlay").disabled = true;
+        return;
+      }
+
+      const clues = parseGrid(trajectory.question);
+      const answer = parseGrid(trajectory.answer);
+      const predictions = trajectory.predictions || trajectory.states;
+      const inputs = trajectory.inputs || predictions;
+      const frameCount = trajectoryFrameCount(trajectory);
+      const inputGrid = parseGrid(inputs[stepIdx]);
+      const predGrid = parseGrid(predictions[stepIdx]);
+      const meta = trajectory.meta || {};
+      const outerSteps = meta.outer_steps ?? frameCount;
+      const maxOuter = meta.max_outer_iters ?? metrics?.args?.eval_max_outer_iters ?? "?";
+      const stopLabel = meta.halted === true ? "halt" : meta.halted === false ? "max" : null;
+
+      metaEl.textContent = [
+        meta.rating !== undefined ? `rating ${meta.rating}` : null,
+        meta.source ? `source ${meta.source}` : null,
+        stopLabel
+          ? `outer steps ${outerSteps} / ${maxOuter} (${stopLabel})`
+          : `outer steps ${outerSteps} / ${maxOuter}`,
+      ].filter(Boolean).join(" · ");
+
+      slider.max = frameCount - 1;
+      slider.value = stepIdx;
+      stepIndexEl.textContent = `frame ${stepIdx} / ${Math.max(0, frameCount - 1)}`;
+
+      document.getElementById("stepFirst").disabled = stepIdx === 0;
+      document.getElementById("stepPrev").disabled = stepIdx === 0;
+      document.getElementById("stepNext").disabled = stepIdx === frameCount - 1;
+      document.getElementById("stepLast").disabled = stepIdx === frameCount - 1;
+      document.getElementById("stepPlay").disabled = frameCount <= 1;
+
+      renderSudokuGrid(inputGridEl, inputGrid, clues, answer);
+      renderSudokuGrid(predGridEl, predGrid, clues, answer);
+    }
+
     function fillSelect(select, values, formatter = v => v) {
       select.innerHTML = "";
       for (const value of values) {
@@ -780,7 +1275,7 @@
       }
     }
 
-    const MIN_STEP_INTERVAL_MS = 1000 / 3;
+    const MIN_STEP_INTERVAL_MS = 100;
     const MAX_STEP_INTERVAL_MS = 3000;
 
     function getPlayIntervalMs() {
@@ -803,7 +1298,7 @@
           stopPlayback();
           return;
         }
-        if (stepIdx >= trajectory.states.length - 1) {
+        if (stepIdx >= trajectoryFrameCount(trajectory) - 1) {
           stopPlayback();
           return;
         }
@@ -816,7 +1311,7 @@
         stopPlayback();
         return;
       }
-      if (!trajectory || trajectory.states.length <= 1) return;
+      if (!trajectory || trajectoryFrameCount(trajectory) <= 1) return;
       if (stepIdx >= trajectory.states.length - 1) {
         setStep(0);
       }
@@ -860,7 +1355,7 @@
         manifest = await manifestRes.json();
         renderRunMeta();
         renderCharts();
-        renderTestSummary();
+        renderTest();
 
         const splits = manifest.splits
           ? Object.keys(manifest.splits).filter(s => TRAJECTORY_SPLITS.includes(s))
@@ -874,7 +1369,7 @@
         trajectory = null;
         renderRunMeta();
         renderCharts();
-        renderTestSummary();
+        renderTest();
         renderTrajectory();
         errorEl.textContent = `${e.message}. Train a run first: uv run train`;
       }
@@ -882,7 +1377,7 @@
 
     async function updateEpochOptions() {
       const split = document.getElementById("splitSelect").value;
-      const epochs = manifest?.splits?.[split] ? Object.keys(manifest.splits[split]).map(Number).sort((a, b) => a - b) : [];
+      const epochs = manifest?.splits?.[split] ? Object.keys(manifest.splits[split]).map(Number).sort((a, b) => b - a) : [];
       fillSelect(document.getElementById("epochSelect"), epochs);
       await updatePuzzleOptions();
     }
@@ -898,7 +1393,7 @@
     function setStep(idx, { fromPlayback = false } = {}) {
       if (!trajectory) return;
       if (!fromPlayback) stopPlayback();
-      stepIdx = Math.max(0, Math.min(idx, trajectory.states.length - 1));
+      stepIdx = Math.max(0, Math.min(idx, trajectoryFrameCount(trajectory) - 1));
       renderTrajectory();
     }
 
@@ -943,6 +1438,7 @@
         await loadRun(runs[0]);
         requestAnimationFrame(() => {
           if (metrics?.epochs?.length) renderCharts();
+          renderTest();
         });
       } catch (e) {
         errorEl.textContent = `${e.message}. Serve the project root: uv run python -m http.server`;
@@ -956,7 +1452,7 @@
       document.getElementById("stepFirst").onclick = () => setStep(0);
       document.getElementById("stepPrev").onclick = () => setStep(stepIdx - 1);
       document.getElementById("stepNext").onclick = () => setStep(stepIdx + 1);
-      document.getElementById("stepLast").onclick = () => setStep(trajectory ? trajectory.states.length - 1 : 0);
+      document.getElementById("stepLast").onclick = () => setStep(trajectory ? trajectoryFrameCount(trajectory) - 1 : 0);
       document.getElementById("stepPlay").onclick = togglePlayback;
       document.getElementById("speedSlider").oninput = () => {
         if (isPlaying) schedulePlaybackTick();
@@ -967,6 +1463,7 @@
         clearTimeout(resizeTimer);
         resizeTimer = setTimeout(() => {
           if (metrics?.epochs?.length) renderCharts();
+          renderTest();
         }, 150);
       });
     }

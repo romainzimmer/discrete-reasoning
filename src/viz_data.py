@@ -5,10 +5,10 @@ from pathlib import Path
 
 import torch
 
+from amp import AmpConfig, autocast_context
 from data import puzzle_to_tensor
-from encoding import grid_to_onehot
-from model import NextStateModel
-from rollout import rollout_trace
+from model import MixerNextStateModel
+from rollout import RolloutConfig, rollout_trace_batch
 
 
 def json_safe(value):
@@ -45,60 +45,80 @@ def save_trajectory(run_dir: Path, split: str, epoch: int, puzzle_index: int, pa
     path.write_text(json.dumps(payload, indent=2))
 
 
-def build_trajectory(
-    model: NextStateModel,
+def _trajectory_payload(
     row: dict,
+    trace,
     *,
     split: str,
     epoch: int,
     puzzle_index: int,
-    device: torch.device,
-    max_rollout_iter: int,
+    max_outer_iters: int,
 ) -> dict:
-    clues = puzzle_to_tensor(row["question"]).unsqueeze(0).to(device)
-    states = rollout_trace(
-        model,
-        grid_to_onehot(clues),
-        clues,
-        max_rollout_iter=max_rollout_iter,
-    )
     return {
         "question": row["question"],
         "answer": row["answer"],
-        "states": states,
+        "inputs": trace.inputs,
+        "predictions": trace.predictions,
+        "states": trace.predictions,
         "meta": {
             "split": split,
             "epoch": epoch,
             "puzzle_index": puzzle_index,
             "source": row["source"],
             "rating": row["rating"],
+            "outer_steps": trace.outer_steps,
+            "max_outer_iters": max_outer_iters,
+            "halted": trace.halted,
         },
     }
 
 
 def save_epoch_trajectories(
-    model: NextStateModel,
+    model: MixerNextStateModel,
     rows: list[dict],
     *,
     split: str,
     epoch: int,
     run_dir: Path,
     device: torch.device,
-    max_rollout_iter: int,
+    rollout_config: RolloutConfig,
+    batch_size: int | None = None,
+    amp: AmpConfig | None = None,
 ) -> list[int]:
+    if not rows:
+        return []
+    if batch_size is not None and batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+    model.eval()
+    amp = amp or AmpConfig(enabled=False, dtype=None, scaler=None)
+    chunk_size = batch_size or len(rows)
     puzzle_indices: list[int] = []
-    for puzzle_index, row in enumerate(rows):
-        payload = build_trajectory(
-            model,
-            row,
-            split=split,
-            epoch=epoch,
-            puzzle_index=puzzle_index,
-            device=device,
-            max_rollout_iter=max_rollout_iter,
-        )
-        save_trajectory(run_dir, split, epoch, puzzle_index, payload)
-        puzzle_indices.append(puzzle_index)
+    for start in range(0, len(rows), chunk_size):
+        chunk = rows[start : start + chunk_size]
+        clues = torch.stack([puzzle_to_tensor(row["question"]) for row in chunk]).to(device)
+        with autocast_context(device, amp):
+            trajectories = rollout_trace_batch(
+                model,
+                clues,
+                config=rollout_config,
+            )
+        for offset, (row, trace) in enumerate(zip(chunk, trajectories)):
+            puzzle_index = start + offset
+            save_trajectory(
+                run_dir,
+                split,
+                epoch,
+                puzzle_index,
+                _trajectory_payload(
+                    row,
+                    trace,
+                    split=split,
+                    epoch=epoch,
+                    puzzle_index=puzzle_index,
+                    max_outer_iters=rollout_config.max_outer_iters,
+                ),
+            )
+            puzzle_indices.append(puzzle_index)
     return puzzle_indices
 
 

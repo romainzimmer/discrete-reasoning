@@ -11,8 +11,6 @@ from augment import (
 )
 from data import answer_to_tensor, puzzle_to_tensor
 from dataset import PuzzleDataset
-from encoding import attach_clue_mask, clue_mask, grid_to_onehot
-
 SOLVED = (
     "534678912"
     "672195348"
@@ -165,18 +163,59 @@ class TestApplyAugment:
         ds_b.set_epoch(3)
         assert torch.equal(ds_a[0]["clues"], ds_b[0]["clues"])
 
-
-class TestEncodingSync:
-    def test_clues_onehot_matches_augmented_grid(self) -> None:
+    def test_sample_varies_on_resample_same_idx(self) -> None:
+        rows = [_sample_row()]
         ds = PuzzleDataset(
-            rows=[_sample_row()],
+            rows=rows,
             augment=True,
             aug_config=AugmentConfig(p_digit=1.0, p_rot=1.0, p_band=1.0),
             aug_seed=7,
         )
-        item = ds[0]
-        assert torch.equal(item["clues_onehot"], grid_to_onehot(item["clues"]))
+        ds.set_epoch(2)
+        clues_one, _, _ = ds.sample(torch.tensor([0]))
+        clues_two, _, _ = ds.sample(torch.tensor([0]))
+        assert not torch.equal(clues_one, clues_two)
 
+    def test_sample_resample_is_reproducible(self) -> None:
+        rows = [_sample_row()]
+        ds_a = PuzzleDataset(
+            rows=rows,
+            augment=True,
+            aug_config=AugmentConfig(p_digit=1.0, p_rot=1.0, p_band=1.0),
+            aug_seed=7,
+        )
+        ds_b = PuzzleDataset(
+            rows=rows,
+            augment=True,
+            aug_config=AugmentConfig(p_digit=1.0, p_rot=1.0, p_band=1.0),
+            aug_seed=7,
+        )
+        ds_a.set_epoch(2)
+        ds_b.set_epoch(2)
+        clues_a1, _, _ = ds_a.sample(torch.tensor([0]))
+        clues_a2, _, _ = ds_a.sample(torch.tensor([0]))
+        clues_b1, _, _ = ds_b.sample(torch.tensor([0]))
+        clues_b2, _, _ = ds_b.sample(torch.tensor([0]))
+        assert torch.equal(clues_a1, clues_b1)
+        assert torch.equal(clues_a2, clues_b2)
+        assert not torch.equal(clues_a1, clues_a2)
+
+    def test_cache_sample_varies_by_epoch(self) -> None:
+        rows = [_sample_row()]
+        ds = PuzzleDataset(
+            rows=rows,
+            augment=True,
+            aug_config=AugmentConfig(p_digit=1.0, p_rot=1.0, p_band=1.0),
+            aug_seed=7,
+        )
+        ds.set_epoch(1)
+        clues_one, _, _ = ds.sample(torch.tensor([0]))
+        ds.set_epoch(2)
+        clues_two, _, _ = ds.sample(torch.tensor([0]))
+        assert not torch.equal(clues_one, clues_two)
+
+
+class TestEncodingSync:
     def test_clue_cells_match_answer(self) -> None:
         ds = PuzzleDataset(
             rows=[_sample_row()],
@@ -189,29 +228,6 @@ class TestEncodingSync:
         answer = item["answer"]
         clue_positions = clues > 0
         assert torch.equal(answer[clue_positions], clues[clue_positions])
-
-    def test_clue_mask_matches_nonzero_clues(self) -> None:
-        ds = PuzzleDataset(
-            rows=[_sample_row()],
-            augment=True,
-            aug_config=AugmentConfig(p_digit=0.0, p_rot=1.0, p_band=1.0),
-            aug_seed=3,
-        )
-        item = ds[0]
-        clues = item["clues"]
-        mask = clue_mask(clues)
-        assert torch.equal(mask.squeeze(-1) > 0, clues > 0)
-
-    def test_attach_clue_mask_uses_augmented_clues(self) -> None:
-        ds = PuzzleDataset(
-            rows=[_sample_row()],
-            augment=True,
-            aug_config=AugmentConfig(p_digit=0.0, p_rot=1.0, p_band=0.0),
-            aug_seed=5,
-        )
-        item = ds[0]
-        state = attach_clue_mask(item["clues_onehot"], item["clues"])
-        assert torch.equal(state[..., -1] > 0, item["clues"] > 0)
 
     def test_spatial_augment_relocates_clue_mask(self) -> None:
         clues = puzzle_to_tensor(CLUES)

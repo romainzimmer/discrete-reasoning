@@ -37,4 +37,4 @@ RUN pip3 install --no-cache-dir --default-timeout=86400 .
 COPY src ./src
 RUN pip3 install --no-cache-dir --no-deps .
 
-CMD ["train", "--help"]
+CMD ["python3", "-m", "train", "--help"]

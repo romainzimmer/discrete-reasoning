@@ -1,8 +1,11 @@
 [project]
 name = "discrete-reasoning"
 version = "0.1.0"
-description = "Sudoku extreme experiments"
+description = "Looped MLP-Mixer sudoku solver with learned halting"
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.11"
+authors = [{ name = "Romain Zimmer", email = "hi@romainzimmer.com" }]
 dependencies = [
     "tqdm>=4.66.0",
     "huggingface-hub>=0.27.0",
@@ -11,12 +14,16 @@ dependencies = [
     "torch>=2.0.0; platform_machine != 'x86_64' or sys_platform != 'darwin'",
 ]
 
+[project.urls]
+Repository = "https://github.com/romainzimmer/discrete-reasoning"
+
 [project.optional-dependencies]
 dev = ["pytest"]
 
 [project.scripts]
 download-dataset = "download:main"
 train = "train:main"
+resume = "resume:main"
 eval = "eval:main"
 
 [build-system]
