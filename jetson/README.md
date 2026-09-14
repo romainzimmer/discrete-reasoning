@@ -36,16 +36,20 @@ TORCH_INDEX=https://pypi.jetson-ai-lab.io/jp6/cu126 \
 docker compose build
 ```
 
+
+
 ## Download dataset
 
 ```bash
 docker compose run --rm download
 ```
 
+
+
 ## Train
 
 ```bash
-docker compose run --rm train --epochs 1000 --dim 256 --num-blocks 2 --train-batch-size 128 --num-workers 3 --max-samples 100000 --val-samples 512 --inner-iters 3 --train-max-outer-iters 5 --eval-max-outer-iters 30 --batches-per-epoch 300
+docker compose run --rm train --epochs 1000 --dim 256 --num-blocks 2 --train-batch-size 128 --num-workers 3 --max-samples 100000 --val-samples 512 --inner-iters 6 --train-max-outer-iters 5 --eval-max-outer-iters 30 --batches-per-epoch 300
 ```
 
 Quick test:
@@ -57,6 +61,8 @@ docker compose run --rm train \
   --train-batch-size 64 --batches-per-epoch 50 --num-workers 1 \
   --max-samples 5000 --min-rating 0 --max-rating 0 --val-samples 64
 ```
+
+
 
 ## Resume
 
@@ -73,6 +79,8 @@ docker compose run --rm eval runs/<run-id>
 docker compose run --rm eval runs/<run-id> --max-test-samples 1000
 docker compose run --rm eval runs/<run-id> --min-rating 5 --max-rating 9
 ```
+
+
 
 ## Profile
 
@@ -115,4 +123,4 @@ SSH port forward:
 ssh -L 8000:localhost:8000 jetson
 ```
 
-Open http://localhost:8000/viz/
+Open [http://localhost:8000/viz/](http://localhost:8000/viz/)

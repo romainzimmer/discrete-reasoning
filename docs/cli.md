@@ -21,7 +21,7 @@ Main training loop. Key flags:
 |------|---------|---------|
 | `--dim` | 256 | Hidden dimension D |
 | `--num-blocks` | 2 | Mixer blocks per inner step |
-| `--inner-iters` | 3 | Inner mixer steps per outer round |
+| `--inner-iters` | 6 | Inner mixer steps per outer round |
 | `--train-max-outer-iters` | 5 | Max outer commits before slot refill (train) |
 | `--eval-max-outer-iters` | 30 | Max outer commits (val / test / viz) |
 | `--train-batch-size` | 128 | Parallel puzzle slots |

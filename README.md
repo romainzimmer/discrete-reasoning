@@ -1,10 +1,8 @@
 # Discrete Reasoning
 
-**Looped MLP-Mixer** sudoku solver with an outer commit loop, inner mixer iterations, and a learned halt head, trained on [sapientinc/sudoku-extreme](https://huggingface.co/datasets/sapientinc/sudoku-extreme).
+**Looped MLP-Mixer** sudoku solver with an outer commit loop, inner mixer iterations, and a learned halt head, trained from scratch on [sapientinc/sudoku-extreme](https://huggingface.co/datasets/sapientinc/sudoku-extreme).
 
-<p align="center">
-  <img src="docs/assets/trajectory.gif" width="360" alt="Sudoku solve trajectory">
-</p>
+<img src="docs/assets/trajectory.gif" width="360" alt="Sudoku solve trajectory">
 
 ## Getting started
 
@@ -62,6 +60,10 @@ Trajectory player for one puzzle: model input and output at each outer commit un
 [jetson/README.md](jetson/README.md)
 
 Docker setup for training and eval on NVIDIA Jetson (JetPack). Source is bind-mounted; rebuild only when dependencies change.
+
+<p align="center">
+  <img src="docs/assets/jetson.jpeg" width="360" alt="Jetson developer kit">
+</p>
 
 ## References
 
