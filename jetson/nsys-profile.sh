@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Profile training with Nsight Systems inside the train container (run from jetson/ on the Jetson host).
+# Profile training with Nsight Systems inside the train container (run from jetson/ on the Orin Nano host).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,7 +67,7 @@ nsys_mount_for() {
 
 print_install_hint() {
   cat >&2 <<'EOF'
-Install Nsight Systems on the Jetson host, then re-run:
+Install Nsight Systems on the Orin Nano host, then re-run:
 
   sudo apt update
   apt search nsight-systems          # pick the version matching your JetPack
@@ -86,7 +86,7 @@ EOF
 
 nsys_bin="$(find_nsys_bin || true)"
 if [[ -z "$nsys_bin" ]]; then
-  echo "nsys not found on this Jetson." >&2
+  echo "nsys not found on this Orin Nano." >&2
   print_install_hint
   exit 1
 fi

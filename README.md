@@ -55,14 +55,14 @@ Trajectory player for one puzzle: model input and output at each outer commit un
   <img src="docs/assets/trajectory-viz.png" width="560" alt="Trajectory player">
 </p>
 
-## Jetson
+## Jetson Orin Nano
 
 [jetson/README.md](jetson/README.md)
 
-Docker setup for training and eval on NVIDIA Jetson (JetPack). Source is bind-mounted; rebuild only when dependencies change.
+Docker setup for training and eval on **Jetson Orin Nano** (JetPack). Source is bind-mounted; rebuild only when dependencies change.
 
 <p align="center">
-  <img src="docs/assets/jetson.jpeg" width="360" alt="Jetson developer kit">
+  <img src="docs/assets/jetson.jpeg" width="360" alt="Jetson Orin Nano developer kit">
 </p>
 
 ## References

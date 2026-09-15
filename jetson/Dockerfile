@@ -1,4 +1,4 @@
-# Jetson (JetPack 7.2.1 / L4T r39.2.1)
+# Jetson Orin Nano (JetPack 7.2.1 / L4T r39.2.1)
 #
 # From jetson/ (requires nvidia-container-toolkit on the host):
 #   docker compose build

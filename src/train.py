@@ -819,7 +819,7 @@ def build_train_parser() -> argparse.ArgumentParser:
         "--num-workers",
         type=int,
         default=0,
-        help="DataLoader worker processes (0 recommended on Jetson)",
+        help="DataLoader worker processes (0 recommended on Jetson Orin Nano)",
     )
     parser.add_argument("--min-rating", type=int, default=None)
     parser.add_argument("--max-rating", type=int, default=None)

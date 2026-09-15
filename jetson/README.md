@@ -1,6 +1,6 @@
-# Jetson
+# Jetson Orin Nano
 
-Docker setup for JetPack 7.2.1 (L4T r39.2.1). Requires [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host.
+Docker setup for **Jetson Orin Nano** on JetPack 7.2.1 (L4T r39.2.1). Requires [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host.
 
 All commands run from `jetson/`:
 
@@ -10,7 +10,7 @@ cd jetson
 
 Model and training details: [docs/method.md](../docs/method.md). CLI flags: [docs/cli.md](../docs/cli.md).
 
-If you hit OOM, lower `--train-batch-size` (512 may need tuning on Jetson).
+If you hit OOM, lower `--train-batch-size` (512 may need tuning on Orin Nano).
 
 ## Build
 
@@ -28,7 +28,7 @@ TORCH_INDEX=https://download.pytorch.org/whl/cu132 \
 docker compose build
 ```
 
-JetPack 6 (L4T r36.4.x):
+Orin Nano on JetPack 6 (L4T r36.4.x):
 
 ```bash
 BASE_IMAGE=nvcr.io/nvidia/l4t-jetpack:r36.4.0 \

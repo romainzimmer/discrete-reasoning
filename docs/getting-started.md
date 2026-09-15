@@ -41,7 +41,7 @@ Open [http://localhost:8000/viz/](http://localhost:8000/viz/). Serve from the **
 
 ## Troubleshooting
 
-**Out of memory**: lower `--train-batch-size` (Jetson: try 64 or 32).
+**Out of memory**: lower `--train-batch-size` (Orin Nano: try 64 or 32).
 
 **`data/train.csv` not found**: run `uv run download-dataset`.
 

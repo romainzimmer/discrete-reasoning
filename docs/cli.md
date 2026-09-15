@@ -75,7 +75,7 @@ uv run train \
 
 Writes `runs/<run-id>/profile/trace.json`. Open in `chrome://tracing`.
 
-On Jetson, see [jetson/README.md](../jetson/README.md) for Docker commands and Nsight Systems.
+On Jetson Orin Nano, see [jetson/README.md](../jetson/README.md) for Docker commands and Nsight Systems.
 
 ## Reproducibility
 
