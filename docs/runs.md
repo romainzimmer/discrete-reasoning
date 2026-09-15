@@ -21,7 +21,7 @@ runs/<run-id>/
 ### history.json
 
 - `args`: full training config (`model: looped-mixer`, hyperparameters)
-- `epochs[]`: `train_*` and `val_*` metrics per epoch
+- `epochs[]`: `train_*` and `val_*` metrics per epoch, plus `curriculum_p_gt_cap` and `curriculum_p_gt_cap_g0…g4` when adaptive GT reveal is enabled
 - `test`: optional block written by `eval` (metrics + sweeps)
 
 ### Trajectory JSON
@@ -46,7 +46,7 @@ The UI shows:
 - Test sweep charts (after `uv run eval --sweep`)
 - Trajectory player (input grid, prediction grid, outer-step slider)
 
-Train and validation metrics per epoch: loss, cell/puzzle accuracy, halt rate, and accuracy by rating group.
+Train and validation metrics per epoch: loss, cell/puzzle accuracy, halt rate, adaptive curriculum `p_gt` cap by rating group, and accuracy by rating group.
 
 <p align="center">
   <img src="assets/charts-viz.png" width="560" alt="Training metrics">

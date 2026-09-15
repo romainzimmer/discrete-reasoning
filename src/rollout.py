@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
+from curriculum import CurriculumState
 from data import tensor_to_string
 from dataset import PuzzleDataset
 from amp import LOSS_DTYPE, to_loss_dtype
@@ -22,10 +23,13 @@ class RolloutConfig:
     max_outer_iters: int = DEFAULT_MAX_OUTER_ITERS
     halt_threshold: float = 0.5
     gt_reveal: bool = True
+    random_gt_reveal_p_gt: bool = False
     deep_supervision: bool = True
     random_init: bool = False
 
     def __post_init__(self) -> None:
+        if self.random_gt_reveal_p_gt and not self.gt_reveal:
+            raise ValueError("random_gt_reveal_p_gt requires gt_reveal")
         if self.inner_iters < 1:
             raise ValueError("inner_iters must be >= 1")
         if self.max_outer_iters < 1:
@@ -52,6 +56,8 @@ class BatchSlotState:
         *,
         generator: torch.Generator,
         gt_reveal: bool = True,
+        random_gt_reveal_p_gt: bool = False,
+        gt_reveal_p_gt_caps: torch.Tensor | None = None,
         random_init: bool = False,
     ) -> BatchSlotState:
         idx = torch.randint(len(dataset), (batch_size,), generator=generator)
@@ -64,9 +70,10 @@ class BatchSlotState:
             clues,
             answers,
             clue_pin,
-            device=device,
-            batch_size=batch_size,
+            rating_group=rating_group,
             gt_reveal=gt_reveal,
+            random_gt_reveal_p_gt=random_gt_reveal_p_gt,
+            gt_reveal_p_gt_caps=gt_reveal_p_gt_caps,
             random_init=random_init,
             generator=generator,
         )
@@ -354,14 +361,43 @@ def _sample_uniform_p_gt(
     return _rand((batch_size,), device=device, generator=generator)
 
 
+def _sample_uniform_p_gt_up_to(
+    caps: torch.Tensor,
+    *,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Sample p_gt ~ U[0, cap_i] for each slot."""
+    return _rand(caps.shape, device=caps.device, generator=generator) * caps
+
+
+def _gt_reveal_p_gt_for_slots(
+    *,
+    rating_group: torch.Tensor,
+    device: torch.device,
+    gt_reveal: bool,
+    random_gt_reveal_p_gt: bool,
+    gt_reveal_p_gt_caps: torch.Tensor | None,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor | None:
+    if not gt_reveal:
+        return None
+    if random_gt_reveal_p_gt:
+        return _sample_uniform_p_gt(rating_group.size(0), device, generator=generator)
+    if gt_reveal_p_gt_caps is None:
+        gt_reveal_p_gt_caps = CurriculumState.default().p_gt_cap_tensor(device)
+    caps_by_slot = gt_reveal_p_gt_caps[rating_group]
+    return _sample_uniform_p_gt_up_to(caps_by_slot, generator=generator)
+
+
 def _gt_reveal_digit_id_for_seed_refill(
     clues: torch.Tensor,
     answers: torch.Tensor,
     clue_pin: torch.Tensor,
     *,
-    device: torch.device,
-    batch_size: int,
+    rating_group: torch.Tensor,
     gt_reveal: bool,
+    random_gt_reveal_p_gt: bool = False,
+    gt_reveal_p_gt_caps: torch.Tensor | None = None,
     random_init: bool = False,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
@@ -369,7 +405,15 @@ def _gt_reveal_digit_id_for_seed_refill(
         return _init_digit_id_from_clues(
             clues, clue_pin, generator=generator, random_init=random_init
         )
-    p_gt = _sample_uniform_p_gt(batch_size, device, generator=generator)
+    p_gt = _gt_reveal_p_gt_for_slots(
+        rating_group=rating_group,
+        device=clues.device,
+        gt_reveal=gt_reveal,
+        random_gt_reveal_p_gt=random_gt_reveal_p_gt,
+        gt_reveal_p_gt_caps=gt_reveal_p_gt_caps,
+        generator=generator,
+    )
+    assert p_gt is not None
     return _gt_reveal_init_digit_id(
         clues,
         answers,
@@ -541,6 +585,8 @@ def refill_done_slots(
     generator: torch.Generator,
     dim: int,
     gt_reveal: bool = True,
+    random_gt_reveal_p_gt: bool = False,
+    gt_reveal_p_gt_caps: torch.Tensor | None = None,
     random_init: bool = False,
 ) -> None:
     if not done.any():
@@ -559,9 +605,10 @@ def refill_done_slots(
         new_clues,
         new_answers,
         new_clue_pin,
-        device=device,
-        batch_size=n_done,
+        rating_group=new_rating_groups,
         gt_reveal=gt_reveal,
+        random_gt_reveal_p_gt=random_gt_reveal_p_gt,
+        gt_reveal_p_gt_caps=gt_reveal_p_gt_caps,
         random_init=random_init,
         generator=generator,
     )

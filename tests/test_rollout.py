@@ -20,7 +20,9 @@ from rollout import (
     _compute_losses,
     _halt_target,
     _gt_reveal_init_digit_id,
+    _gt_reveal_p_gt_for_slots,
     _sample_uniform_p_gt,
+    _sample_uniform_p_gt_up_to,
     _inner_loop,
     _predict_halt,
     predict_grid,
@@ -99,6 +101,8 @@ def test_rollout_config_validation():
         RolloutConfig(inner_iters=0)
     with pytest.raises(ValueError):
         RolloutConfig(max_outer_iters=0)
+    with pytest.raises(ValueError, match="random_gt_reveal_p_gt requires gt_reveal"):
+        RolloutConfig(gt_reveal=False, random_gt_reveal_p_gt=True)
 
 
 def test_defaults():
@@ -108,6 +112,7 @@ def test_defaults():
     assert config.deep_supervision is True
     assert config.gt_reveal is True
     assert config.random_init is False
+    assert config.random_gt_reveal_p_gt is False
 
 
 def test_one_outer_per_step():
@@ -757,13 +762,14 @@ def test_gt_reveal_not_in_encode_clue_pin():
 def test_train_seed_gt_reveal_reveals_gt():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
-    with patch("rollout._sample_uniform_p_gt", return_value=torch.tensor([1.0])):
+    with patch("rollout._sample_uniform_p_gt_up_to", return_value=torch.tensor([1.0])):
         with patch("rollout.torch.rand", return_value=torch.zeros(1, 9, 9)):
             state = BatchSlotState.seed(
                 dataset,
                 batch_size=1,
                 device=torch.device("cpu"),
                 generator=gen,
+                gt_reveal_p_gt_caps=torch.ones(5),
             )
     assert torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
     assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
@@ -799,7 +805,41 @@ def test_curriculum_init_is_reproducible_with_generator():
     assert torch.equal(digit_a, digit_b)
 
 
-def test_train_seed_gt_reveal_samples_uniform_p_gt():
+def test_gt_reveal_p_gt_for_slots_adaptive_samples_within_cap():
+    with patch("rollout._rand", return_value=torch.tensor([0.5, 0.25])):
+        p_gt = _gt_reveal_p_gt_for_slots(
+            rating_group=torch.tensor([0, 1]),
+            device=torch.device("cpu"),
+            gt_reveal=True,
+            random_gt_reveal_p_gt=False,
+            gt_reveal_p_gt_caps=torch.tensor([0.4, 0.8, 0.5, 0.5, 0.5]),
+        )
+    assert p_gt is not None
+    assert torch.equal(p_gt, torch.tensor([0.2, 0.2]))
+
+
+def test_sample_uniform_p_gt_up_to_scales_by_cap():
+    caps = torch.tensor([0.0, 0.5, 1.0])
+    with patch("rollout._rand", return_value=torch.tensor([0.4, 0.6, 0.8])):
+        p_gt = _sample_uniform_p_gt_up_to(caps)
+    assert torch.equal(p_gt, torch.tensor([0.0, 0.3, 0.8]))
+
+
+def test_gt_reveal_p_gt_for_slots_random_ignores_caps():
+    with patch("rollout._sample_uniform_p_gt", return_value=torch.tensor([0.3, 0.7])) as sample:
+        p_gt = _gt_reveal_p_gt_for_slots(
+            rating_group=torch.tensor([0, 4]),
+            device=torch.device("cpu"),
+            gt_reveal=True,
+            random_gt_reveal_p_gt=True,
+            gt_reveal_p_gt_caps=torch.tensor([0.5] * 5),
+        )
+    sample.assert_called_once()
+    assert p_gt is not None
+    assert torch.equal(p_gt, torch.tensor([0.3, 0.7]))
+
+
+def test_train_seed_random_gt_reveal_samples_uniform_p_gt():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     with patch("rollout._sample_uniform_p_gt", return_value=torch.tensor([1.0])) as sample:
@@ -809,6 +849,7 @@ def test_train_seed_gt_reveal_samples_uniform_p_gt():
                 batch_size=1,
                 device=torch.device("cpu"),
                 generator=gen,
+                random_gt_reveal_p_gt=True,
             )
         sample.assert_called_once_with(
             1, torch.device("cpu"), generator=gen
@@ -816,7 +857,7 @@ def test_train_seed_gt_reveal_samples_uniform_p_gt():
     assert torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
 
 
-def test_train_seed_gt_reveal_zero_p_gt_skips_gt_reveal():
+def test_train_seed_random_gt_reveal_zero_p_gt_skips_gt_reveal():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     with patch("rollout._sample_uniform_p_gt", return_value=torch.tensor([0.0])):
@@ -825,6 +866,7 @@ def test_train_seed_gt_reveal_zero_p_gt_skips_gt_reveal():
             batch_size=1,
             device=torch.device("cpu"),
             generator=gen,
+            random_gt_reveal_p_gt=True,
         )
     assert not torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
     assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
@@ -890,7 +932,7 @@ def test_refill_gt_reveal_reveals_gt():
         gt_reveal=False,
     )
     assert not torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
-    with patch("rollout._sample_uniform_p_gt", return_value=torch.tensor([1.0])):
+    with patch("rollout._sample_uniform_p_gt_up_to", return_value=torch.tensor([1.0])):
         with patch("rollout.torch.rand", return_value=torch.zeros(1, 9, 9)):
             refill_done_slots(
                 state,
@@ -899,11 +941,12 @@ def test_refill_gt_reveal_reveals_gt():
                 generator=gen,
                 dim=32,
                 gt_reveal=True,
+                gt_reveal_p_gt_caps=torch.ones(5),
             )
     assert torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
 
 
-def test_refill_gt_reveal_resamples_uniform_p_gt():
+def test_refill_random_gt_reveal_resamples_uniform_p_gt():
     dataset = _tiny_dataset()
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
@@ -922,6 +965,7 @@ def test_refill_gt_reveal_resamples_uniform_p_gt():
                 generator=gen,
                 dim=32,
                 gt_reveal=True,
+                random_gt_reveal_p_gt=True,
             )
         sample.assert_called_once_with(
             1, torch.device("cpu"), generator=gen

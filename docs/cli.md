@@ -31,6 +31,9 @@ Main training loop. Key flags:
 | `--seed` | 0 | RNG for augment, subsampling, refill |
 | `--no-augment` | off | Disable training augmentations |
 | `--no-gt-reveal` | off | Clues + empty non-clue cells only (no partial GT reveal) |
+| `--no-adaptive-gt-reveal` | off | Sample `p_gt ~ U[0, 1]` per puzzle (cap fixed at 1.0) instead of adaptive per-group cap |
+| `--curriculum-logit-step` | 1.0 | Per-epoch logit update scale for adaptive `p_gt` cap per rating group |
+| `--curriculum-logit-decay` | 0.99 | Per-epoch multiplicative decay on curriculum logits before the acc update |
 | `--random-init` | off | Fill non-clue cells with random digits 0–9 at seed/refill (default: empty) |
 | `--no-deep-supervision` | off | Final inner step only for loss |
 | `--no-amp` | off | Disable mixed precision on CUDA |
@@ -56,7 +59,7 @@ Model and rollout settings default from the checkpoint (including `--random-init
 
 ## resume
 
-Continue from `runs/<run-id>/last.pt`. `--epochs` is the new **total** (must exceed the completed epoch):
+Continue from `runs/<run-id>/last.pt`. Restores model, optimizer, and adaptive curriculum state (`curriculum_p_gt_logits`, or replay from `history.json`). `--epochs` is the new **total** (must exceed the completed epoch):
 
 ```bash
 uv run resume runs/<run-id> --epochs 100

@@ -20,7 +20,8 @@ Inner update: `z_t = M(P + h_t)` with shared weights across inner steps (equival
 | `B` | Parallel training slots |
 | `λ_h` | Halt loss weight |
 | `N_try` | Max random restarts per puzzle at eval |
-| `p_{gt}` | Per-puzzle GT reveal probability at seed/refill |
+| `p_{gt,g}` | Per-puzzle GT reveal probability at seed/refill |
+| `p_{gt,g}^{cap}` | Adaptive upper cap on `p_{gt,g}` for rating group `g` |
 | random init | Optional: fill unrevealed non-clue cells with random digits 0–9 (default: empty) |
 | `g` | Rating group `0…4` (quintile bins on train `rating`; metrics only) |
 
@@ -87,18 +88,7 @@ Training slot finishes when **(halt predicted AND grid correct)** OR `T_out_trai
 
 ### GT reveal initialization
 
-At slot **seed/refill** (default), sample **`p_{gt} ~ U[0, 1]`** once per puzzle. For each non-clue cell independently:
-
-- with probability `p_{gt}`: initialize to ground truth
-- otherwise: leave empty (`0`), or a random digit `0…9` when `--random-init` is set
-
-Revealed cells are **not** pinned as clues; loss still requires correct predictions on them. Val/test use the same init mode (empty by default) but **no GT reveal**.
-
-Without GT reveal: clues plus empty non-clue cells at seed/refill, or random non-clue digits with `--random-init`.
-
-Seed/refill RNG (`p_{gt}` sampling, GT reveal, random digit fill) uses a fixed run seed for reproducibility.
-
-Puzzles are grouped by difficulty into **5 rating quintiles** for per-group train/val puzzle accuracy logging:
+Puzzles are grouped by difficulty into **5 rating quintiles** for per-group train/val puzzle accuracy logging and adaptive GT reveal:
 
 | Group | Rating range |
 |-------|----------------|
@@ -107,6 +97,37 @@ Puzzles are grouped by difficulty into **5 rating quintiles** for per-group trai
 | G2 | 12–23 |
 | G3 | 24–38 |
 | G4 | 39+ |
+
+Each group `g` has its own adaptive cap **`p_{gt,g}^{cap}`**. At slot **seed/refill**, sample **`p_{gt,g} ~ U[0, p_{gt,g}^{cap}]`** once per puzzle. For each non-clue cell independently:
+
+- with probability `p_{gt,g}`: initialize to ground truth
+- otherwise: leave empty (`0`), or a random digit `0…9` when `--random-init` is set
+
+Revealed cells are **not** pinned as clues; loss still requires correct predictions on them. Val/test use clues only (empty non-clue cells by default, or random fill with `--random-init`) and **no GT reveal**.
+
+Three training init modes:
+
+| Flag | Behavior |
+|------|----------|
+| (default) | Adaptive per-group cap `p_{gt,g}^{cap}`; sample `p_{gt,g} ~ U[0, p_{gt,g}^{cap}]` per puzzle |
+| `--no-adaptive-gt-reveal` | Fixed cap 1.0: sample `p_gt ~ U[0, 1]` per puzzle at each seed/refill |
+| `--no-gt-reveal` | No GT reveal; clues + empty or random non-clue cells only |
+
+**Adaptive controller** (default). Each group maintains a logit `ℓ_g` with cap `p_{gt,g}^{cap} = σ(ℓ_g)`. Default init: `p_{gt,g}^{cap} = 0.5`.
+
+At the **end of each epoch**, update from that epoch’s **done-only train puzzle accuracy** per group (`acc_g`, or skip if no completions in group `g`):
+
+```
+ℓ_g ← γ · ℓ_g + η · (0.5 − acc_g)
+```
+
+- **Target** `0.5`: if the model solves too few done puzzles in a group, `p_{gt,g}^{cap}` rises (more GT hints); if too many, it falls.
+- **Decay** `γ`: `--curriculum-logit-decay` (default `0.99`); prevents logits drifting unbounded.
+- **Step** `η`: `--curriculum-logit-step` (default `1.0`).
+
+Checkpoints store per-group cap logits (`curriculum_p_gt_logits`) and mean cap (`curriculum_p_gt_cap`); `resume` restores them or reconstructs state from `history.json`.
+
+Seed/refill RNG (GT reveal, random digit fill) uses a fixed run seed for reproducibility.
 
 ### Optimization
 
@@ -140,6 +161,7 @@ One-dimensional ablations at eval: sweep inner steps, max outer commits, or rest
 |------|------|
 | `src/model.py` | Looped MLP-Mixer |
 | `src/rating_groups.py` | Rating quintile bins for metrics |
+| `src/curriculum.py` | Adaptive per-group `p_gt` controller |
 | `src/rollout.py` | Train/eval rollouts |
 | `src/train.py` | Training loop, val, checkpoints |
 | `src/eval.py` | Test eval and compute sweeps |

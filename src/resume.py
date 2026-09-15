@@ -9,6 +9,7 @@ import torch
 from model import MixerNextStateModel
 from train import (
     best_val_cell_acc_for_resume,
+    curriculum_state_for_resume,
     load_last_checkpoint,
     optimizer_param_groups,
     require_run_args,
@@ -56,6 +57,7 @@ def main() -> None:
         model=model,
         optimizer=optimizer,
         best_val_cell_acc=best_val_cell_acc_for_resume(ckpt, run_dir),
+        initial_curriculum_state=curriculum_state_for_resume(ckpt, run_dir),
     )
 
 
