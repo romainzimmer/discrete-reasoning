@@ -23,6 +23,7 @@ class RolloutConfig:
     halt_threshold: float = 0.5
     gt_reveal: bool = True
     deep_supervision: bool = True
+    random_init: bool = False
 
     def __post_init__(self) -> None:
         if self.inner_iters < 1:
@@ -51,6 +52,7 @@ class BatchSlotState:
         *,
         generator: torch.Generator,
         gt_reveal: bool = True,
+        random_init: bool = False,
     ) -> BatchSlotState:
         idx = torch.randint(len(dataset), (batch_size,), generator=generator)
         clues, answers, rating_groups = dataset.sample(idx)
@@ -65,6 +67,7 @@ class BatchSlotState:
             device=device,
             batch_size=batch_size,
             gt_reveal=gt_reveal,
+            random_init=random_init,
             generator=generator,
         )
         return cls(
@@ -289,9 +292,10 @@ def _random_fill_unpinned(
     *,
     init_seed: int | None = None,
     generator: torch.Generator | None = None,
+    random_init: bool = False,
 ) -> torch.Tensor:
     """Fill unpinned cells with uniform random digits 0-9 (0 = empty)."""
-    if not unpinned.any():
+    if not random_init or not unpinned.any():
         return digit_id
     if init_seed is None:
         random_digits = _randint(
@@ -329,13 +333,15 @@ def _init_digit_id_from_clues(
     *,
     init_seed: int | None = None,
     generator: torch.Generator | None = None,
+    random_init: bool = False,
 ) -> torch.Tensor:
-    """Clues pinned; other cells get random digits 0-9."""
+    """Clues pinned; other cells get random digits 0-9 or stay empty."""
     return _random_fill_unpinned(
         clues.clone(),
         ~clue_pin,
         init_seed=init_seed,
         generator=generator,
+        random_init=random_init,
     )
 
 
@@ -356,16 +362,20 @@ def _gt_reveal_digit_id_for_seed_refill(
     device: torch.device,
     batch_size: int,
     gt_reveal: bool,
+    random_init: bool = False,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     if not gt_reveal:
-        return _init_digit_id_from_clues(clues, clue_pin, generator=generator)
+        return _init_digit_id_from_clues(
+            clues, clue_pin, generator=generator, random_init=random_init
+        )
     p_gt = _sample_uniform_p_gt(batch_size, device, generator=generator)
     return _gt_reveal_init_digit_id(
         clues,
         answers,
         clue_pin,
         p_gt=p_gt,
+        random_init=random_init,
         generator=generator,
     )
 
@@ -376,9 +386,10 @@ def _gt_reveal_init_digit_id(
     clue_pin: torch.Tensor,
     *,
     p_gt: float | torch.Tensor = 0.25,
+    random_init: bool = False,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
-    """Training-only puzzle entry: partial GT reveal; unrevealed non-clue cells are random."""
+    """Training-only puzzle entry: partial GT reveal; unrevealed non-clue cells are random or empty."""
     digit_id = clues.clone()
     non_clue = ~clue_pin
     if isinstance(p_gt, torch.Tensor):
@@ -391,7 +402,12 @@ def _gt_reveal_init_digit_id(
         _rand(clues.shape, device=clues.device, generator=generator) < reveal_p
     )
     digit_id = torch.where(reveal, answer, digit_id)
-    return _random_fill_unpinned(digit_id, non_clue & ~reveal, generator=generator)
+    return _random_fill_unpinned(
+        digit_id,
+        non_clue & ~reveal,
+        generator=generator,
+        random_init=random_init,
+    )
 
 
 def _inner_loop(
@@ -525,6 +541,7 @@ def refill_done_slots(
     generator: torch.Generator,
     dim: int,
     gt_reveal: bool = True,
+    random_init: bool = False,
 ) -> None:
     if not done.any():
         return
@@ -545,6 +562,7 @@ def refill_done_slots(
         device=device,
         batch_size=n_done,
         gt_reveal=gt_reveal,
+        random_init=random_init,
         generator=generator,
     )
     state.digit_id[done_flat] = new_digit_id
@@ -614,7 +632,9 @@ def _iter_compact_outer_rollout(
     device = clues.device
 
     clue_pin = clues > 0
-    digit_id = _init_digit_id_from_clues(clues, clue_pin, init_seed=init_seed)
+    digit_id = _init_digit_id_from_clues(
+        clues, clue_pin, init_seed=init_seed, random_init=config.random_init
+    )
 
     slot_idx = torch.arange(b, device=device)
     active_digit_id = digit_id
@@ -831,12 +851,14 @@ def _new_stream_slot(
     *,
     init_seed: int | None,
     try_idx: int,
+    random_init: bool = False,
 ) -> _StreamSlot:
     clue_pin = clues > 0
     digit_id = _init_digit_id_from_clues(
         clues.unsqueeze(0),
         clue_pin.unsqueeze(0),
         init_seed=_try_init_seed(init_seed, try_idx),
+        random_init=random_init,
     ).squeeze(0)
     return _StreamSlot(
         puzzle_idx=puzzle_idx,
@@ -955,6 +977,7 @@ def rollout_eval_stream(
                 answers_b[queue_pos],
                 init_seed=init_seed,
                 try_idx=0,
+                random_init=config.random_init,
             )
         )
         queue_pos += 1
@@ -1035,6 +1058,7 @@ def rollout_eval_stream(
                         slot.answer,
                         init_seed=init_seed,
                         try_idx=slot.try_idx + 1,
+                        random_init=config.random_init,
                     )
                 )
 

@@ -191,6 +191,11 @@ def main() -> None:
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducible test metrics")
     parser.add_argument(
+        "--random-init",
+        action="store_true",
+        help="Fill non-clue cells with random digits at init (default: from checkpoint, else empty)",
+    )
+    parser.add_argument(
         "--sweep",
         action="store_true",
         help=(
@@ -252,8 +257,23 @@ def main() -> None:
     checkpoint_epoch_num = checkpoint_epoch(ckpt, checkpoint_path)
     checkpoint_rel = checkpoint_relative_path(run_dir, checkpoint_path)
 
+    if args.random_init:
+        random_init = True
+    elif "random_init" in run_args:
+        random_init = bool(run_args["random_init"])
+    elif run_args.get("noisy_init"):
+        random_init = bool(run_args["noisy_init"])
+    elif "empty_init" in run_args:
+        random_init = not bool(run_args["empty_init"])
+    else:
+        random_init = True
+
     def run_eval(inner: int, outer: int, tries: int) -> EpochStats:
-        rollout_config = build_rollout_config(inner_iters=inner, max_outer_iters=outer)
+        rollout_config = build_rollout_config(
+            inner_iters=inner,
+            max_outer_iters=outer,
+            random_init=random_init,
+        )
         return measure_split(
             model,
             test_ds._base_clues,

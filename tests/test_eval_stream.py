@@ -74,7 +74,7 @@ def test_inner_loop_row_outputs_independent_of_batch_size():
     clues = torch.zeros(3, 9, 9, dtype=torch.long)
     clues[:, 0, 0] = torch.tensor([5, 6, 7])
     clue_pin = clues > 0
-    digit_id = _init_digit_id_from_clues(clues, clue_pin, init_seed=0)
+    digit_id = _init_digit_id_from_clues(clues, clue_pin, init_seed=0, random_init=True)
 
     solo_first: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
     for i in range(3):

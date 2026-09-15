@@ -30,7 +30,8 @@ Main training loop. Key flags:
 | `--min-rating` / `--max-rating` | none | Filter by puzzle difficulty |
 | `--seed` | 0 | RNG for augment, subsampling, refill |
 | `--no-augment` | off | Disable training augmentations |
-| `--no-gt-reveal` | off | Clues + random fill only (no partial GT reveal) |
+| `--no-gt-reveal` | off | Clues + empty non-clue cells only (no partial GT reveal) |
+| `--random-init` | off | Fill non-clue cells with random digits 0–9 at seed/refill (default: empty) |
 | `--no-deep-supervision` | off | Final inner step only for loss |
 | `--no-amp` | off | Disable mixed precision on CUDA |
 
@@ -51,7 +52,7 @@ uv run eval runs/<run-id> --max-tries 10   # random restarts until halt
 uv run eval runs/<run-id> --sweep           # inner/outer/tries ablations
 ```
 
-Model and rollout settings default from the checkpoint. Test rating filters are independent of training.
+Model and rollout settings default from the checkpoint (including `--random-init`). Pass `--random-init` to override init mode on test. Test rating filters are independent of training.
 
 ## resume
 

@@ -80,6 +80,7 @@ def build_rollout_config(
     halt_threshold: float = 0.5,
     gt_reveal: bool = True,
     deep_supervision: bool = True,
+    random_init: bool = False,
 ) -> RolloutConfig:
     return RolloutConfig(
         inner_iters=inner_iters,
@@ -87,6 +88,7 @@ def build_rollout_config(
         halt_threshold=halt_threshold,
         gt_reveal=gt_reveal,
         deep_supervision=deep_supervision,
+        random_init=random_init,
     )
 
 
@@ -594,6 +596,7 @@ def train_epoch(
                 generator=refill_generator,
                 dim=model.dim,
                 gt_reveal=rollout_config.gt_reveal,
+                random_init=rollout_config.random_init,
             )
         if profiler is not None:
             profiler.step()
@@ -840,7 +843,12 @@ def build_train_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-gt-reveal",
         action="store_true",
-        help="Disable partial GT reveal at training seed/refill (clues + random non-clue digits only)",
+        help="Disable partial GT reveal at training seed/refill (clues + empty non-clue cells only)",
+    )
+    parser.add_argument(
+        "--random-init",
+        action="store_true",
+        help="Fill non-clue cells with random digits 0-9 at seed/refill (default: empty)",
     )
     parser.add_argument(
         "--no-deep-supervision",
@@ -927,16 +935,19 @@ def train_run(
         )
     gt_reveal = not args.no_gt_reveal
     deep_supervision = not args.no_deep_supervision
+    random_init = args.random_init
     rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.train_max_outer_iters,
         gt_reveal=gt_reveal,
         deep_supervision=deep_supervision,
+        random_init=random_init,
     )
     eval_rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.eval_max_outer_iters,
         gt_reveal=False,
+        random_init=random_init,
     )
     refill_generator = torch.Generator(device="cpu").manual_seed(args.seed)
     manifest = load_manifest(run_dir)
@@ -972,6 +983,7 @@ def train_run(
                 device,
                 generator=refill_generator,
                 gt_reveal=rollout_config.gt_reveal,
+                random_init=rollout_config.random_init,
             )
 
         profiler = None

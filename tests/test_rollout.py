@@ -107,6 +107,7 @@ def test_defaults():
     assert config.max_outer_iters == DEFAULT_MAX_OUTER_ITERS
     assert config.deep_supervision is True
     assert config.gt_reveal is True
+    assert config.random_init is False
 
 
 def test_one_outer_per_step():
@@ -163,8 +164,7 @@ def test_clues_init_without_curriculum():
         generator=gen,
         gt_reveal=False,
     )
-    assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
-    assert not torch.equal(state.digit_id[~state.clue_pin], state.clues[~state.clue_pin])
+    assert torch.equal(state.digit_id, state.clues)
 
 
 def test_halt_target_matches_grid():
@@ -209,7 +209,13 @@ def test_refill_after_done():
     original_digit_id = state.digit_id.clone()
     done = torch.tensor([True])
     refill_done_slots(
-        state, done, dataset, generator=gen, dim=32, gt_reveal=False
+        state,
+        done,
+        dataset,
+        generator=gen,
+        dim=32,
+        gt_reveal=False,
+        random_init=True,
     )
     assert not torch.equal(state.digit_id, original_digit_id)
     assert state.outer_count.item() == 0
@@ -260,9 +266,54 @@ def test_curriculum_init_random_when_no_reveal():
             "rollout.torch.randint",
             return_value=torch.full(clues.shape, 7, dtype=clues.dtype),
         ):
-            digit_id = _gt_reveal_init_digit_id(clues, answer, clue_pin, p_gt=0.0)
+            digit_id = _gt_reveal_init_digit_id(
+                clues, answer, clue_pin, p_gt=0.0, random_init=True
+            )
     assert torch.equal(digit_id[clue_pin], clues[clue_pin])
     assert torch.equal(digit_id[~clue_pin], torch.full_like(clues, 7)[~clue_pin])
+
+
+def test_gt_reveal_empty_init_leaves_unrevealed_cells_empty():
+    clues, answer = _tiny_batch()
+    clue_pin = clues > 0
+    with patch("rollout.torch.rand", return_value=torch.ones(clues.shape)):
+        digit_id = _gt_reveal_init_digit_id(
+            clues, answer, clue_pin, p_gt=0.0, random_init=False
+        )
+    assert torch.equal(digit_id[clue_pin], clues[clue_pin])
+    assert torch.equal(digit_id[~clue_pin], torch.zeros_like(clues)[~clue_pin])
+
+
+def test_gt_reveal_empty_init_still_reveals_gt():
+    clues, answer = _tiny_batch()
+    clue_pin = clues > 0
+    with patch("rollout.torch.rand", return_value=torch.zeros(clues.shape)):
+        digit_id = _gt_reveal_init_digit_id(
+            clues, answer, clue_pin, p_gt=1.0, random_init=False
+        )
+    assert torch.equal(digit_id[~clue_pin], answer[~clue_pin])
+
+
+def test_eval_empty_init_leaves_non_clue_cells_empty():
+    clues, answer = _tiny_batch()
+    model = MixerNextStateModel(dim=32, num_blocks=1)
+    model.eval()
+    clue_pin = clues > 0
+    with patch("rollout._inner_loop") as mock_inner:
+        mock_inner.return_value = (
+            torch.zeros(1, 9, 9, 10),
+            torch.zeros(1),
+            torch.zeros(1, 9, 9, 32),
+        )
+        rollout_eval_batch(
+            model,
+            clues,
+            answer,
+            config=_baseline_config(inner_iters=1, max_outer_iters=1),
+        )
+    call_digit_id = mock_inner.call_args.args[1]
+    assert torch.equal(call_digit_id[clue_pin], clues[clue_pin])
+    assert torch.equal(call_digit_id[~clue_pin], torch.zeros_like(clues)[~clue_pin])
 
 
 def test_curriculum_seed_fills_cells():
@@ -284,9 +335,17 @@ def test_curriculum_refill_fills_cells():
         device=torch.device("cpu"),
         generator=gen,
         gt_reveal=False,
+        random_init=True,
     )
     torch.manual_seed(42)
-    refill_done_slots(state, torch.tensor([True]), dataset, generator=gen, dim=32)
+    refill_done_slots(
+        state,
+        torch.tensor([True]),
+        dataset,
+        generator=gen,
+        dim=32,
+        random_init=True,
+    )
     assert not torch.equal(state.digit_id, state.clues)
     assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
 
@@ -306,7 +365,12 @@ def test_eval_starts_from_random_non_clue():
             "rollout.torch.randint",
             return_value=torch.full(clues.shape, 4, dtype=clues.dtype),
         ):
-            rollout_eval_batch(model, clues, answer, config=_baseline_config(inner_iters=1, max_outer_iters=1))
+            rollout_eval_batch(
+                model,
+                clues,
+                answer,
+                config=_baseline_config(inner_iters=1, max_outer_iters=1, random_init=True),
+            )
     call_digit_id = mock_inner.call_args.args[1]
     assert torch.equal(call_digit_id[clue_pin], clues[clue_pin])
     assert torch.equal(call_digit_id[~clue_pin], torch.full_like(clues, 4)[~clue_pin])
@@ -358,9 +422,11 @@ def test_eval_multi_try_uses_different_init_seeds():
     seeds_seen: list[int | None] = []
     original_init = rollout_module._init_digit_id_from_clues
 
-    def track_init(clues_tensor, clue_pin, *, init_seed=None):
+    def track_init(clues_tensor, clue_pin, *, init_seed=None, random_init=True, **kwargs):
         seeds_seen.append(init_seed)
-        return original_init(clues_tensor, clue_pin, init_seed=init_seed)
+        return original_init(
+            clues_tensor, clue_pin, init_seed=init_seed, random_init=random_init
+        )
 
     with patch.object(rollout_module, "_init_digit_id_from_clues", side_effect=track_init):
         with patch("rollout._predict_halt", return_value=torch.tensor([False])):
@@ -774,8 +840,7 @@ def test_train_seed_without_gt_reveal_keeps_clues_only():
         generator=gen,
         gt_reveal=False,
     )
-    assert torch.equal(state.digit_id[state.clue_pin], state.clues[state.clue_pin])
-    assert not torch.equal(state.digit_id[~state.clue_pin], state.answer[~state.clue_pin])
+    assert torch.equal(state.digit_id, state.clues)
 
 
 def test_mutable_non_clue_cell_overwritable_on_commit():
@@ -1133,7 +1198,9 @@ def test_curriculum_p_gt_one_reveals_all():
 def test_curriculum_p_gt_zero_fills_non_clue_cells():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
-    digit_id = _gt_reveal_init_digit_id(clues, answer, clue_pin, p_gt=0.0)
+    digit_id = _gt_reveal_init_digit_id(
+        clues, answer, clue_pin, p_gt=0.0, random_init=True
+    )
     assert torch.equal(digit_id[clue_pin], clues[clue_pin])
     assert not torch.equal(digit_id[~clue_pin], clues[~clue_pin])
 

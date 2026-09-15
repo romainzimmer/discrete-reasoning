@@ -108,6 +108,7 @@ def test_accumulate_step_uses_pred_with_clue_mask() -> None:
 def test_build_rollout_config_gt_reveal_default() -> None:
     config = build_rollout_config(inner_iters=2, max_outer_iters=3)
     assert config.gt_reveal is True
+    assert config.random_init is False
 
 
 def test_save_epoch_metrics(tmp_path: Path) -> None:

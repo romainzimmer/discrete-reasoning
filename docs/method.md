@@ -21,6 +21,7 @@ Inner update: `z_t = M(P + h_t)` with shared weights across inner steps (equival
 | `λ_h` | Halt loss weight |
 | `N_try` | Max random restarts per puzzle at eval |
 | `p_{gt}` | Per-puzzle GT reveal probability at seed/refill |
+| random init | Optional: fill unrevealed non-clue cells with random digits 0–9 (default: empty) |
 | `g` | Rating group `0…4` (quintile bins on train `rating`; metrics only) |
 
 ## Dataset
@@ -89,11 +90,11 @@ Training slot finishes when **(halt predicted AND grid correct)** OR `T_out_trai
 At slot **seed/refill** (default), sample **`p_{gt} ~ U[0, 1]`** once per puzzle. For each non-clue cell independently:
 
 - with probability `p_{gt}`: initialize to ground truth
-- otherwise: random digit `0…9`
+- otherwise: leave empty (`0`), or a random digit `0…9` when `--random-init` is set
 
-Revealed cells are **not** pinned as clues; loss still requires correct predictions on them. Val/test always start from clues + random non-clue fill (no GT reveal).
+Revealed cells are **not** pinned as clues; loss still requires correct predictions on them. Val/test use the same init mode (empty by default) but **no GT reveal**.
 
-Without GT reveal: clues + random non-clue digits only at seed/refill.
+Without GT reveal: clues plus empty non-clue cells at seed/refill, or random non-clue digits with `--random-init`.
 
 Seed/refill RNG (`p_{gt}` sampling, GT reveal, random digit fill) uses a fixed run seed for reproducibility.
 
@@ -127,7 +128,7 @@ Metrics: cell acc, puzzle acc, halt acc, avg outer steps, halt rate.
 
 ### Random restarts (`N_try`)
 
-Non-clue cells initialized with puzzle-seeded random digits. With `N_try > 1`, rerun full rollout from fresh init until first halt, or keep last attempt after `N_try` tries. Tries do not share memory.
+Non-clue cells start empty by default, or with puzzle-seeded random digits when `--random-init` is set. With `N_try > 1`, rerun full rollout from fresh init until first halt, or keep last attempt after `N_try` tries. Tries do not share memory.
 
 ### Compute sweeps
 
