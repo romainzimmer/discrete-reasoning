@@ -13,6 +13,11 @@ from tqdm import tqdm
 
 from amp import AmpConfig, autocast_context, resolve_amp
 from augment import AugmentConfig
+from curriculum import (
+    CURRICULUM_P_GT_LOGIT_DECAY,
+    CURRICULUM_P_GT_LOGIT_STEP,
+    CurriculumState,
+)
 from rating_groups import NUM_RATING_GROUPS
 from dataset import PuzzleDataset, filter_rows, sample_rows
 from encoding import cell_acc_mask
@@ -79,6 +84,7 @@ def build_rollout_config(
     max_outer_iters: int,
     halt_threshold: float = 0.5,
     gt_reveal: bool = True,
+    random_gt_reveal_p_gt: bool = False,
     deep_supervision: bool = True,
     random_init: bool = False,
 ) -> RolloutConfig:
@@ -87,6 +93,7 @@ def build_rollout_config(
         max_outer_iters=max_outer_iters,
         halt_threshold=halt_threshold,
         gt_reveal=gt_reveal,
+        random_gt_reveal_p_gt=random_gt_reveal_p_gt,
         deep_supervision=deep_supervision,
         random_init=random_init,
     )
@@ -428,6 +435,7 @@ def save_epoch_metrics(
     train: TrainEpochStats,
     val: EpochStats,
     args: argparse.Namespace,
+    curriculum_state: CurriculumState | None = None,
 ) -> None:
     history_path = run_dir / "history.json"
     if history_path.exists():
@@ -457,6 +465,9 @@ def save_epoch_metrics(
         val_acc = val_group_puzzle_accs[group]
         if val_acc is not None:
             epoch_row[f"val_group_{group}_puzzle_acc"] = val_acc
+    if curriculum_state is not None:
+        epoch_row.update(curriculum_state.history_fields())
+        epoch_row["curriculum_p_gt_cap"] = curriculum_state.mean_p_gt_cap()
     history["epochs"].append(epoch_row)
     history["epochs"].sort(key=lambda row: row["epoch"])
     history_path.write_text(json.dumps(history, indent=2))
@@ -477,6 +488,7 @@ def save_checkpoint(
     train: TrainEpochStats,
     val: EpochStats,
     args: argparse.Namespace,
+    curriculum_state: CurriculumState | None = None,
     best_val_cell_acc: float = -1.0,
 ) -> None:
     payload = {
@@ -490,6 +502,10 @@ def save_checkpoint(
         "best_val_cell_acc": best_val_cell_acc,
         "args": vars(args),
     }
+    if curriculum_state is not None:
+        payload["curriculum_p_gt_logits"] = list(curriculum_state.logits)
+        payload["curriculum_p_gt_cap"] = curriculum_state.mean_p_gt_cap()
+        payload.update(curriculum_state.history_fields())
     torch.save(payload, path)
 
 
@@ -516,6 +532,58 @@ def best_val_cell_acc_from_history(run_dir: Path) -> float:
     for row in history.get("epochs", []):
         best = max(best, float(row.get("val_cell_acc", -1.0)))
     return best
+
+
+def _group_puzzle_accs_from_history_row(row: dict) -> list[float | None]:
+    accs: list[float | None] = []
+    for group in range(NUM_RATING_GROUPS):
+        done_key = f"train_group_{group}_puzzles_done"
+        acc_key = f"train_group_{group}_puzzle_acc"
+        if done_key in row and int(row[done_key]) == 0:
+            accs.append(None)
+        elif acc_key in row:
+            accs.append(float(row[acc_key]))
+        else:
+            accs.append(None)
+    return accs
+
+
+def curriculum_logit_step_from_args(args: dict) -> float:
+    return float(args.get("curriculum_logit_step", CURRICULUM_P_GT_LOGIT_STEP))
+
+
+def curriculum_logit_decay_from_args(args: dict) -> float:
+    return float(args.get("curriculum_logit_decay", CURRICULUM_P_GT_LOGIT_DECAY))
+
+
+def curriculum_state_from_history(run_dir: Path) -> CurriculumState:
+    history_path = run_dir / "history.json"
+    if not history_path.exists():
+        return CurriculumState.default()
+    history = json.loads(history_path.read_text())
+    run_args = history.get("args", {})
+    state = CurriculumState.default(
+        logit_step=curriculum_logit_step_from_args(run_args),
+        logit_decay=curriculum_logit_decay_from_args(run_args),
+    )
+    for row in sorted(history.get("epochs", []), key=lambda entry: entry["epoch"]):
+        state.update_from_group_accs(_group_puzzle_accs_from_history_row(row))
+    return state
+
+
+def curriculum_state_for_resume(ckpt: dict, run_dir: Path) -> CurriculumState:
+    run_args = ckpt.get("args", {})
+    logit_step = curriculum_logit_step_from_args(run_args)
+    logit_decay = curriculum_logit_decay_from_args(run_args)
+    if "curriculum_p_gt_logits" in ckpt:
+        logits = [float(v) for v in ckpt["curriculum_p_gt_logits"]]
+        if len(logits) == NUM_RATING_GROUPS:
+            return CurriculumState(
+                logits=logits,
+                logit_step=logit_step,
+                logit_decay=logit_decay,
+            )
+    return curriculum_state_from_history(run_dir)
 
 
 def best_val_cell_acc_for_resume(ckpt: dict, run_dir: Path) -> float:
@@ -554,6 +622,7 @@ def train_epoch(
     batches_per_epoch: int,
     halt_loss_weight: float,
     refill_generator: torch.Generator,
+    gt_reveal_p_gt_caps: torch.Tensor | None = None,
     profiler: TrainProfiler | None = None,
     amp: AmpConfig | None = None,
 ) -> TrainEpochStats:
@@ -596,6 +665,8 @@ def train_epoch(
                 generator=refill_generator,
                 dim=model.dim,
                 gt_reveal=rollout_config.gt_reveal,
+                random_gt_reveal_p_gt=rollout_config.random_gt_reveal_p_gt,
+                gt_reveal_p_gt_caps=gt_reveal_p_gt_caps,
                 random_init=rollout_config.random_init,
             )
         if profiler is not None:
@@ -846,6 +917,26 @@ def build_train_parser() -> argparse.ArgumentParser:
         help="Disable partial GT reveal at training seed/refill (clues + empty non-clue cells only)",
     )
     parser.add_argument(
+        "--no-adaptive-gt-reveal",
+        action="store_true",
+        help=(
+            "Sample p_gt ~ U[0, 1] per puzzle at each seed/refill instead of "
+            "adaptive per-rating-group p_gt cap"
+        ),
+    )
+    parser.add_argument(
+        "--curriculum-logit-step",
+        type=float,
+        default=CURRICULUM_P_GT_LOGIT_STEP,
+        help="Per-epoch logit update scale for adaptive p_gt cap per rating group",
+    )
+    parser.add_argument(
+        "--curriculum-logit-decay",
+        type=float,
+        default=CURRICULUM_P_GT_LOGIT_DECAY,
+        help="Per-epoch multiplicative decay on curriculum logits before the acc update",
+    )
+    parser.add_argument(
         "--random-init",
         action="store_true",
         help="Fill non-clue cells with random digits 0-9 at seed/refill (default: empty)",
@@ -884,7 +975,12 @@ def train_run(
     model: MixerNextStateModel | None = None,
     optimizer: torch.optim.Optimizer | None = None,
     best_val_cell_acc: float = -1.0,
+    initial_curriculum_state: CurriculumState | None = None,
 ) -> None:
+    if args.no_gt_reveal and args.no_adaptive_gt_reveal:
+        raise ValueError(
+            "--no-adaptive-gt-reveal cannot be combined with --no-gt-reveal"
+        )
     if args.seed is not None:
         torch.manual_seed(args.seed)
 
@@ -934,12 +1030,28 @@ def train_run(
             lr=args.lr,
         )
     gt_reveal = not args.no_gt_reveal
+    random_gt_reveal_p_gt = gt_reveal and args.no_adaptive_gt_reveal
+    adaptive_gt_reveal = gt_reveal and not args.no_adaptive_gt_reveal
     deep_supervision = not args.no_deep_supervision
     random_init = args.random_init
+    curriculum_logit_step = getattr(args, "curriculum_logit_step", CURRICULUM_P_GT_LOGIT_STEP)
+    curriculum_logit_decay = getattr(args, "curriculum_logit_decay", CURRICULUM_P_GT_LOGIT_DECAY)
+    curriculum_state: CurriculumState | None = None
+    if adaptive_gt_reveal:
+        if initial_curriculum_state is not None:
+            curriculum_state = initial_curriculum_state
+            curriculum_state.logit_step = curriculum_logit_step
+            curriculum_state.logit_decay = curriculum_logit_decay
+        else:
+            curriculum_state = CurriculumState.default(
+                logit_step=curriculum_logit_step,
+                logit_decay=curriculum_logit_decay,
+            )
     rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.train_max_outer_iters,
         gt_reveal=gt_reveal,
+        random_gt_reveal_p_gt=random_gt_reveal_p_gt,
         deep_supervision=deep_supervision,
         random_init=random_init,
     )
@@ -974,6 +1086,9 @@ def train_run(
                 f"(wait + warmup + active) but --batches-per-epoch is {args.batches_per_epoch}"
             )
 
+    gt_reveal_p_gt_caps = (
+        curriculum_state.p_gt_cap_tensor(device) if adaptive_gt_reveal else None
+    )
     for epoch in range(start_epoch, args.epochs + 1):
         train_ds.set_epoch(epoch)
         if state is None:
@@ -983,6 +1098,8 @@ def train_run(
                 device,
                 generator=refill_generator,
                 gt_reveal=rollout_config.gt_reveal,
+                random_gt_reveal_p_gt=rollout_config.random_gt_reveal_p_gt,
+                gt_reveal_p_gt_caps=gt_reveal_p_gt_caps,
                 random_init=rollout_config.random_init,
             )
 
@@ -1001,9 +1118,13 @@ def train_run(
             batches_per_epoch=args.batches_per_epoch,
             halt_loss_weight=args.halt_loss_weight,
             refill_generator=refill_generator,
+            gt_reveal_p_gt_caps=gt_reveal_p_gt_caps,
             profiler=profiler,
             amp=amp,
         )
+        if adaptive_gt_reveal and curriculum_state is not None:
+            curriculum_state.update_from_group_accs(list(train.group_puzzle_accs))
+            gt_reveal_p_gt_caps = curriculum_state.p_gt_cap_tensor(device)
         val = measure_split(
             model,
             val_ds._base_clues,
@@ -1044,6 +1165,7 @@ def train_run(
             train=train,
             val=val,
             args=args,
+            curriculum_state=curriculum_state,
         )
         new_best = val.cell_acc > best_val_cell_acc
         if new_best:
@@ -1055,6 +1177,7 @@ def train_run(
             "train": train,
             "val": val,
             "args": args,
+            "curriculum_state": curriculum_state,
             "best_val_cell_acc": best_val_cell_acc,
         }
         save_checkpoint(run_dir / "last.pt", **ckpt_kwargs)
@@ -1072,7 +1195,12 @@ def train_run(
             f"{train_msg} val_loss={val.loss:.4f} val_cell_loss={val.cell_loss:.4f} "
             f"val_halt_loss={val.halt_loss:.4f} val_halt_acc={val.halt_acc:.4f} "
             f"val_cell_acc={val.cell_acc:.4f} val_puzzle_acc={val.puzzle_acc:.4f} "
-            f"val_halt_rate={val.halt_rate:.4f} val_steps_per_puzzle={val.avg_steps_per_puzzle:.1f}",
+            f"val_halt_rate={val.halt_rate:.4f} val_steps_per_puzzle={val.avg_steps_per_puzzle:.1f}"
+            + (
+                f" p_gt_cap={curriculum_state.format_p_gt_cap_log()}"
+                if curriculum_state is not None
+                else ""
+            ),
             flush=True,
         )
 
