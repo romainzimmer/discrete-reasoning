@@ -19,6 +19,7 @@ Main training loop. Key flags:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
+| `--lr` | 1e-4 | AdamW learning rate |
 | `--dim` | 256 | Hidden dimension D |
 | `--num-blocks` | 2 | Mixer blocks per inner step |
 | `--inner-iters` | 6 | Inner mixer steps per outer round |

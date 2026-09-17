@@ -845,7 +845,7 @@ def measure_split(
 def build_train_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train rollout sudoku model")
     parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01, help="L2 regularization on weights only (not bias)")
     parser.add_argument("--dim", type=int, default=256, help="Embedding / mixer hidden dimension D")
     parser.add_argument("--num-blocks", type=int, default=2, help="Mixer blocks per inner step (layers in M)")
