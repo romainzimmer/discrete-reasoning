@@ -48,18 +48,22 @@ Each cell gets digit embedding (vocab size 10) + clue-type embedding (clue vs no
 One inner step:
 
 ```
-z_t = M(P + h_t)
+carry ← h_0                                    # raw output from prior step; h_0 at t = 0
+h_in_t ← α_t · h_0 + (1 − α_t) · carry        # pre-forward Halpern blend
+z_t = M(P + h_in_t)
+carry ← LN_m(z_t)                              # raw memory readout; same z_t for all readouts
+α_t = (T_in − 1 − t) / (T_in − 1)             # α_0 = 1, α_{T_in−1} = 0  (T_in = 1: α_0 = 0)
 ```
 
-`M` is `L` pre-norm `MixerBlock` layers: RMSNorm → token-mix `Linear(81, 81)` across cells → channel-mix SwiGLU with hidden width `round(4·D·2/3)` aligned to 256.
+`h_0` is fixed for the outer round (`memory_embed` from the prior commit, or zero / `None` on the first round). `M` is `L` pre-norm `MixerBlock` layers: RMSNorm → token-mix `Linear(81, 81)` across cells → channel-mix SwiGLU with hidden width `round(4·D·2/3)` aligned to 256.
 
-Triple readouts from final `z_t`:
+Triple readouts from each forward (same `z_t`):
 
-- **Memory**: `LN_m(z_t)` reshaped to `(9, 9, D)`, detached, carried to next outer step
+- **Memory carry**: raw `LN_m(z_t)` passed to the next step
 - **Logits**: `Unembed(LN_o(z_t))` over digits `0…9`
 - **Halt**: linear head on mean-pooled `LN_a(z_t)`
 
-Same weights for all `T_in` inner steps; only `h_t` changes within an outer round.
+Same weights for all `T_in` inner steps; input memory is Halpern-blended, outputs are consistent with that forward.
 
 ### Outer commit semantics
 

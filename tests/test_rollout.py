@@ -6,7 +6,8 @@ import pytest
 import torch
 
 from dataset import PuzzleDataset
-from model import MixerNextStateModel
+from memory import inner_halpern_alphas, inner_halpern_input
+from model import MixerNextStateModel, ModelOutput
 from rollout import (
     DEFAULT_INNER_ITERS,
     DEFAULT_MAX_OUTER_ITERS,
@@ -1285,3 +1286,159 @@ def test_build_rollout_config_new_flags():
         deep_supervision=True,
     )
     assert config.deep_supervision is True
+
+
+def test_inner_loop_halpern_carry_sequence():
+    model = MixerNextStateModel(dim=4, num_blocks=1)
+    clues = torch.zeros(1, 9, 9, dtype=torch.long)
+    clue_pin = torch.zeros(1, 9, 9, dtype=torch.bool)
+    anchor = torch.ones(1, 9, 9, 4)
+    n = 3
+    alphas = inner_halpern_alphas(n)
+    base = 10.0
+    seen_inputs: list[torch.Tensor | None] = []
+
+    def fake_forward(self, *, input_embed, cell_embed=None):
+        seen_inputs.append(cell_embed)
+        step = len(seen_inputs) - 1
+        h_new = torch.full((1, 9, 9, self.dim), base + step, device=input_embed.device)
+        return ModelOutput(
+            cell_embed=h_new,
+            logits=torch.zeros(1, 9, 9, 10, device=input_embed.device),
+            halt_logit=torch.zeros(1, device=input_embed.device),
+        )
+
+    with patch.object(MixerNextStateModel, "forward", fake_forward):
+        *_, final_carry = _inner_loop(
+            model, clues, clue_pin, n, memory_embed=anchor, with_grad=False
+        )
+
+    assert torch.equal(seen_inputs[0], anchor)
+    carry: torch.Tensor | None = anchor
+    for t in range(n):
+        h_new = torch.full((1, 9, 9, 4), base + t)
+        carry = h_new
+        if t + 1 < n:
+            expected_in = inner_halpern_input(
+                anchor=anchor,
+                carry=carry,
+                alpha=alphas[t + 1],
+            )
+            assert torch.allclose(seen_inputs[t + 1], expected_in)
+    assert torch.allclose(final_carry, carry)
+
+
+def test_inner_loop_halpern_zero_anchor():
+    model = MixerNextStateModel(dim=4, num_blocks=1)
+    clues = torch.zeros(1, 9, 9, dtype=torch.long)
+    clue_pin = torch.zeros(1, 9, 9, dtype=torch.bool)
+    n = 6
+    h_new = torch.full((1, 9, 9, 4), 3.0)
+    seen: list[torch.Tensor | None] = []
+
+    def fake_forward(self, *, input_embed, cell_embed=None):
+        seen.append(cell_embed)
+        return ModelOutput(
+            cell_embed=h_new,
+            logits=torch.zeros(1, 9, 9, 10, device=input_embed.device),
+            halt_logit=torch.zeros(1, device=input_embed.device),
+        )
+
+    with patch.object(MixerNextStateModel, "forward", fake_forward):
+        *_, carry = _inner_loop(model, clues, clue_pin, n, memory_embed=None, with_grad=False)
+
+    assert seen[0] is None
+    assert torch.allclose(seen[1], h_new * (1.0 - inner_halpern_alphas(n)[1]))
+    assert torch.equal(carry, h_new)
+
+
+def test_inner_loop_halpern_mixed_anchor_batch():
+    model = MixerNextStateModel(dim=4, num_blocks=1)
+    clues = torch.zeros(2, 9, 9, dtype=torch.long)
+    clue_pin = torch.zeros(2, 9, 9, dtype=torch.bool)
+    anchor = torch.stack(
+        [
+            torch.ones(9, 9, 4),
+            torch.zeros(9, 9, 4),
+        ]
+    )
+    n = 3
+    alpha = inner_halpern_alphas(n)[1]
+    h_new = torch.stack(
+        [
+            torch.full((9, 9, 4), 2.0),
+            torch.full((9, 9, 4), 4.0),
+        ]
+    )
+    seen: list[torch.Tensor | None] = []
+
+    def fake_forward(self, *, input_embed, cell_embed=None):
+        seen.append(cell_embed)
+        return ModelOutput(
+            cell_embed=h_new,
+            logits=torch.zeros(2, 9, 9, 10, device=input_embed.device),
+            halt_logit=torch.zeros(2, device=input_embed.device),
+        )
+
+    with patch.object(MixerNextStateModel, "forward", fake_forward):
+        *_, carry = _inner_loop(model, clues, clue_pin, n, memory_embed=anchor, with_grad=False)
+
+    expected_row0 = alpha * 1.0 + (1.0 - alpha) * 2.0
+    expected_row1 = (1.0 - alpha) * 4.0
+    assert torch.allclose(seen[1][0], torch.full((9, 9, 4), expected_row0))
+    assert torch.allclose(seen[1][1], torch.full((9, 9, 4), expected_row1))
+    assert not torch.allclose(seen[1][0], seen[1][1])
+    assert torch.equal(carry, h_new)
+
+
+def test_inner_loop_halpern_t_in_1():
+    model = MixerNextStateModel(dim=4, num_blocks=1)
+    clues = torch.zeros(1, 9, 9, dtype=torch.long)
+    clue_pin = torch.zeros(1, 9, 9, dtype=torch.bool)
+    anchor = torch.full((1, 9, 9, 4), 7.0)
+    h_new = torch.full((1, 9, 9, 4), 11.0)
+    seen: list[torch.Tensor | None] = []
+
+    def fake_forward(self, *, input_embed, cell_embed=None):
+        seen.append(cell_embed)
+        return ModelOutput(
+            cell_embed=h_new,
+            logits=torch.zeros(1, 9, 9, 10, device=input_embed.device),
+            halt_logit=torch.zeros(1, device=input_embed.device),
+        )
+
+    with patch.object(MixerNextStateModel, "forward", fake_forward):
+        *_, carry = _inner_loop(model, clues, clue_pin, 1, memory_embed=anchor, with_grad=False)
+
+    assert torch.equal(seen[0], anchor)
+    assert torch.equal(carry, h_new)
+
+
+def test_inner_loop_halpern_t_in_2():
+    model = MixerNextStateModel(dim=4, num_blocks=1)
+    clues = torch.zeros(1, 9, 9, dtype=torch.long)
+    clue_pin = torch.zeros(1, 9, 9, dtype=torch.bool)
+    anchor = torch.ones(1, 9, 9, 4)
+    outputs = [
+        torch.full((1, 9, 9, 4), 2.0),
+        torch.full((1, 9, 9, 4), 5.0),
+    ]
+    step = {"i": 0}
+    seen: list[torch.Tensor | None] = []
+
+    def fake_forward(self, *, input_embed, cell_embed=None):
+        seen.append(cell_embed)
+        h_new = outputs[step["i"]]
+        step["i"] += 1
+        return ModelOutput(
+            cell_embed=h_new,
+            logits=torch.zeros(1, 9, 9, 10, device=input_embed.device),
+            halt_logit=torch.zeros(1, device=input_embed.device),
+        )
+
+    with patch.object(MixerNextStateModel, "forward", fake_forward):
+        *_, carry = _inner_loop(model, clues, clue_pin, 2, memory_embed=anchor, with_grad=False)
+
+    assert torch.equal(seen[0], anchor)
+    assert torch.equal(seen[1], outputs[0])
+    assert torch.equal(carry, outputs[1])
