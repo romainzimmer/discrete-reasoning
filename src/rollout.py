@@ -9,7 +9,7 @@ from curriculum import CurriculumState
 from data import tensor_to_string
 from dataset import PuzzleDataset
 from amp import LOSS_DTYPE, to_loss_dtype
-from memory import inner_halpern_alphas, inner_halpern_input, memory_init, zero_memory
+from memory import inner_step_input, memory_init, zero_memory
 from encoding import decode_logits, target_mask
 from model import MixerNextStateModel
 
@@ -468,18 +468,14 @@ def _inner_loop(
     | tuple[list[tuple[torch.Tensor, torch.Tensor]], torch.Tensor]
 ):
     input_embed = model.encode_input(digit_id, clue_pin)
-    anchor = memory_embed
-    carry: torch.Tensor | None = anchor
-    alphas = inner_halpern_alphas(inner_iters)
+    memory = memory_embed
+    last_output: torch.Tensor | None = None
+    carry: torch.Tensor | None = None
     logits: torch.Tensor | None = None
     halt_logit: torch.Tensor | None = None
     step_outputs: list[tuple[torch.Tensor, torch.Tensor]] | None = [] if collect_steps else None
-    for t in range(inner_iters):
-        model_input = inner_halpern_input(
-            anchor=anchor,
-            carry=carry,
-            alpha=alphas[t],
-        )
+    for _ in range(inner_iters):
+        model_input = inner_step_input(memory=memory, last_output=last_output)
         if with_grad:
             out = model(
                 input_embed=input_embed,
@@ -493,6 +489,7 @@ def _inner_loop(
                 )
         logits = out.logits
         halt_logit = out.halt_logit
+        last_output = out.cell_embed
         carry = out.cell_embed
         if step_outputs is not None:
             step_outputs.append((logits, halt_logit))
