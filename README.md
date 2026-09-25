@@ -1,6 +1,6 @@
 # Discrete Reasoning
 
-**Looped MLP-Mixer** sudoku solver with an outer commit loop, inner mixer iterations, and a learned halt head, trained from scratch on [sapientinc/sudoku-extreme](https://huggingface.co/datasets/sapientinc/sudoku-extreme).
+**Looped MLP-Mixer** sudoku solver with an outer commit loop and inner mixer iterations, trained from scratch on [sapientinc/sudoku-extreme](https://huggingface.co/datasets/sapientinc/sudoku-extreme). Eval and training stopping use commit-stability (unchanged post-commit grid for N outer steps).
 
 <img src="docs/assets/trajectory.gif" width="360" alt="Sudoku solve trajectory">
 
@@ -29,7 +29,7 @@ Open [http://localhost:8000/viz/](http://localhost:8000/viz/). Serve from the **
 
 [docs/method.md](docs/method.md)
 
-Shared MLP-Mixer stack reused across an outer commit loop: each outer step applies the previous prediction, runs inner mixer iterations on encoded grid state, and updates detached cell memory. A halt head learns when the grid matches the solution. Training uses parallel puzzle slots with optional augmentations and adaptive partial ground-truth reveal per difficulty quintile.
+Shared MLP-Mixer stack reused across an outer commit loop: each outer step applies the previous prediction, runs inner mixer iterations on encoded grid state, and updates detached cell memory. Training uses parallel puzzle slots with optional augmentations and adaptive partial ground-truth reveal per difficulty quintile.
 
 ## CLI
 
@@ -43,13 +43,13 @@ Entry points: `download-dataset`, `train`, `eval`, `resume`. Eval supports test-
 
 Each run writes `history.json`, checkpoints, and per-puzzle trajectory JSON under `runs/<run-id>/`. The viz page charts train/val metrics and plays back outer-commit trajectories.
 
-Train and validation metrics per epoch: loss, cell/puzzle accuracy, halt rate, adaptive curriculum `p_gt` cap by rating group, and accuracy by rating group.
+Train and validation metrics per epoch: loss, cell/puzzle accuracy, stable halt rate, adaptive curriculum `p_gt` cap by rating group, and accuracy by rating group.
 
 <p align="center">
   <img src="docs/assets/charts-viz.png" width="560" alt="Training metrics">
 </p>
 
-Trajectory player for one puzzle: model input and output at each outer commit until halt or max steps.
+Trajectory player for one puzzle: model input and output at each outer commit until stable halt or max steps.
 
 <p align="center">
   <img src="docs/assets/trajectory-viz.png" width="560" alt="Trajectory player">

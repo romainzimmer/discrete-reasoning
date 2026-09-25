@@ -329,15 +329,6 @@
       </div>
     </div>
     <div class="chart">
-      <div class="chart-title">Halt loss</div>
-      <canvas id="haltLossChart"></canvas>
-      <div class="axis-x-label">epoch</div>
-      <div class="legend">
-        <div class="legend-item"><span class="dot" style="background:#2563eb"></span> train</div>
-        <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
-      </div>
-    </div>
-    <div class="chart">
       <div class="chart-title">Cell accuracy</div>
       <canvas id="cellAccChart"></canvas>
       <div class="axis-x-label">epoch</div>
@@ -354,15 +345,7 @@
       </div>
     </div>
     <div class="chart">
-      <div class="chart-title">Halt accuracy</div>
-      <canvas id="haltAccChart"></canvas>
-      <div class="axis-x-label">epoch</div>
-      <div class="legend" id="haltAccLegend">
-        <div class="legend-item"><span class="dot" style="background:#dc2626"></span> validation</div>
-      </div>
-    </div>
-    <div class="chart">
-      <div class="chart-title">Halt rate</div>
+      <div class="chart-title">Stable halt rate</div>
       <canvas id="haltRateChart"></canvas>
       <div class="axis-x-label">epoch</div>
       <div class="legend" id="haltRateLegend">
@@ -555,7 +538,7 @@
       "inner_iters",
       "train_max_outer_iters",
       "eval_max_outer_iters",
-      "halt_loss_weight",
+      "halt_after_stable_outer_steps",
       "no_gt_reveal",
       "no_adaptive_gt_reveal",
       "curriculum_logit_step",
@@ -591,6 +574,7 @@
       "inner_iters",
       "max_outer_iters",
       "max_tries",
+      "halt_after_stable_outer_steps",
       "batch_size",
       "seed",
     ];
@@ -598,13 +582,11 @@
     const EVAL_RESULT_KEYS = new Set([
       "loss",
       "cell_loss",
-      "halt_loss",
       "cell_acc",
       "puzzle_acc",
-      "halt_acc",
       "avg_outer_iters",
       "avg_steps_per_puzzle",
-      "halt_rate",
+      "stable_halt_rate",
       "avg_tries",
     ]);
 
@@ -983,10 +965,6 @@
         xLabels,
         formatY: lossFormatY,
       });
-      drawSeries(document.getElementById("haltLossChart"), metricSeries(epochs, "train_halt_loss", "val_halt_loss"), {
-        xLabels,
-        formatY: lossFormatY,
-      });
       drawSeries(document.getElementById("cellAccChart"), accMetricSeries(epochs, "cell_acc"), {
         yMin: 0,
         yMax: 1,
@@ -999,8 +977,7 @@
         xLabels,
         formatY: pct,
       });
-      renderPctChart("haltAccChart", "haltAccLegend", epochs, "halt_acc");
-      renderPctChart("haltRateChart", "haltRateLegend", epochs, "halt_rate");
+      renderPctChart("haltRateChart", "haltRateLegend", epochs, "stable_halt_rate");
       drawSeries(document.getElementById("avgOuterItersChart"), accMetricSeries(epochs, "avg_outer_iters"), {
         yMin: 0,
         xLabels,
@@ -1059,7 +1036,7 @@
 
     function formatTestStatValue(key, value) {
       if (value == null) return "—";
-      if (key.endsWith("_acc") || key === "halt_rate") return formatPct(value);
+      if (key.endsWith("_acc") || key === "stable_halt_rate") return formatPct(value);
       if (typeof value === "number") {
         if (Number.isInteger(value)) return String(value);
         return Number(value).toFixed(4);
@@ -1130,8 +1107,7 @@
       const stats = [
         ["puzzle_acc", "Puzzle accuracy"],
         ["cell_acc", "Cell accuracy"],
-        ["halt_acc", "Halt accuracy"],
-        ["halt_rate", "Halt rate"],
+        ["stable_halt_rate", "Stable halt rate"],
         ["avg_outer_iters", "Avg outer iters"],
         ["avg_steps_per_puzzle", "Avg outer steps per puzzle"],
         ["avg_tries", "Avg tries"],
@@ -1280,7 +1256,8 @@
       const meta = trajectory.meta || {};
       const outerSteps = meta.outer_steps ?? frameCount;
       const maxOuter = meta.max_outer_iters ?? metrics?.args?.eval_max_outer_iters ?? "?";
-      const stopLabel = meta.halted === true ? "halt" : meta.halted === false ? "max" : null;
+      const stopLabel = meta.halted === true ? "stable" : meta.halted === false ? "max" : null;
+      const stableThreshold = meta.halt_after_stable_outer_steps;
 
       metaEl.textContent = [
         meta.rating !== undefined ? `rating ${meta.rating}` : null,
@@ -1288,6 +1265,7 @@
         stopLabel
           ? `outer steps ${outerSteps} / ${maxOuter} (${stopLabel})`
           : `outer steps ${outerSteps} / ${maxOuter}`,
+        stableThreshold != null ? `stable threshold ${stableThreshold}` : null,
       ].filter(Boolean).join(" · ");
 
       slider.max = frameCount - 1;

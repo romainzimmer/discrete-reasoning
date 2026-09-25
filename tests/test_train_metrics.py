@@ -52,8 +52,6 @@ def test_accumulate_step_metrics_from_training_logits() -> None:
         pred=pred,
         done=torch.tensor([True]),
         halted=torch.tensor([False]),
-        halt_target=torch.tensor([0.0]),
-        halt_logit=torch.tensor([0.0]),
     )
     clues = torch.zeros(9, 9, dtype=torch.long)
     clues[0, 0] = 5
@@ -97,8 +95,6 @@ def test_accumulate_step_uses_pred_with_clue_mask() -> None:
         pred=pred,
         done=torch.tensor([True]),
         halted=torch.tensor([False]),
-        halt_target=torch.tensor([0.0]),
-        halt_logit=torch.tensor([0.0]),
     )
     state = BatchSlotState(
         digit_id=clues_b,
@@ -183,8 +179,8 @@ def test_save_epoch_metrics_includes_train_acc(tmp_path: Path) -> None:
     save_epoch_metrics(
         run_dir,
         epoch=1,
-        train=TrainEpochStats(loss=1.25, cell_acc=0.9, puzzle_acc=0.4, halt_acc=0.5),
-        val=EpochStats(loss=2.0, cell_acc=0.5, puzzle_acc=0.1, halt_acc=0.6),
+        train=TrainEpochStats(loss=1.25, cell_acc=0.9, puzzle_acc=0.4, stable_halt_rate=0.5),
+        val=EpochStats(loss=2.0, cell_acc=0.5, puzzle_acc=0.1, stable_halt_rate=0.6),
         args=args,
         curriculum_state=CurriculumState(
             logits=[curriculum_p_gt_cap_logit_from_cap(0.55)] * 5

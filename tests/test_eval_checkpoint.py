@@ -61,7 +61,7 @@ def test_load_run_args_from_history_for_epoch_checkpoint(tmp_path: Path) -> None
             eval_max_outer_iters=10,
             train_batch_size=8,
             batches_per_epoch=10,
-            halt_loss_weight=1.0,
+            halt_after_stable_outer_steps=3,
             num_workers=0,
             min_rating=0,
             max_rating=0,
@@ -102,6 +102,7 @@ def test_save_test_metrics_logs_run_and_checkpoint(tmp_path: Path) -> None:
         inner_iters=3,
         max_outer_iters=30,
         max_tries=1,
+        halt_after_stable_outer_steps=3,
         batch_size=8,
         seed=0,
     )

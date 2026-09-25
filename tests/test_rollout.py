@@ -7,6 +7,8 @@ import torch
 
 from dataset import PuzzleDataset
 from model import MixerNextStateModel
+from rollout_test_helpers import patch_implicit_halt_responses
+
 from rollout import (
     DEFAULT_INNER_ITERS,
     DEFAULT_MAX_OUTER_ITERS,
@@ -15,16 +17,14 @@ from rollout import (
     _OnceEvalState,
     _copy_once_state,
     _compute_cell_loss,
-    _compute_deep_supervision_losses,
-    _compute_halt_loss,
-    _compute_losses,
-    _halt_target,
+    _compute_deep_supervision_cell_losses,
+    _grid_solved,
+    _update_commit_stability,
     _gt_reveal_init_digit_id,
     _gt_reveal_p_gt_for_slots,
     _sample_uniform_p_gt,
     _sample_uniform_p_gt_up_to,
     _inner_loop,
-    _predict_halt,
     predict_grid,
     refill_done_slots,
     rollout_eval_batch,
@@ -45,10 +45,9 @@ def _baseline_config(**kwargs) -> RolloutConfig:
 
 def _deep_supervision_inner_return(
     logits: torch.Tensor,
-    halt_logit: torch.Tensor,
     cell_embed: torch.Tensor,
-) -> tuple[list[tuple[torch.Tensor, torch.Tensor]], torch.Tensor]:
-    return ([(logits, halt_logit)], cell_embed)
+) -> tuple[list[torch.Tensor], torch.Tensor]:
+    return ([logits], cell_embed)
 
 
 def _tiny_batch():
@@ -103,6 +102,8 @@ def test_rollout_config_validation():
         RolloutConfig(max_outer_iters=0)
     with pytest.raises(ValueError, match="random_gt_reveal_p_gt requires gt_reveal"):
         RolloutConfig(gt_reveal=False, random_gt_reveal_p_gt=True)
+    with pytest.raises(ValueError, match="halt_after_stable_outer_steps"):
+        RolloutConfig(halt_after_stable_outer_steps=1)
 
 
 def test_defaults():
@@ -120,7 +121,7 @@ def test_one_outer_per_step():
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
-    config = _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    config = _baseline_config(inner_iters=2, max_outer_iters=10)
     count_before = state.outer_count.item()
     rollout_train_step(model, state, config)
     assert state.outer_count.item() == count_before + 1
@@ -131,7 +132,7 @@ def test_state_persists_across_steps():
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
-    config = _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    config = _baseline_config(inner_iters=2, max_outer_iters=10)
     digit_before = state.digit_id.clone()
     rollout_train_step(model, state, config)
     rollout_train_step(model, state, config)
@@ -144,7 +145,7 @@ def test_state_persists_across_epochs():
     gen = torch.Generator().manual_seed(0)
     state = BatchSlotState.seed(
         dataset, batch_size=1, device=torch.device("cpu"), generator=gen)
-    config = _baseline_config(inner_iters=2, max_outer_iters=100, halt_threshold=1.1)
+    config = _baseline_config(inner_iters=2, max_outer_iters=100)
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     rollout_train_step(model, state, config)
@@ -172,35 +173,40 @@ def test_clues_init_without_curriculum():
     assert torch.equal(state.digit_id, state.clues)
 
 
-def test_halt_target_matches_grid():
+def test_grid_solved_matches_grid():
     clues, answer = _tiny_batch()
     logits = torch.zeros(1, 9, 9, 10)
     pre_commit = predict_grid(logits, clues)
-    target = _halt_target(pre_commit, answer)
-    assert target.item() == float((pre_commit == answer).all())
+    assert _grid_solved(pre_commit, answer).item() == (pre_commit == answer).all().item()
 
 
-def test_oracle_halt_model_continues():
+def test_stable_without_solved_continues():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
     config = _baseline_config(inner_iters=2, max_outer_iters=10)
-    with patch("rollout._predict_halt", return_value=torch.zeros(1, dtype=torch.bool)):
-        with patch("rollout._halt_target", return_value=torch.ones(1)):
+    with patch(
+        "rollout._update_commit_stability",
+        side_effect=patch_implicit_halt_responses([torch.tensor([True])]),
+    ):
+        with patch("rollout._grid_solved", return_value=torch.zeros(1, dtype=torch.bool)):
             result = rollout_train_step(model, state, config)
             assert result.done is not None
             assert not result.done.any()
 
 
-def test_wrong_predict_halt_does_not_finish():
+def test_stable_wrong_grid_does_not_finish():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
     config = _baseline_config(inner_iters=2, max_outer_iters=10)
-    with patch("rollout._predict_halt", return_value=torch.ones(1, dtype=torch.bool)):
-        with patch("rollout._halt_target", return_value=torch.zeros(1)):
+    with patch(
+        "rollout._update_commit_stability",
+        side_effect=patch_implicit_halt_responses([torch.tensor([True])]),
+    ):
+        with patch("rollout._grid_solved", return_value=torch.zeros(1, dtype=torch.bool)):
             result = rollout_train_step(model, state, config)
             assert result.done is not None
             assert not result.done.any()
@@ -234,7 +240,7 @@ def test_max_outer_forces_refill():
     state = BatchSlotState.seed(
         dataset, batch_size=1, device=torch.device("cpu"), generator=gen)
     state.outer_count[0] = 9
-    config = _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    config = _baseline_config(inner_iters=2, max_outer_iters=10)
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     result = rollout_train_step(model, state, config)
@@ -307,7 +313,6 @@ def test_eval_empty_init_leaves_non_clue_cells_empty():
     with patch("rollout._inner_loop") as mock_inner:
         mock_inner.return_value = (
             torch.zeros(1, 9, 9, 10),
-            torch.zeros(1),
             torch.zeros(1, 9, 9, 32),
         )
         rollout_eval_batch(
@@ -361,16 +366,15 @@ def test_eval_starts_from_random_non_clue():
     model.eval()
     clue_pin = clues > 0
     with patch("rollout._inner_loop") as mock_inner:
-        mock_inner.return_value = (
-            torch.zeros(1, 9, 9, 10),
-            torch.zeros(1),
-            torch.zeros(1, 9, 9, 32),
-        )
-        with patch(
-            "rollout.torch.randint",
-            return_value=torch.full(clues.shape, 4, dtype=clues.dtype),
-        ):
-            rollout_eval_batch(
+            mock_inner.return_value = (
+                torch.zeros(1, 9, 9, 10),
+                torch.zeros(1, 9, 9, 32),
+            )
+            with patch(
+                "rollout.torch.randint",
+                return_value=torch.full(clues.shape, 4, dtype=clues.dtype),
+            ):
+                rollout_eval_batch(
                 model,
                 clues,
                 answer,
@@ -385,8 +389,13 @@ def test_halt_stops_eval_early():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _tiny_batch()
-    config = _baseline_config(inner_iters=2, max_outer_iters=100, halt_threshold=0.5)
-    with patch("rollout._predict_halt", side_effect=[torch.tensor([False]), torch.tensor([True])]):
+    config = _baseline_config(inner_iters=2, max_outer_iters=100)
+    with patch(
+        "rollout._update_commit_stability",
+        side_effect=patch_implicit_halt_responses(
+            [torch.tensor([False]), torch.tensor([True])]
+        ),
+    ):
         result = rollout_eval_batch(model, clues, answer, config=config)
     assert result.outer_steps.item() == 2
 
@@ -395,10 +404,12 @@ def test_eval_multi_try_stops_at_first_halt():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _tiny_batch()
-    config = _baseline_config(inner_iters=1, max_outer_iters=1, halt_threshold=0.5)
+    config = _baseline_config(inner_iters=1, max_outer_iters=1)
     with patch(
-        "rollout._predict_halt",
-        side_effect=[torch.tensor([False]), torch.tensor([True])],
+        "rollout._update_commit_stability",
+        side_effect=patch_implicit_halt_responses(
+            [torch.tensor([False]), torch.tensor([True])]
+        ),
     ):
         result = rollout_eval_batch(model, clues, answer, config=config, max_tries=3, init_seed=0)
     assert result.tries.item() == 2
@@ -409,8 +420,11 @@ def test_eval_multi_try_keeps_last_try_without_halt():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _tiny_batch()
-    config = _baseline_config(inner_iters=1, max_outer_iters=2, halt_threshold=0.5)
-    with patch("rollout._predict_halt", return_value=torch.tensor([False])):
+    config = _baseline_config(inner_iters=1, max_outer_iters=2)
+    with patch(
+        "rollout._update_commit_stability",
+        side_effect=patch_implicit_halt_responses([torch.tensor([False])]),
+    ):
         result = rollout_eval_batch(model, clues, answer, config=config, max_tries=3, init_seed=0)
     assert result.tries.item() == 3
     assert result.halted.item() is False
@@ -434,7 +448,10 @@ def test_eval_multi_try_uses_different_init_seeds():
         )
 
     with patch.object(rollout_module, "_init_digit_id_from_clues", side_effect=track_init):
-        with patch("rollout._predict_halt", return_value=torch.tensor([False])):
+        with patch(
+            "rollout._update_commit_stability",
+            side_effect=patch_implicit_halt_responses([torch.tensor([False])]),
+        ):
             rollout_eval_batch(model, clues, answer, config=config, max_tries=2, init_seed=7)
     assert seeds_seen == [7, 8]
 
@@ -445,18 +462,12 @@ def test_copy_once_state_scatters_partial_accept():
         outer_steps=torch.zeros(2, dtype=torch.long),
         halted=torch.zeros(2, dtype=torch.bool),
         final_logits=torch.zeros(2, 9, 9, 10),
-        final_halt_logit=torch.zeros(2),
-        halt_correct_by_puzzle=torch.zeros(2, dtype=torch.long),
-        halt_total_by_puzzle=torch.zeros(2, dtype=torch.long),
     )
     sub = _OnceEvalState(
         pred=torch.stack([torch.full((9, 9), 1, dtype=torch.long), torch.full((9, 9), 2, dtype=torch.long)]),
         outer_steps=torch.tensor([10, 20]),
         halted=torch.tensor([True, False]),
         final_logits=torch.zeros(2, 9, 9, 10),
-        final_halt_logit=torch.zeros(2),
-        halt_correct_by_puzzle=torch.tensor([3, 7]),
-        halt_total_by_puzzle=torch.tensor([4, 8]),
     )
     _copy_once_state(
         out,
@@ -466,7 +477,6 @@ def test_copy_once_state_scatters_partial_accept():
     )
     assert out.halted.tolist() == [True, False]
     assert out.outer_steps.tolist() == [10, 0]
-    assert out.halt_correct_by_puzzle.tolist() == [3, 0]
     assert out.pred[0, 0, 0].item() == 1
     assert out.pred[1, 0, 0].item() == 0
 
@@ -495,8 +505,8 @@ def test_eval_batch_casts_autocast_logits_to_float32():
     original_inner = rollout_module._inner_loop
 
     def bf16_inner(*args, **kwargs):
-        logits, halt_logit, cell_embed = original_inner(*args, **kwargs)
-        return logits.to(torch.bfloat16), halt_logit.to(torch.bfloat16), cell_embed
+        logits, cell_embed = original_inner(*args, **kwargs)
+        return logits.to(torch.bfloat16), cell_embed
 
     with patch.object(rollout_module, "_inner_loop", bf16_inner):
         result = rollout_eval_batch(model, clues, answer, config=config)
@@ -510,30 +520,22 @@ def test_train_step_loss_is_float32_under_autocast_logits():
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
-    config = _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    config = _baseline_config(inner_iters=2, max_outer_iters=10)
     original_inner = rollout_module._inner_loop
 
     def bf16_inner(*args, **kwargs):
         out = original_inner(*args, **kwargs)
         if isinstance(out[0], list):
             step_outputs, cell_embed = out
-            return (
-                [
-                    (logits.to(torch.bfloat16), halt.to(torch.bfloat16))
-                    for logits, halt in step_outputs
-                ],
-                cell_embed,
-            )
-        logits, halt_logit, cell_embed = out
-        return logits.to(torch.bfloat16), halt_logit.to(torch.bfloat16), cell_embed
+            return ([logits.to(torch.bfloat16) for logits in step_outputs], cell_embed)
+        logits, cell_embed = out
+        return logits.to(torch.bfloat16), cell_embed
 
     with patch.object(rollout_module, "_inner_loop", bf16_inner):
         result = rollout_train_step(model, state, config, backward=False)
     assert result.loss.dtype == torch.float32
     assert result.cell_loss is not None
     assert result.cell_loss.dtype == torch.float32
-    assert result.halt_loss is not None
-    assert result.halt_loss.dtype == torch.float32
 
 
 def test_no_grad_across_steps():
@@ -541,7 +543,7 @@ def test_no_grad_across_steps():
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
-    config = _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    config = _baseline_config(inner_iters=2, max_outer_iters=10)
     rollout_train_step(model, state, config)
     assert not state.digit_id.requires_grad
 
@@ -551,7 +553,7 @@ def test_memory_embed_persisted_detached():
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
-    config = _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    config = _baseline_config(inner_iters=2, max_outer_iters=10)
     assert state.memory_embed is None
     rollout_train_step(model, state, config)
     assert state.memory_embed is not None
@@ -609,7 +611,7 @@ def test_inner_loop_grad():
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
-    config = _baseline_config(inner_iters=3, max_outer_iters=10, halt_threshold=1.1)
+    config = _baseline_config(inner_iters=3, max_outer_iters=10)
     result = rollout_train_step(model, state, config)
     assert result.loss.item() > 0
     assert _first_param(model).grad is not None
@@ -673,17 +675,17 @@ def test_predict_grid_gt_unpinned():
     assert pred[0, 0] == 7
 
 
-def test_halt_requires_gt_logits():
+def test_grid_solved_requires_gt_logits():
     clues = torch.zeros(1, 9, 9, dtype=torch.long)
     answer = torch.ones(1, 9, 9, dtype=torch.long)
     logits = torch.zeros(1, 9, 9, 10)
     logits[..., 2] = 10.0
     pred = predict_grid(logits, clues)
-    assert _halt_target(pred, answer).item() == 0.0
+    assert not _grid_solved(pred, answer).item()
     logits = torch.zeros(1, 9, 9, 10)
     logits[..., 1] = 10.0
     pred = predict_grid(logits, clues)
-    assert _halt_target(pred, answer).item() == 1.0
+    assert _grid_solved(pred, answer).item()
 
 
 def test_curriculum_gt_overwritten_after_commit():
@@ -697,7 +699,7 @@ def test_curriculum_gt_overwritten_after_commit():
         logits = torch.zeros(1, 9, 9, 10)
         logits[..., 2] = 10.0
         mock_inner.return_value = _deep_supervision_inner_return(
-            logits, torch.zeros(1), torch.zeros(1, 9, 9, 32)
+            logits, torch.zeros(1, 9, 9, 32)
         )
         rollout_train_step(model, state, _baseline_config(), backward=False)
         rollout_train_step(model, state, _baseline_config(), backward=False)
@@ -716,7 +718,7 @@ def test_gt_cells_in_loss():
     assert loss_wrong.item() > loss_right.item()
 
 
-def test_train_step_wrong_gt_blocks_halt():
+def test_train_step_wrong_gt_not_solved():
     clues, answer = _tiny_batch()
     non_clue = ~(clues > 0)
     state = _make_state(clues, answer)
@@ -727,13 +729,12 @@ def test_train_step_wrong_gt_blocks_halt():
         logits = torch.zeros(1, 9, 9, 10)
         logits[..., 2] = 10.0
         mock_inner.return_value = _deep_supervision_inner_return(
-            logits, torch.zeros(1), torch.zeros(1, 9, 9, 32)
+            logits, torch.zeros(1, 9, 9, 32)
         )
         result = rollout_train_step(model, state, _baseline_config(), backward=False)
-    assert result.halt_target is not None
     assert result.pred is not None
     assert result.cell_loss is not None
-    assert result.halt_target.item() == 0.0
+    assert not result.halted.item()
     assert result.cell_loss.item() > 0.0
     assert torch.equal(state.digit_id[non_clue], answer[non_clue])
     assert not torch.equal(result.pred[non_clue], answer[non_clue])
@@ -896,7 +897,7 @@ def test_mutable_non_clue_cell_overwritable_on_commit():
         logits = torch.zeros(1, 9, 9, 10)
         logits[0, 0, 2, 4] = 10.0
         mock_inner.return_value = _deep_supervision_inner_return(
-            logits, torch.zeros(1), torch.zeros(1, 9, 9, 32)
+            logits, torch.zeros(1, 9, 9, 32)
         )
         rollout_train_step(model, state, _baseline_config(), backward=False)
         rollout_train_step(model, state, _baseline_config(), backward=False)
@@ -1014,20 +1015,21 @@ def test_predict_grid_pins_clues():
     assert pred[2, 2] == 7
 
 
-def test_predict_halt_threshold():
-    halt_logit = torch.tensor([10.0, -10.0])
-    assert torch.equal(_predict_halt(halt_logit, halt_threshold=0.5), torch.tensor([True, False]))
-
-
-def test_eval_halt_acc_counts_all_rounds():
-    model = MixerNextStateModel(dim=32, num_blocks=1)
-    model.eval()
-    clues, answer = _tiny_batch()
-    max_outer = 4
-    config = _baseline_config(inner_iters=2, max_outer_iters=max_outer, halt_threshold=1.1)
-    result = rollout_eval_batch(model, clues, answer, config=config)
-    assert result.halt_total_rounds == max_outer
-    assert result.outer_steps.item() == max_outer
+def test_update_commit_stability_implicit_halt_at_n():
+    clues, _ = _tiny_batch()
+    pre = clues.clone()
+    prior = clues.new_zeros((1, 9, 9))
+    streak = torch.zeros(1, dtype=torch.long)
+    prior, streak, implicit = _update_commit_stability(
+        pre, prior, streak, halt_after_stable_outer_steps=2
+    )
+    assert streak.item() == 1
+    assert not implicit.item()
+    prior, streak, implicit = _update_commit_stability(
+        pre, prior, streak, halt_after_stable_outer_steps=2
+    )
+    assert streak.item() == 2
+    assert implicit.item()
 
 
 def test_trace_includes_halt_metadata():
@@ -1039,8 +1041,6 @@ def test_trace_includes_halt_metadata():
     assert len(trace.predictions) == trace.outer_steps
     assert len(trace.inputs) == len(trace.predictions)
     assert isinstance(trace.halted, bool)
-    halt_logit = torch.tensor([10.0, -10.0])
-    assert torch.equal(_predict_halt(halt_logit, halt_threshold=0.5), torch.tensor([True, False]))
 
 
 def test_build_rollout_config():
@@ -1074,7 +1074,7 @@ def test_train_metrics_done_only_puzzle_acc():
     result = rollout_train_step(
         model,
         state,
-        _baseline_config(inner_iters=2, max_outer_iters=10, halt_threshold=1.1),
+        _baseline_config(inner_iters=2, max_outer_iters=10),
     )
     result.done = torch.tensor([False])
     acc = TrainMetricsAccumulator.empty(torch.device("cpu"))
@@ -1090,7 +1090,7 @@ def test_eval_rollout_reaches_max_outer_iters():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _tiny_batch()
-    config = _baseline_config(inner_iters=2, max_outer_iters=3, halt_threshold=1.1)
+    config = _baseline_config(inner_iters=2, max_outer_iters=3)
     result = rollout_eval_batch(model, clues, answer, config=config)
     assert result.outer_steps.item() == 3
 
@@ -1103,13 +1103,13 @@ def test_train_step_stores_memory_embed():
         device=torch.device("cpu"),
         generator=torch.Generator().manual_seed(0),
     )
-    config = RolloutConfig(inner_iters=2, max_outer_iters=10, halt_threshold=1.1)
+    config = RolloutConfig(inner_iters=2, max_outer_iters=10)
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     with patch("rollout._inner_loop") as mock_inner:
         final_cell = torch.randn(1, 9, 9, 32)
         mock_inner.return_value = _deep_supervision_inner_return(
-            torch.zeros(1, 9, 9, 10), torch.zeros(1), final_cell
+            torch.zeros(1, 9, 9, 10), final_cell
         )
         rollout_train_step(model, state, config, backward=False)
     assert state.memory_embed is not None
@@ -1134,12 +1134,10 @@ def test_deep_supervision_affects_loss():
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
-    config = _baseline_config(inner_iters=3, max_outer_iters=10, halt_threshold=1.1, deep_supervision=True)
+    config = _baseline_config(inner_iters=3, max_outer_iters=10, deep_supervision=True)
     with patch("rollout._compute_cell_loss", wraps=_compute_cell_loss) as mock_cell:
-        with patch("rollout._compute_halt_loss", wraps=_compute_halt_loss) as mock_halt:
-            rollout_train_step(model, state, config, backward=False)
+        rollout_train_step(model, state, config, backward=False)
     assert mock_cell.call_count == 3
-    assert mock_halt.call_count == 3
 
 
 def test_deep_supervision_off_calls_loss_once():
@@ -1148,13 +1146,11 @@ def test_deep_supervision_off_calls_loss_once():
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
     config = _baseline_config(
-        inner_iters=3, max_outer_iters=10, halt_threshold=1.1, deep_supervision=False
+        inner_iters=3, max_outer_iters=10, deep_supervision=False
     )
     with patch("rollout._compute_cell_loss", wraps=_compute_cell_loss) as mock_cell:
-        with patch("rollout._compute_halt_loss", wraps=_compute_halt_loss) as mock_halt:
-            rollout_train_step(model, state, config, backward=False)
+        rollout_train_step(model, state, config, backward=False)
     assert mock_cell.call_count == 1
-    assert mock_halt.call_count == 1
 
 
 def test_deep_supervision_grad_all_steps():
@@ -1162,14 +1158,14 @@ def test_deep_supervision_grad_all_steps():
     model.train()
     clues, answer = _tiny_batch()
     state = _make_state(clues, answer)
-    config = _baseline_config(inner_iters=3, max_outer_iters=10, halt_threshold=1.1, deep_supervision=True)
+    config = _baseline_config(inner_iters=3, max_outer_iters=10, deep_supervision=True)
     result = rollout_train_step(model, state, config)
     assert result.loss.item() > 0
     assert _first_param(model).grad is not None
     assert _first_param(model).grad.abs().sum().item() > 0
 
 
-def test_deep_supervision_losses_synthetic():
+def test_deep_supervision_cell_losses_synthetic():
     clues, answer = _tiny_batch()
     clue_pin = clues > 0
     b = clues.size(0)
@@ -1178,26 +1174,14 @@ def test_deep_supervision_losses_synthetic():
     right_logits = torch.zeros(b, 9, 9, 10)
     right_logits[..., 1] = 10.0
     answer = predict_grid(right_logits, clues)
-    halt_logit = torch.full((b,), 2.0)
-    step_outputs = [(wrong_logits, halt_logit), (right_logits, halt_logit)]
-    _, deep_halt, _ = _compute_deep_supervision_losses(
+    step_outputs = [wrong_logits, right_logits]
+    deep_loss = _compute_deep_supervision_cell_losses(
         step_outputs,
-        clues=clues,
         clue_pin=clue_pin,
         answer=answer,
-        halt_loss_weight=1.0,
     )
-    final_pred = predict_grid(right_logits, clues)
-    final_halt_target = _halt_target(final_pred, answer)
-    _, final_halt, _ = _compute_losses(
-        right_logits,
-        halt_logit,
-        clue_pin=clue_pin,
-        answer=answer,
-        halt_target=final_halt_target,
-        halt_loss_weight=1.0,
-    )
-    assert deep_halt.item() > final_halt.item()
+    final_loss = _compute_cell_loss(right_logits, clue_pin=clue_pin, answer=answer)
+    assert deep_loss.item() > final_loss.item()
 
 
 def test_deep_supervision_regression_single_step():
@@ -1207,10 +1191,10 @@ def test_deep_supervision_regression_single_step():
     state_off = _make_state(clues, answer)
     state_on = _make_state(clues, answer)
     config_off = _baseline_config(
-        inner_iters=1, max_outer_iters=10, halt_threshold=1.1, deep_supervision=False
+        inner_iters=1, max_outer_iters=10, deep_supervision=False
     )
     config_on = _baseline_config(
-        inner_iters=1, max_outer_iters=10, halt_threshold=1.1, deep_supervision=True
+        inner_iters=1, max_outer_iters=10, deep_supervision=True
     )
     torch.manual_seed(0)
     result_off = rollout_train_step(model, state_off, config_off, backward=False)

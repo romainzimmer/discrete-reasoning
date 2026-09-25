@@ -19,21 +19,15 @@ def test_eval_metrics_accumulator():
         halted=torch.tensor([True, False]),
         loss=torch.tensor(1.5),
         cell_loss=torch.tensor(1.4),
-        halt_loss=torch.tensor(0.1),
-        halt_target=torch.zeros(2),
-        halt_logit=torch.zeros(2),
-        halt_correct_rounds=3,
-        halt_total_rounds=10,
         tries=torch.tensor([2, 3]),
     )
     acc.add_batch(result, answer, clues)
     stats = acc.finalize()
     assert stats.loss == 1.5
     assert stats.puzzle_acc == 0.5
-    assert stats.halt_acc == 0.3
     assert stats.avg_outer_iters == 2.5
     assert stats.avg_steps_per_puzzle == 2.5
-    assert stats.halt_rate == 0.5
+    assert stats.stable_halt_rate == 0.5
     assert stats.avg_tries == 2.5
 
 
@@ -49,11 +43,6 @@ def test_eval_metrics_accumulator_tracks_group_puzzle_acc() -> None:
         halted=torch.tensor([True, True, True]),
         loss=torch.tensor(1.0),
         cell_loss=torch.tensor(0.9),
-        halt_loss=torch.tensor(0.1),
-        halt_target=torch.zeros(3),
-        halt_logit=torch.zeros(3),
-        halt_correct_rounds=3,
-        halt_total_rounds=3,
         tries=torch.tensor([1, 1, 1]),
     )
     acc.add_batch(

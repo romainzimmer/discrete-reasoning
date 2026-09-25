@@ -1,7 +1,7 @@
 [project]
 name = "discrete-reasoning"
 version = "0.1.0"
-description = "Looped MLP-Mixer sudoku solver with learned halting"
+description = "Looped MLP-Mixer sudoku solver with commit-stability halting"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
