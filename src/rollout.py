@@ -21,7 +21,7 @@ DEFAULT_MAX_OUTER_ITERS = 10
 class RolloutConfig:
     inner_iters: int = DEFAULT_INNER_ITERS
     max_outer_iters: int = DEFAULT_MAX_OUTER_ITERS
-    halt_threshold: float = 0.5
+    halt_after_stable_outer_steps: int = 3
     gt_reveal: bool = True
     random_gt_reveal_p_gt: bool = False
     deep_supervision: bool = True
@@ -34,6 +34,8 @@ class RolloutConfig:
             raise ValueError("inner_iters must be >= 1")
         if self.max_outer_iters < 1:
             raise ValueError("max_outer_iters must be >= 1")
+        if self.halt_after_stable_outer_steps < 2:
+            raise ValueError("halt_after_stable_outer_steps must be >= 2")
 
 
 @dataclass
@@ -46,6 +48,8 @@ class BatchSlotState:
     rating_group: torch.Tensor
     memory_embed: torch.Tensor | None = None
     pending_candidate: torch.Tensor | None = None
+    commit_prior: torch.Tensor | None = None
+    commit_streak: torch.Tensor | None = None
 
     @classmethod
     def seed(
@@ -91,12 +95,9 @@ class BatchSlotState:
 class RolloutResult:
     loss: torch.Tensor
     cell_loss: torch.Tensor | None = None
-    halt_loss: torch.Tensor | None = None
     pred: torch.Tensor | None = None
     done: torch.Tensor | None = None
     halted: torch.Tensor | None = None
-    halt_target: torch.Tensor | None = None
-    halt_logit: torch.Tensor | None = None
 
 
 @dataclass
@@ -106,11 +107,6 @@ class EvalRolloutResult:
     halted: torch.Tensor
     loss: torch.Tensor
     cell_loss: torch.Tensor
-    halt_loss: torch.Tensor
-    halt_target: torch.Tensor
-    halt_logit: torch.Tensor
-    halt_correct_rounds: int
-    halt_total_rounds: int
     tries: torch.Tensor
 
 
@@ -120,9 +116,6 @@ class _OnceEvalState:
     outer_steps: torch.Tensor
     halted: torch.Tensor
     final_logits: torch.Tensor
-    final_halt_logit: torch.Tensor
-    halt_correct_by_puzzle: torch.Tensor
-    halt_total_by_puzzle: torch.Tensor
 
 
 @dataclass
@@ -149,31 +142,73 @@ def _ensure_batched(grid: torch.Tensor) -> tuple[torch.Tensor, bool]:
     return grid, True
 
 
-def _halt_target(pre_commit: torch.Tensor, answer: torch.Tensor) -> torch.Tensor:
-    return (pre_commit == answer).view(pre_commit.size(0), -1).all(dim=1).float()
+def _grid_solved(pre_commit: torch.Tensor, answer: torch.Tensor) -> torch.Tensor:
+    return (pre_commit == answer).view(pre_commit.size(0), -1).all(dim=1)
 
 
-def _predict_halt(halt_logit: torch.Tensor, *, halt_threshold: float) -> torch.Tensor:
-    return torch.sigmoid(halt_logit) > halt_threshold
+def _update_commit_stability(
+    pre_commit: torch.Tensor,
+    commit_prior: torch.Tensor,
+    commit_streak: torch.Tensor,
+    *,
+    halt_after_stable_outer_steps: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Batched stability update. commit_streak==0 means no prior snapshot for that row."""
+    uninitialized = commit_streak == 0
+    same = torch.zeros(pre_commit.size(0), dtype=torch.bool, device=pre_commit.device)
+    if (~uninitialized).any():
+        init_idx = (~uninitialized).nonzero(as_tuple=True)[0]
+        n_init = init_idx.numel()
+        same[init_idx] = (pre_commit[init_idx] == commit_prior[init_idx]).view(n_init, -1).all(
+            dim=1
+        )
+    new_streak = torch.where(
+        uninitialized,
+        torch.ones_like(commit_streak),
+        torch.where(same, commit_streak + 1, torch.ones_like(commit_streak)),
+    )
+    needs_prior_write = uninitialized | ~same
+    if needs_prior_write.any():
+        commit_prior = commit_prior.clone()
+        commit_prior[needs_prior_write] = pre_commit[needs_prior_write]
+    implicit_halt = new_streak >= halt_after_stable_outer_steps
+    return commit_prior, new_streak, implicit_halt
+
+
+def _update_commit_stability_row(
+    pre_commit: torch.Tensor,
+    commit_prior: torch.Tensor | None,
+    commit_streak: int,
+    *,
+    halt_after_stable_outer_steps: int,
+) -> tuple[torch.Tensor, int, bool]:
+    if commit_streak == 0 or commit_prior is None:
+        return pre_commit.clone(), 1, 1 >= halt_after_stable_outer_steps
+    if torch.equal(pre_commit, commit_prior):
+        commit_streak += 1
+    else:
+        commit_prior = pre_commit.clone()
+        commit_streak = 1
+    return commit_prior, commit_streak, commit_streak >= halt_after_stable_outer_steps
 
 
 def _train_outer_done(
-    predict_halt: torch.Tensor,
+    implicit_halt: torch.Tensor,
     solved: torch.Tensor,
     outer_count: torch.Tensor,
     max_outer_iters: int,
 ) -> torch.Tensor:
-    """Training: stop a slot on model halt only when the grid is fully correct."""
-    return (predict_halt & solved) | (outer_count >= max_outer_iters)
+    """Training: stop a slot on stable halt only when the grid is fully correct."""
+    return (implicit_halt & solved) | (outer_count >= max_outer_iters)
 
 
 def _eval_outer_done(
-    predict_halt: torch.Tensor,
+    implicit_halt: torch.Tensor,
     outer_count: torch.Tensor,
     max_outer_iters: int,
 ) -> torch.Tensor:
-    """Eval: stop on model halt alone; answer is used for metrics only after rollout."""
-    return predict_halt | (outer_count >= max_outer_iters)
+    """Eval: stop on stable halt alone; answer is used for metrics only after rollout."""
+    return implicit_halt | (outer_count >= max_outer_iters)
 
 
 def _compute_cell_loss(
@@ -196,49 +231,17 @@ def _compute_cell_loss(
     return per_puzzle.mean()
 
 
-def _compute_halt_loss(halt_logit: torch.Tensor, halt_target: torch.Tensor) -> torch.Tensor:
-    return F.binary_cross_entropy_with_logits(halt_logit, halt_target)
-
-
-def _compute_losses(
-    logits: torch.Tensor,
-    halt_logit: torch.Tensor,
+def _compute_deep_supervision_cell_losses(
+    step_outputs: list[torch.Tensor],
     *,
     clue_pin: torch.Tensor,
     answer: torch.Tensor,
-    halt_target: torch.Tensor,
-    halt_loss_weight: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    logits = to_loss_dtype(logits)
-    halt_logit = to_loss_dtype(halt_logit)
-    halt_target = to_loss_dtype(halt_target)
-    cell_loss = _compute_cell_loss(logits, clue_pin=clue_pin, answer=answer)
-    halt_loss = _compute_halt_loss(halt_logit, halt_target)
-    total_loss = cell_loss + halt_loss_weight * halt_loss
-    return cell_loss, halt_loss, total_loss
-
-
-def _compute_deep_supervision_losses(
-    step_outputs: list[tuple[torch.Tensor, torch.Tensor]],
-    *,
-    clues: torch.Tensor,
-    clue_pin: torch.Tensor,
-    answer: torch.Tensor,
-    halt_loss_weight: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    cell_losses: list[torch.Tensor] = []
-    halt_losses: list[torch.Tensor] = []
-    for logits, halt_logit in step_outputs:
-        logits = to_loss_dtype(logits)
-        halt_logit = to_loss_dtype(halt_logit)
-        cell_losses.append(_compute_cell_loss(logits, clue_pin=clue_pin, answer=answer))
-        pred = predict_grid(logits, clues)
-        halt_target = to_loss_dtype(_halt_target(pred, answer))
-        halt_losses.append(_compute_halt_loss(halt_logit, halt_target))
-    cell_loss = torch.stack(cell_losses).mean()
-    halt_loss = torch.stack(halt_losses).mean()
-    total_loss = cell_loss + halt_loss_weight * halt_loss
-    return cell_loss, halt_loss, total_loss
+) -> torch.Tensor:
+    cell_losses = [
+        _compute_cell_loss(to_loss_dtype(logits), clue_pin=clue_pin, answer=answer)
+        for logits in step_outputs
+    ]
+    return torch.stack(cell_losses).mean()
 
 
 def _begin_outer_step(
@@ -464,14 +467,13 @@ def _inner_loop(
     with_grad: bool = False,
     collect_steps: bool = False,
 ) -> (
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-    | tuple[list[tuple[torch.Tensor, torch.Tensor]], torch.Tensor]
+    tuple[torch.Tensor, torch.Tensor]
+    | tuple[list[torch.Tensor], torch.Tensor]
 ):
     input_embed = model.encode_input(digit_id, clue_pin)
     cell_embed: torch.Tensor | None = memory_embed
     logits: torch.Tensor | None = None
-    halt_logit: torch.Tensor | None = None
-    step_outputs: list[tuple[torch.Tensor, torch.Tensor]] | None = [] if collect_steps else None
+    step_outputs: list[torch.Tensor] | None = [] if collect_steps else None
     for _ in range(inner_iters):
         if with_grad:
             out = model(
@@ -485,16 +487,14 @@ def _inner_loop(
                     cell_embed=cell_embed,
                 )
         logits = out.logits
-        halt_logit = out.halt_logit
         cell_embed = out.cell_embed
         if step_outputs is not None:
-            step_outputs.append((logits, halt_logit))
+            step_outputs.append(logits)
     assert logits is not None
-    assert halt_logit is not None
     assert cell_embed is not None
     if step_outputs is not None:
         return step_outputs, cell_embed
-    return logits, halt_logit, cell_embed
+    return logits, cell_embed
 
 
 def rollout_train_step(
@@ -502,11 +502,16 @@ def rollout_train_step(
     state: BatchSlotState,
     config: RolloutConfig,
     *,
-    halt_loss_weight: float = 1.0,
     backward: bool = True,
 ) -> RolloutResult:
     if not model.training:
         raise ValueError("rollout_train_step requires model.training")
+    b = state.digit_id.size(0)
+    device = state.digit_id.device
+    if state.commit_prior is None:
+        state.commit_prior = state.digit_id.new_zeros((b, 9, 9))
+    if state.commit_streak is None:
+        state.commit_streak = torch.zeros(b, dtype=torch.long, device=device)
     state.digit_id = _begin_outer_step(
         state.digit_id,
         pending_candidate=state.pending_candidate,
@@ -522,16 +527,15 @@ def rollout_train_step(
             with_grad=True,
             collect_steps=True,
         )
-        logits, halt_logit = step_outputs[-1]
-        cell_loss, halt_loss, loss = _compute_deep_supervision_losses(
+        logits = step_outputs[-1]
+        cell_loss = _compute_deep_supervision_cell_losses(
             step_outputs,
-            clues=state.clues,
             clue_pin=state.clue_pin,
             answer=state.answer,
-            halt_loss_weight=halt_loss_weight,
         )
+        loss = cell_loss
     else:
-        logits, halt_logit, final_cell_embed = _inner_loop(
+        logits, final_cell_embed = _inner_loop(
             model,
             state.digit_id,
             state.clue_pin,
@@ -539,41 +543,38 @@ def rollout_train_step(
             memory_embed=state.memory_embed,
             with_grad=True,
         )
-        pred = predict_grid(logits, state.clues)
-        halt_target = _halt_target(pred, state.answer)
-        cell_loss, halt_loss, loss = _compute_losses(
-            logits,
-            halt_logit,
+        cell_loss = _compute_cell_loss(
+            to_loss_dtype(logits),
             clue_pin=state.clue_pin,
             answer=state.answer,
-            halt_target=halt_target,
-            halt_loss_weight=halt_loss_weight,
         )
-    if config.deep_supervision:
-        pred = predict_grid(logits, state.clues)
-        halt_target = _halt_target(pred, state.answer)
-    predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
+        loss = cell_loss
+    pred = predict_grid(logits, state.clues).detach()
+    state.commit_prior, state.commit_streak, implicit_halt = _update_commit_stability(
+        pred,
+        state.commit_prior,
+        state.commit_streak,
+        halt_after_stable_outer_steps=config.halt_after_stable_outer_steps,
+    )
     if backward:
         loss.backward()
-    state.pending_candidate = pred.detach()
+    state.pending_candidate = pred
     state.memory_embed = memory_init(final_cell_embed)
     state.outer_count = state.outer_count + 1
-    solved = halt_target > 0.5
+    solved = _grid_solved(pred, state.answer)
     done = _train_outer_done(
-        predict_halt,
+        implicit_halt,
         solved,
         state.outer_count,
         config.max_outer_iters,
     )
+    halted = implicit_halt & solved
     return RolloutResult(
         loss=loss.detach() if backward else loss,
         cell_loss=cell_loss.detach(),
-        halt_loss=halt_loss.detach(),
-        pred=pred.detach(),
+        pred=pred,
         done=done,
-        halted=predict_halt,
-        halt_target=halt_target.detach(),
-        halt_logit=halt_logit.detach(),
+        halted=halted,
     )
 
 
@@ -626,6 +627,9 @@ def refill_done_slots(
         else:
             state.pending_candidate = state.pending_candidate.clone()
             state.pending_candidate[done_flat] = 0
+    if state.commit_streak is not None:
+        state.commit_streak = state.commit_streak.clone()
+        state.commit_streak[done_flat] = 0
 
 
 def _pending_for_active(
@@ -656,9 +660,8 @@ class _CompactOuterStep:
     slot_idx: torch.Tensor
     model_input: torch.Tensor
     pre_commit: torch.Tensor
-    predict_halt: torch.Tensor
+    implicit_halt: torch.Tensor
     logits: torch.Tensor
-    halt_logit: torch.Tensor
     active_digit_id: torch.Tensor
     active_outer_count: torch.Tensor
     active_answer: torch.Tensor
@@ -691,6 +694,8 @@ def _iter_compact_outer_rollout(
     active_outer_count = torch.zeros(b, dtype=torch.long, device=device)
     active_memory_embed: torch.Tensor | None = None
     pending_candidate: torch.Tensor | None = None
+    commit_prior = digit_id.new_zeros((b, 9, 9))
+    commit_streak = torch.zeros(b, dtype=torch.long, device=device)
 
     while slot_idx.numel() > 0:
         active_digit_id = _begin_outer_step(
@@ -699,7 +704,7 @@ def _iter_compact_outer_rollout(
             outer_count=active_outer_count,
         )
         model_input = active_digit_id
-        logits, halt_logit, final_cell_embed = _inner_loop(
+        logits, final_cell_embed = _inner_loop(
             model,
             active_digit_id,
             active_clue_pin,
@@ -708,7 +713,16 @@ def _iter_compact_outer_rollout(
             with_grad=False,
         )
         pre_commit = predict_grid(logits, active_clues)
-        predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
+        prior_active = commit_prior[slot_idx]
+        streak_active = commit_streak[slot_idx]
+        prior_active, streak_active, implicit_halt = _update_commit_stability(
+            pre_commit,
+            prior_active,
+            streak_active,
+            halt_after_stable_outer_steps=config.halt_after_stable_outer_steps,
+        )
+        commit_prior[slot_idx] = prior_active
+        commit_streak[slot_idx] = streak_active
         pending_candidate = _store_pending_candidate(
             pending_candidate,
             slot_idx,
@@ -718,15 +732,14 @@ def _iter_compact_outer_rollout(
         )
         active_memory_embed = memory_init(final_cell_embed)
         active_outer_count = active_outer_count + 1
-        done = _eval_outer_done(predict_halt, active_outer_count, config.max_outer_iters)
+        done = _eval_outer_done(implicit_halt, active_outer_count, config.max_outer_iters)
 
         yield _CompactOuterStep(
             slot_idx=slot_idx,
             model_input=model_input,
             pre_commit=pre_commit,
-            predict_halt=predict_halt,
+            implicit_halt=implicit_halt,
             logits=logits,
-            halt_logit=halt_logit,
             active_digit_id=active_digit_id,
             active_outer_count=active_outer_count,
             active_answer=active_answer,
@@ -760,32 +773,22 @@ def _rollout_eval_batch_once(
     out_steps = torch.zeros(b, dtype=torch.long, device=device)
     out_halted = torch.zeros(b, dtype=torch.bool, device=device)
     final_logits = clues_b.new_zeros((b, 9, 9, 10), dtype=LOSS_DTYPE)
-    final_halt_logit = clues_b.new_zeros((b,), dtype=LOSS_DTYPE)
-    halt_correct_by_puzzle = torch.zeros(b, dtype=torch.long, device=device)
-    halt_total_by_puzzle = torch.zeros(b, dtype=torch.long, device=device)
 
     for step in _iter_compact_outer_rollout(
         model, clues_b, answer_b, config=config, init_seed=init_seed
     ):
-        halt_target_round = _halt_target(step.pre_commit, step.active_answer)
-        round_correct = (step.predict_halt == (halt_target_round > 0.5)).long()
-        halt_correct_by_puzzle[step.slot_idx] += round_correct
-        halt_total_by_puzzle[step.slot_idx] += 1
         final_logits[step.slot_idx] = to_loss_dtype(step.logits)
-        final_halt_logit[step.slot_idx] = to_loss_dtype(step.halt_logit)
-        done_idx = step.slot_idx[step.done]
-        out_pred[done_idx] = step.pre_commit[step.done]
-        out_steps[done_idx] = step.active_outer_count[step.done]
-        out_halted[done_idx] = step.predict_halt[step.done]
+        if step.done.any():
+            done_idx = step.slot_idx[step.done]
+            out_pred[done_idx] = step.pre_commit[step.done]
+            out_steps[done_idx] = step.active_outer_count[step.done]
+            out_halted[done_idx] = step.implicit_halt[step.done]
 
     return _OnceEvalState(
         pred=out_pred,
         outer_steps=out_steps,
         halted=out_halted,
         final_logits=final_logits,
-        final_halt_logit=final_halt_logit,
-        halt_correct_by_puzzle=halt_correct_by_puzzle,
-        halt_total_by_puzzle=halt_total_by_puzzle,
     )
 
 
@@ -807,9 +810,6 @@ def _copy_once_state(
     out.outer_steps[accept_global] = sub.outer_steps[local_idx]
     out.halted[accept_global] = sub.halted[local_idx]
     out.final_logits[accept_global] = sub.final_logits[local_idx]
-    out.final_halt_logit[accept_global] = sub.final_halt_logit[local_idx]
-    out.halt_correct_by_puzzle[accept_global] = sub.halt_correct_by_puzzle[local_idx]
-    out.halt_total_by_puzzle[accept_global] = sub.halt_total_by_puzzle[local_idx]
 
 
 def _once_state_to_result(
@@ -817,22 +817,16 @@ def _once_state_to_result(
     clues_b: torch.Tensor,
     answer_b: torch.Tensor,
     *,
-    halt_loss_weight: float,
     tries: torch.Tensor,
     was_batched: bool,
 ) -> EvalRolloutResult:
     clue_pin = clues_b > 0
-    halt_target = _halt_target(predict_grid(state.final_logits, clues_b), answer_b)
-    cell_loss, halt_loss, loss = _compute_losses(
+    cell_loss = _compute_cell_loss(
         state.final_logits,
-        state.final_halt_logit,
         clue_pin=clue_pin,
         answer=answer_b,
-        halt_target=halt_target,
-        halt_loss_weight=halt_loss_weight,
     )
-    halt_correct_rounds = int(state.halt_correct_by_puzzle.sum().item())
-    halt_total_rounds = int(state.halt_total_by_puzzle.sum().item())
+    loss = cell_loss
     if not was_batched:
         return EvalRolloutResult(
             pred=state.pred.squeeze(0),
@@ -840,11 +834,6 @@ def _once_state_to_result(
             halted=state.halted.squeeze(0),
             loss=loss,
             cell_loss=cell_loss,
-            halt_loss=halt_loss,
-            halt_target=halt_target.squeeze(0),
-            halt_logit=state.final_halt_logit.squeeze(0),
-            halt_correct_rounds=halt_correct_rounds,
-            halt_total_rounds=halt_total_rounds,
             tries=tries.squeeze(0),
         )
     return EvalRolloutResult(
@@ -853,11 +842,6 @@ def _once_state_to_result(
         halted=state.halted,
         loss=loss,
         cell_loss=cell_loss,
-        halt_loss=halt_loss,
-        halt_target=halt_target,
-        halt_logit=state.final_halt_logit,
-        halt_correct_rounds=halt_correct_rounds,
-        halt_total_rounds=halt_total_rounds,
         tries=tries,
     )
 
@@ -876,9 +860,8 @@ class _StreamSlot:
     outer_steps: int
     halted: bool
     final_logits: torch.Tensor
-    final_halt_logit: torch.Tensor
-    halt_correct: int
-    halt_total: int
+    commit_prior: torch.Tensor | None = None
+    commit_streak: int = 0
 
 
 def _begin_outer_step_row(
@@ -920,32 +903,23 @@ def _new_stream_slot(
         outer_steps=0,
         halted=False,
         final_logits=clues.new_zeros((9, 9, 10), dtype=LOSS_DTYPE),
-        final_halt_logit=clues.new_zeros((), dtype=LOSS_DTYPE),
-        halt_correct=0,
-        halt_total=0,
     )
 
 
 def _slot_to_eval_result(
     slot: _StreamSlot,
-    *,
-    halt_loss_weight: float,
 ) -> EvalRolloutResult:
     once = _OnceEvalState(
         pred=slot.pred.unsqueeze(0),
         outer_steps=torch.tensor([slot.outer_steps], device=slot.clues.device),
         halted=torch.tensor([slot.halted], device=slot.clues.device),
         final_logits=slot.final_logits.unsqueeze(0),
-        final_halt_logit=slot.final_halt_logit.unsqueeze(0),
-        halt_correct_by_puzzle=torch.tensor([slot.halt_correct], device=slot.clues.device),
-        halt_total_by_puzzle=torch.tensor([slot.halt_total], device=slot.clues.device),
     )
     tries = torch.tensor([slot.try_idx + 1], device=slot.clues.device, dtype=torch.long)
     return _once_state_to_result(
         once,
         slot.clues.unsqueeze(0),
         slot.answer.unsqueeze(0),
-        halt_loss_weight=halt_loss_weight,
         tries=tries,
         was_batched=False,
     )
@@ -968,21 +942,6 @@ def _stack_active_memory_embed(
     return torch.stack(rows)
 
 
-def _record_stream_outer_metrics(
-    slot: _StreamSlot,
-    *,
-    pre_commit: torch.Tensor,
-    predict_halt: bool,
-    logits: torch.Tensor,
-    halt_logit: torch.Tensor,
-) -> None:
-    halt_target_round = _halt_target(pre_commit.unsqueeze(0), slot.answer.unsqueeze(0)).item()
-    slot.halt_correct += int(predict_halt == (halt_target_round > 0.5))
-    slot.halt_total += 1
-    slot.final_logits = to_loss_dtype(logits)
-    slot.final_halt_logit = to_loss_dtype(halt_logit)
-
-
 @torch.inference_mode()
 def rollout_eval_stream(
     model: MixerNextStateModel,
@@ -991,7 +950,6 @@ def rollout_eval_stream(
     *,
     slot_batch_size: int,
     config: RolloutConfig | None = None,
-    halt_loss_weight: float = 1.0,
     init_seed: int | None = 0,
     max_tries: int = 1,
 ):
@@ -1054,7 +1012,7 @@ def rollout_eval_stream(
             device=clues_b.device,
         )
 
-        logits, halt_logit, final_cell_embed = _inner_loop(
+        logits, final_cell_embed = _inner_loop(
             model,
             active_digit_id,
             active_clue_pin,
@@ -1063,20 +1021,25 @@ def rollout_eval_stream(
             with_grad=False,
         )
         pre_commit = predict_grid(logits, active_clues)
-        predict_halt = _predict_halt(halt_logit, halt_threshold=config.halt_threshold)
+        implicit_halt_list: list[bool] = []
+        for i, slot in enumerate(slots):
+            prior, streak, implicit = _update_commit_stability_row(
+                pre_commit[i],
+                slot.commit_prior,
+                slot.commit_streak,
+                halt_after_stable_outer_steps=config.halt_after_stable_outer_steps,
+            )
+            slot.commit_prior = prior
+            slot.commit_streak = streak
+            implicit_halt_list.append(implicit)
+            slot.final_logits = to_loss_dtype(logits[i])
+        implicit_halt = torch.tensor(implicit_halt_list, device=clues_b.device, dtype=torch.bool)
         next_outer_count = active_outer_count + 1
-        done = _eval_outer_done(predict_halt, next_outer_count, config.max_outer_iters)
+        done = _eval_outer_done(implicit_halt, next_outer_count, config.max_outer_iters)
 
         next_slots: list[_StreamSlot] = []
         refill_count = 0
         for i, slot in enumerate(slots):
-            _record_stream_outer_metrics(
-                slot,
-                pre_commit=pre_commit[i],
-                predict_halt=bool(predict_halt[i].item()),
-                logits=logits[i],
-                halt_logit=halt_logit[i],
-            )
             slot.outer_count = int(next_outer_count[i].item())
             slot.pending_candidate = pre_commit[i]
             slot.memory_embed = final_cell_embed[i]
@@ -1088,10 +1051,10 @@ def rollout_eval_stream(
 
             slot.pred = pre_commit[i]
             slot.outer_steps = slot.outer_count
-            slot.halted = bool(predict_halt[i].item())
+            slot.halted = bool(implicit_halt[i].item())
             if slot.halted or slot.try_idx + 1 >= max_tries:
                 yield (
-                    _slot_to_eval_result(slot, halt_loss_weight=halt_loss_weight),
+                    _slot_to_eval_result(slot),
                     slot.clues,
                     slot.answer,
                     slot.puzzle_idx,
@@ -1121,7 +1084,6 @@ def _rollout_eval_batch_multi_try(
     answer_b: torch.Tensor,
     *,
     config: RolloutConfig,
-    halt_loss_weight: float,
     init_seed: int | None,
     max_tries: int,
     was_batched: bool,
@@ -1135,9 +1097,6 @@ def _rollout_eval_batch_multi_try(
         outer_steps=torch.zeros(b, dtype=torch.long, device=device),
         halted=torch.zeros(b, dtype=torch.bool, device=device),
         final_logits=clues_b.new_zeros((b, 9, 9, 10), dtype=LOSS_DTYPE),
-        final_halt_logit=clues_b.new_zeros((b,), dtype=LOSS_DTYPE),
-        halt_correct_by_puzzle=torch.zeros(b, dtype=torch.long, device=device),
-        halt_total_by_puzzle=torch.zeros(b, dtype=torch.long, device=device),
     )
 
     for try_idx in range(max_tries):
@@ -1165,7 +1124,6 @@ def _rollout_eval_batch_multi_try(
         merged,
         clues_b,
         answer_b,
-        halt_loss_weight=halt_loss_weight,
         tries=tries,
         was_batched=was_batched,
     )
@@ -1178,7 +1136,6 @@ def rollout_eval_batch(
     answer: torch.Tensor,
     *,
     config: RolloutConfig | None = None,
-    halt_loss_weight: float = 1.0,
     init_seed: int | None = 0,
     max_tries: int = 1,
 ) -> EvalRolloutResult:
@@ -1192,7 +1149,6 @@ def rollout_eval_batch(
             clues_b,
             answer_b,
             config=config,
-            halt_loss_weight=halt_loss_weight,
             init_seed=init_seed,
             max_tries=max_tries,
             was_batched=was_batched,
@@ -1206,7 +1162,6 @@ def rollout_eval_batch(
         state,
         clues_b,
         answer_b,
-        halt_loss_weight=halt_loss_weight,
         tries=tries,
         was_batched=was_batched,
     )
@@ -1257,7 +1212,7 @@ def rollout_trace_batch(
             pred_frames[global_i].append(tensor_to_string(step.pre_commit[local_i]))
         if step.done.any():
             done_idx = step.slot_idx[step.done]
-            out_halted[done_idx] = step.predict_halt[step.done]
+            out_halted[done_idx] = step.implicit_halt[step.done]
             out_steps[done_idx] = step.active_outer_count[step.done]
 
     return [

@@ -25,7 +25,6 @@ def test_h_plus_p_forward():
     out0 = model(input_embed=p, cell_embed=None)
     out1 = model(input_embed=p, cell_embed=out0.cell_embed)
     assert out0.logits.shape == (1, 9, 9, NUM_VOCAB)
-    assert out0.halt_logit.shape == (1,)
     assert not torch.allclose(out0.logits, out1.logits)
 
 
@@ -71,21 +70,6 @@ def test_encode_decode_round_trip_pins_clues():
     pred = predict_grid(logits, clues)
     assert pred[0, 0, 0] == 7
     assert pred.shape == (1, 9, 9)
-
-
-def test_halt_readout_uses_halt_branch():
-    model = MixerNextStateModel(dim=16, num_blocks=1)
-    digit_id = torch.randint(0, 10, (1, 9, 9))
-    clue_pin = (digit_id > 0).long()
-    p = model.encode_input(digit_id, clue_pin)
-    out = model(input_embed=p, cell_embed=None)
-    z = p
-    for block in model.blocks:
-        z = block(z)
-    halt_from_branch = model.halt_head(model.norm_halt(z).mean(dim=1)).squeeze(-1)
-    assert torch.allclose(out.halt_logit, halt_from_branch)
-    halt_from_raw = model.halt_head(z.mean(dim=1)).squeeze(-1)
-    assert not torch.allclose(out.halt_logit, halt_from_raw)
 
 
 def test_dual_readout_carry_uses_memory_branch():

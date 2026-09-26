@@ -54,6 +54,7 @@ def save_test_metrics(
     inner_iters: int,
     max_outer_iters: int,
     max_tries: int,
+    halt_after_stable_outer_steps: int,
     batch_size: int,
     seed: int,
     inner_sweep: list[dict] | None = None,
@@ -74,6 +75,7 @@ def save_test_metrics(
         "inner_iters": inner_iters,
         "max_outer_iters": max_outer_iters,
         "max_tries": max_tries,
+        "halt_after_stable_outer_steps": halt_after_stable_outer_steps,
         "batch_size": batch_size,
         "seed": seed,
         **asdict(test),
@@ -181,7 +183,16 @@ def main() -> None:
         "--max-tries",
         type=int,
         default=1,
-        help="Max random inits per puzzle; stop at first halt, else keep last try (default: 1)",
+        help="Max random inits per puzzle; stop at first stable halt, else keep last try (default: 1)",
+    )
+    parser.add_argument(
+        "--halt-after-stable-outer-steps",
+        type=int,
+        default=None,
+        help=(
+            "Stop when the post-commit grid is unchanged for this many consecutive outer "
+            "rounds (default: from checkpoint args, else 3; minimum 2)"
+        ),
     )
     parser.add_argument(
         "--batch-size",
@@ -249,7 +260,13 @@ def main() -> None:
     inner_iters = args.inner_iters if args.inner_iters is not None else default_inner
     max_outer_iters = args.max_outer_iters if args.max_outer_iters is not None else default_outer
     max_tries = args.max_tries
-    halt_loss_weight = float(run_args.get("halt_loss_weight", 1.0))
+    halt_after_stable_outer_steps = (
+        args.halt_after_stable_outer_steps
+        if args.halt_after_stable_outer_steps is not None
+        else int(run_args.get("halt_after_stable_outer_steps", 3))
+    )
+    if halt_after_stable_outer_steps < 2:
+        raise ValueError("--halt-after-stable-outer-steps must be >= 2")
 
     amp_enabled = bool(run_args.get("amp", True))
     amp = resolve_amp(device, enabled=amp_enabled)
@@ -272,6 +289,7 @@ def main() -> None:
         rollout_config = build_rollout_config(
             inner_iters=inner,
             max_outer_iters=outer,
+            halt_after_stable_outer_steps=halt_after_stable_outer_steps,
             random_init=random_init,
         )
         return measure_split(
@@ -285,7 +303,6 @@ def main() -> None:
             phase="test",
             progress_desc="test",
             rollout_config=rollout_config,
-            halt_loss_weight=halt_loss_weight,
             use_cuda=use_cuda,
             seed=args.seed,
             amp=amp,
@@ -348,6 +365,7 @@ def main() -> None:
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
         max_tries=max_tries,
+        halt_after_stable_outer_steps=halt_after_stable_outer_steps,
         batch_size=batch_size,
         seed=args.seed,
         inner_sweep=inner_sweep,
@@ -357,10 +375,10 @@ def main() -> None:
     print(
         f"test ({checkpoint_rel}, n={len(test_rows)}, "
         f"inner={inner_iters}, max_outer={max_outer_iters}, "
-        f"max_tries={max_tries}): "
+        f"max_tries={max_tries}, stable_steps={halt_after_stable_outer_steps}): "
         f"loss={test.loss:.4f} cell_acc={test.cell_acc:.4f} "
-        f"cell_loss={test.cell_loss:.4f} halt_loss={test.halt_loss:.4f} "
-        f"puzzle_acc={test.puzzle_acc:.4f} halt_rate={test.halt_rate:.4f} "
+        f"cell_loss={test.cell_loss:.4f} "
+        f"puzzle_acc={test.puzzle_acc:.4f} stable_halt_rate={test.stable_halt_rate:.4f} "
         f"steps_per_puzzle={test.avg_steps_per_puzzle:.1f} "
         f"avg_tries={test.avg_tries:.4f}",
         flush=True,

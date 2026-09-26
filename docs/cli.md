@@ -25,6 +25,7 @@ Main training loop. Key flags:
 | `--inner-iters` | 6 | Inner mixer steps per outer round |
 | `--train-max-outer-iters` | 5 | Max outer commits before slot refill (train) |
 | `--eval-max-outer-iters` | 30 | Max outer commits (val / test / viz) |
+| `--halt-after-stable-outer-steps` | 3 | Stop when post-commit grid unchanged this many outer rounds in a row (min 2) |
 | `--train-batch-size` | 128 | Parallel puzzle slots |
 | `--batches-per-epoch` | 100 | Optimizer steps per epoch |
 | `--max-samples` | all | Random subsample from train.csv |
@@ -52,7 +53,8 @@ uv run eval runs/<run-id>                  # uses best.pt
 uv run eval runs/<run-id>/last.pt
 uv run eval runs/<run-id> --max-test-samples 1000
 uv run eval runs/<run-id> --min-rating 5 --max-rating 9
-uv run eval runs/<run-id> --max-tries 10   # random restarts until halt
+uv run eval runs/<run-id> --max-tries 10   # random restarts until stable halt
+uv run eval runs/<run-id> --halt-after-stable-outer-steps 2
 uv run eval runs/<run-id> --sweep           # inner/outer/tries ablations
 ```
 

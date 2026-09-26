@@ -2,7 +2,7 @@
 
 Model architecture, training loop, and test-time compute. For commands and hyperparameter defaults see [cli.md](cli.md).
 
-Looped MLP-Mixer sudoku solver on [sapientinc/sudoku-extreme](https://huggingface.co/datasets/sapientinc/sudoku-extreme). The model iterates a shared mixer stack over an outer commit loop, carries detached cell memory between outer steps, and learns when to halt with a TRM-inspired halt head.
+Looped MLP-Mixer sudoku solver on [sapientinc/sudoku-extreme](https://huggingface.co/datasets/sapientinc/sudoku-extreme). The model iterates a shared mixer stack over an outer commit loop and carries detached cell memory between outer steps. Early stopping uses **commit-stability**: halt when the post-commit digit grid is unchanged for `halt_after_stable_outer_steps` consecutive outer rounds (default 3, minimum 2).
 
 Inner update: `z_t = M(P + h_t)` with shared weights across inner steps (equivalently `h_{t+1}` from the final inner state, detached between outer commits).
 
@@ -18,7 +18,7 @@ Inner update: `z_t = M(P + h_t)` with shared weights across inner steps (equival
 | `T_in` | Inner mixer steps per outer round |
 | `T_out_train`, `T_out_eval` | Max outer commits during training refill vs val/test/viz |
 | `B` | Parallel training slots |
-| `λ_h` | Halt loss weight |
+| `N_stable` | Stable outer steps threshold (`halt_after_stable_outer_steps`) |
 | `N_try` | Max random restarts per puzzle at eval |
 | `p_{gt,g}` | Per-puzzle GT reveal probability at seed/refill |
 | `p_{gt,g}^{cap}` | Adaptive upper cap on `p_{gt,g}` for rating group `g` |
@@ -37,7 +37,7 @@ Each row has an 81-char puzzle string (`question`), solved grid (`answer`), diff
 
 ## Model
 
-`MixerNextStateModel` maps a partial grid to per-cell digit logits and a scalar halt logit. One small MLP-Mixer stack is reused many times instead of stacking depth statically.
+`MixerNextStateModel` maps a partial grid to per-cell digit logits. One small MLP-Mixer stack is reused many times instead of stacking depth statically.
 
 ### Input encoding
 
@@ -53,11 +53,10 @@ z_t = M(P + h_t)
 
 `M` is `L` pre-norm `MixerBlock` layers: RMSNorm → token-mix `Linear(81, 81)` across cells → channel-mix SwiGLU with hidden width `round(4·D·2/3)` aligned to 256.
 
-Triple readouts from final `z_t`:
+Dual readouts from final `z_t`:
 
 - **Memory**: `LN_m(z_t)` reshaped to `(9, 9, D)`, detached, carried to next outer step
 - **Logits**: `Unembed(LN_o(z_t))` over digits `0…9`
-- **Halt**: linear head on mean-pooled `LN_a(z_t)`
 
 Same weights for all `T_in` inner steps; only `h_t` changes within an outer round.
 
@@ -74,17 +73,15 @@ Decode: clue cells keep clue value; other cells use argmax over logits.
 
 `B` parallel puzzle slots. Each optimizer step = one outer round on every slot → backward → refill finished slots.
 
-### Losses
+### Loss
 
-- **Cell loss**: masked cross-entropy on non-clue cells with non-zero target
-- **Halt target**: 1 iff pre-commit prediction equals full solution
-- **Total**: `L = L_cell + λ_h · L_halt`
+- **Cell loss**: masked cross-entropy on non-clue cells with non-zero target (`L = L_cell`).
 
-**Deep supervision** (default): average cell and halt loss over all inner steps; halt accuracy and done logic use the final step. Without deep supervision, only the final inner step contributes to the loss.
+**Deep supervision** (default): average cell loss over all inner steps. Stopping compares consecutive **pre-commit** grids from the **final** inner step each outer round. Without deep supervision, only the final inner step contributes to the loss.
 
 ### Slot completion
 
-Training slot finishes when **(halt predicted AND grid correct)** OR `T_out_train` reached. Refill with a new random training puzzle. One epoch = a fixed number of optimizer steps (one outer round each).
+Training slot finishes when **(stable halt AND grid correct)** OR `T_out_train` reached. A stable but wrong grid keeps the slot active. Refill with a new random training puzzle. One epoch = a fixed number of optimizer steps (one outer round each).
 
 ### GT reveal initialization
 
@@ -143,13 +140,13 @@ Mixer applications per outer commit. More inner steps = more recurrent depth wit
 
 ### Outer commits (`T_out_eval`)
 
-Cap on outer commits at eval. Stops on halt **or** cap (halt alone suffices, grid need not be correct). Training uses a separate, typically lower `T_out_train`.
+Cap on outer commits at eval. Stops on stable halt **or** cap (stability alone suffices; grid need not be correct). Training uses a separate, typically lower `T_out_train`.
 
-Metrics: cell acc, puzzle acc, halt acc, avg outer steps, halt rate.
+Metrics: cell acc, puzzle acc, stable halt rate, avg outer steps.
 
 ### Random restarts (`N_try`)
 
-Non-clue cells start empty by default, or with puzzle-seeded random digits when `--random-init` is set. With `N_try > 1`, rerun full rollout from fresh init until first halt, or keep last attempt after `N_try` tries. Tries do not share memory.
+Non-clue cells start empty by default, or with puzzle-seeded random digits when `--random-init` is set. With `N_try > 1`, rerun full rollout from fresh init until first stable halt, or keep last attempt after `N_try` tries. Tries do not share memory.
 
 ### Compute sweeps
 

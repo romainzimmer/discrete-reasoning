@@ -19,6 +19,11 @@ from rollout import (
     rollout_eval_stream,
     rollout_train_step,
 )
+from rollout_test_helpers import (
+    patch_implicit_halt_responses,
+    patch_implicit_halt_row,
+    patch_implicit_halt_row_first_call_only,
+)
 from train import (
     _accumulate_static_eval_batches,
     _accumulate_stream_eval,
@@ -57,7 +62,6 @@ def _run_measure(
         epochs=1,
         phase="test",
         rollout_config=config,
-        halt_loss_weight=1.0,
         use_cuda=False,
         seed=0,
         max_tries=max_tries,
@@ -76,7 +80,7 @@ def test_inner_loop_row_outputs_independent_of_batch_size():
     clue_pin = clues > 0
     digit_id = _init_digit_id_from_clues(clues, clue_pin, init_seed=0, random_init=True)
 
-    solo_first: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+    solo_first: list[tuple[torch.Tensor, torch.Tensor]] = []
     for i in range(3):
         solo_first.append(
             _inner_loop(
@@ -99,82 +103,69 @@ def test_inner_loop_row_outputs_independent_of_batch_size():
     )
 
     for i in range(3):
-        solo_logits, solo_halt, solo_mem = solo_first[i]
-        _assert_row_allclose(solo_logits, batched_first[0][i : i + 1])
-        _assert_row_allclose(solo_halt, batched_first[1][i : i + 1])
-        _assert_row_allclose(solo_mem, batched_first[2][i : i + 1])
+        solo_logits, solo_mem = solo_first[i]
+        batched_logits, batched_mem = batched_first
+        _assert_row_allclose(solo_logits, batched_logits[i : i + 1])
+        _assert_row_allclose(solo_mem, batched_mem[i : i + 1])
 
     solo_second: list[torch.Tensor] = []
     for i in range(3):
-        logits, _, _ = _inner_loop(
+        logits, _ = _inner_loop(
             model,
             digit_id[i : i + 1],
             clue_pin[i : i + 1],
             2,
-            memory_embed=solo_first[i][2],
+            memory_embed=solo_first[i][1],
             with_grad=False,
         )
         solo_second.append(logits)
 
-    batched_second_logits, _, _ = _inner_loop(
+    batched_second_logits, _ = _inner_loop(
         model,
         digit_id,
         clue_pin,
         2,
-        memory_embed=batched_first[2],
+        memory_embed=batched_first[1],
         with_grad=False,
     )
     for i in range(3):
         _assert_row_allclose(solo_second[i], batched_second_logits[i : i + 1])
 
 
-def test_rollout_eval_batch_row_independent_of_batch_size():
-    """Full single-try eval gives identical per-puzzle preds alone vs batched."""
-    torch.manual_seed(1)
+def test_rollout_eval_batch_matches_solo():
+    torch.manual_seed(0)
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     dataset = _three_puzzle_dataset()
     clues = dataset._base_clues
     answers = dataset._base_answers
     config = RolloutConfig(inner_iters=1, max_outer_iters=2, gt_reveal=False)
-
-    solo_preds = []
-    for i in range(clues.size(0)):
-        solo_preds.append(
-            rollout_eval_batch(
-                model,
-                clues[i : i + 1],
-                answers[i : i + 1],
-                config=config,
-                init_seed=0,
-            ).pred
-        )
-
-    batched = rollout_eval_batch(
-        model,
-        clues,
-        answers,
-        config=config,
-        init_seed=0,
-    )
+    solo_preds = [
+        rollout_eval_batch(model, clues[i : i + 1], answers[i : i + 1], config=config).pred
+        for i in range(clues.size(0))
+    ]
+    batched = rollout_eval_batch(model, clues, answers, config=config)
     for i in range(clues.size(0)):
         assert torch.equal(solo_preds[i].squeeze(0), batched.pred[i])
 
 
 def test_eval_outer_done_ignores_correctness():
-    predict_halt = torch.tensor([True])
+    implicit_halt = torch.tensor([True])
     outer_count = torch.tensor([1])
     solved = torch.tensor([False])
-    assert _eval_outer_done(predict_halt, outer_count, 10).item() is True
-    assert _train_outer_done(predict_halt, solved, outer_count, 10).item() is False
+    assert _eval_outer_done(implicit_halt, outer_count, 10).item() is True
+    assert _train_outer_done(implicit_halt, solved, outer_count, 10).item() is False
 
 
-def test_eval_halt_without_correct_grid_stops():
+def test_eval_stable_without_correct_grid_stops():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _three_puzzle_dataset()._base_clues[:1], _three_puzzle_dataset()._base_answers[:1]
     config = RolloutConfig(inner_iters=1, max_outer_iters=10, gt_reveal=False)
-    with patch("rollout._predict_halt", return_value=torch.tensor([True])):
+    with patch(
+        "rollout._update_commit_stability",
+        side_effect=patch_implicit_halt_responses([torch.tensor([True])]),
+    ):
         result = rollout_eval_batch(model, clues, answer, config=config)
     assert result.outer_steps.item() == 1
     assert result.halted.item() is True
@@ -194,7 +185,6 @@ def test_eval_stream_never_passes_answer_to_inner_loop():
                 raise AssertionError("answer tensor leaked into eval forward path")
         return (
             torch.zeros(digit_id.size(0), 9, 9, 10),
-            torch.zeros(digit_id.size(0)),
             torch.zeros(digit_id.size(0), 9, 9, 32),
         )
 
@@ -216,22 +206,14 @@ def test_eval_stream_never_passes_answer_to_inner_loop():
 
 
 def test_stream_refill_mixed_memory_slots():
-    """Refilled slots start with memory_embed=None while others carry memory."""
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     dataset = _three_puzzle_dataset()
-    step = {"n": 0}
 
-    def halt_first_slot_once(halt_logit, *, halt_threshold=0.5):
-        step["n"] += 1
-        b = halt_logit.size(0)
-        if step["n"] == 1:
-            out = torch.zeros(b, dtype=torch.bool)
-            out[0] = True
-            return out
-        return torch.zeros(b, dtype=torch.bool)
-
-    with patch("rollout._predict_halt", side_effect=halt_first_slot_once):
+    with patch(
+        "rollout._update_commit_stability_row",
+        side_effect=patch_implicit_halt_row_first_call_only(),
+    ):
         results = list(
             rollout_eval_stream(
                 model,
@@ -250,17 +232,22 @@ def test_stream_yield_clues_match_dataset_puzzles():
     model.eval()
     dataset = _three_puzzle_dataset()
 
-    def halt_all(halt_logit, *, halt_threshold=0.5):
-        return torch.ones(halt_logit.size(0), dtype=torch.bool, device=halt_logit.device)
-
-    with patch("rollout._predict_halt", side_effect=halt_all):
+    with patch(
+        "rollout._update_commit_stability_row",
+        side_effect=patch_implicit_halt_row(True),
+    ):
         results = list(
             rollout_eval_stream(
                 model,
                 dataset._base_clues,
                 dataset._base_answers,
                 slot_batch_size=2,
-                config=RolloutConfig(inner_iters=1, max_outer_iters=1, gt_reveal=False),
+                config=RolloutConfig(
+                    inner_iters=1,
+                    max_outer_iters=1,
+                    gt_reveal=False,
+                    halt_after_stable_outer_steps=2,
+                ),
                 init_seed=0,
             )
         )
@@ -282,7 +269,10 @@ def test_stream_max_tries_retries_before_new_puzzle():
     answers = torch.full((1, 9, 9), 1, dtype=torch.long)
     config = RolloutConfig(inner_iters=1, max_outer_iters=1, gt_reveal=False)
 
-    with patch("rollout._predict_halt", return_value=torch.tensor([False])):
+    with patch(
+        "rollout._update_commit_stability",
+        side_effect=patch_implicit_halt_responses([torch.tensor([False])]),
+    ):
         stream_results = list(
             rollout_eval_stream(
                 model,
@@ -308,18 +298,21 @@ def test_stream_max_tries_retries_before_new_puzzle():
     assert stream_result.halted.item() == batch_result.halted.item() is False
 
 
-def test_eval_stops_at_max_outer_without_halt():
+def test_eval_stops_at_max_outer_without_stable_halt():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     clues, answer = _three_puzzle_dataset()._base_clues[:1], _three_puzzle_dataset()._base_answers[:1]
     config = RolloutConfig(inner_iters=1, max_outer_iters=2, gt_reveal=False)
-    with patch("rollout._predict_halt", return_value=torch.tensor([False])):
+    with patch(
+        "rollout._update_commit_stability",
+        side_effect=patch_implicit_halt_responses([torch.tensor([False])]),
+    ):
         result = rollout_eval_batch(model, clues, answer, config=config)
     assert result.outer_steps.item() == 2
     assert result.halted.item() is False
 
 
-def test_train_stops_when_halt_and_correct():
+def test_train_stops_when_stable_and_correct():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     clues = torch.zeros(1, 9, 9, dtype=torch.long)
@@ -333,11 +326,14 @@ def test_train_stops_when_halt_and_correct():
         outer_count=torch.zeros(1, dtype=torch.long),
     )
     config = RolloutConfig(inner_iters=1, max_outer_iters=10, deep_supervision=False)
-    with patch("rollout._predict_halt", return_value=torch.tensor([True])):
+    with patch(
+        "rollout._update_commit_stability",
+        side_effect=patch_implicit_halt_responses([torch.tensor([True])]),
+    ):
         with patch("rollout._inner_loop") as mock_inner:
             logits = torch.zeros(1, 9, 9, 10)
             logits[..., 2] = 10.0
-            mock_inner.return_value = (logits, torch.zeros(1), torch.zeros(1, 9, 9, 32))
+            mock_inner.return_value = (logits, torch.zeros(1, 9, 9, 32))
             result = rollout_train_step(model, state, config, backward=False)
     assert result.done is not None
     assert result.done.all()
@@ -347,17 +343,23 @@ def test_eval_stream_evaluates_all_puzzles():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     dataset = _three_puzzle_dataset()
-    def halt_all(halt_logit, *, halt_threshold=0.5):
-        return torch.ones(halt_logit.size(0), dtype=torch.bool, device=halt_logit.device)
 
-    with patch("rollout._predict_halt", side_effect=halt_all):
+    with patch(
+        "rollout._update_commit_stability_row",
+        side_effect=patch_implicit_halt_row(True),
+    ):
         results = list(
             rollout_eval_stream(
                 model,
                 dataset._base_clues,
                 dataset._base_answers,
                 slot_batch_size=2,
-                config=RolloutConfig(inner_iters=1, max_outer_iters=5, gt_reveal=False),
+                config=RolloutConfig(
+                    inner_iters=1,
+                    max_outer_iters=5,
+                    gt_reveal=False,
+                    halt_after_stable_outer_steps=2,
+                ),
                 init_seed=0,
             )
         )
@@ -380,22 +382,21 @@ def test_measure_split_stream_matches_static_after_refill():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.eval()
     dataset = _three_puzzle_dataset()
-    step = {"n": 0}
 
-    def halt_first_slot_once(halt_logit, *, halt_threshold=0.5):
-        step["n"] += 1
-        b = halt_logit.size(0)
-        if step["n"] == 1:
-            out = torch.zeros(b, dtype=torch.bool)
-            out[0] = True
-            return out
-        return torch.zeros(b, dtype=torch.bool)
-
-    with patch("rollout._predict_halt", side_effect=halt_first_slot_once):
+    patch_ctx = (
+        patch(
+            "rollout._update_commit_stability",
+            side_effect=patch_implicit_halt_responses([torch.tensor([True, False])]),
+        ),
+        patch(
+            "rollout._update_commit_stability_row",
+            side_effect=patch_implicit_halt_row_first_call_only(),
+        ),
+    )
+    with patch_ctx[0], patch_ctx[1]:
         stream_stats = _run_measure(model, dataset, slot_batch_size=2, use_stream=True)
-    step["n"] = 0
     torch.manual_seed(2)
-    with patch("rollout._predict_halt", side_effect=halt_first_slot_once):
+    with patch_ctx[0], patch_ctx[1]:
         static_stats = _run_measure(model, dataset, slot_batch_size=2, use_stream=False)
     _assert_stats_equal(stream_stats, static_stats)
 
@@ -416,7 +417,7 @@ def test_measure_split_stream_matches_static_with_max_tries():
     _assert_stats_equal(stream_stats, static_stats)
 
 
-def test_train_done_requires_model_halt_and_correct_grid():
+def test_train_done_requires_stable_halt_and_correct_grid():
     model = MixerNextStateModel(dim=32, num_blocks=1)
     model.train()
     clues = torch.zeros(1, 9, 9, dtype=torch.long)
@@ -431,11 +432,14 @@ def test_train_done_requires_model_halt_and_correct_grid():
         outer_count=torch.zeros(1, dtype=torch.long),
     )
     config = RolloutConfig(inner_iters=1, max_outer_iters=10, deep_supervision=False)
-    with patch("rollout._predict_halt", return_value=torch.tensor([True])):
+    with patch(
+        "rollout._update_commit_stability",
+        side_effect=patch_implicit_halt_responses([torch.tensor([True])]),
+    ):
         with patch("rollout._inner_loop") as mock_inner:
             logits = torch.zeros(1, 9, 9, 10)
             logits[..., 2] = 10.0
-            mock_inner.return_value = (logits, torch.zeros(1), torch.zeros(1, 9, 9, 32))
+            mock_inner.return_value = (logits, torch.zeros(1, 9, 9, 32))
             result = rollout_train_step(model, state, config, backward=False)
     assert result.done is not None
     assert not result.done.any()
@@ -459,7 +463,6 @@ def test_stream_accumulator_matches_manual_add_batch():
         torch.device("cpu"),
         slot_batch_size=2,
         rollout_config=config,
-        halt_loss_weight=1.0,
         use_cuda=False,
         seed=0,
         amp=amp,
@@ -473,7 +476,6 @@ def test_stream_accumulator_matches_manual_add_batch():
         torch.device("cpu"),
         slot_batch_size=2,
         rollout_config=config,
-        halt_loss_weight=1.0,
         use_cuda=False,
         seed=0,
         amp=amp,

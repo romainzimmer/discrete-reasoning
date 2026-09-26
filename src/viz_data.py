@@ -52,7 +52,7 @@ def _trajectory_payload(
     split: str,
     epoch: int,
     puzzle_index: int,
-    max_outer_iters: int,
+    rollout_config: RolloutConfig,
 ) -> dict:
     return {
         "question": row["question"],
@@ -67,8 +67,9 @@ def _trajectory_payload(
             "source": row["source"],
             "rating": row["rating"],
             "outer_steps": trace.outer_steps,
-            "max_outer_iters": max_outer_iters,
+            "max_outer_iters": rollout_config.max_outer_iters,
             "halted": trace.halted,
+            "halt_after_stable_outer_steps": rollout_config.halt_after_stable_outer_steps,
         },
     }
 
@@ -115,7 +116,7 @@ def save_epoch_trajectories(
                     split=split,
                     epoch=epoch,
                     puzzle_index=puzzle_index,
-                    max_outer_iters=rollout_config.max_outer_iters,
+                    rollout_config=rollout_config,
                 ),
             )
             puzzle_indices.append(puzzle_index)

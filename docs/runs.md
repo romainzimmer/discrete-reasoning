@@ -46,13 +46,13 @@ The UI shows:
 - Test sweep charts (after `uv run eval --sweep`)
 - Trajectory player (input grid, prediction grid, outer-step slider)
 
-Train and validation metrics per epoch: loss, cell/puzzle accuracy, halt rate, adaptive curriculum `p_gt` cap by rating group, and accuracy by rating group.
+Train and validation metrics per epoch: loss, cell/puzzle accuracy, stable halt rate, adaptive curriculum `p_gt` cap by rating group, and accuracy by rating group.
 
 <p align="center">
   <img src="assets/charts-viz.png" width="560" alt="Training metrics">
 </p>
 
-Trajectory player for one puzzle: model input and output at each outer commit until halt or max steps.
+Trajectory player for one puzzle: model input and output at each outer commit until stable halt or max steps.
 
 <p align="center">
   <img src="assets/trajectory-viz.png" width="560" alt="Trajectory player">

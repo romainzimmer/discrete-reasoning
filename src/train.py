@@ -71,7 +71,7 @@ REQUIRED_RUN_ARGS = (
     "eval_max_outer_iters",
     "train_batch_size",
     "batches_per_epoch",
-    "halt_loss_weight",
+    "halt_after_stable_outer_steps",
     "num_workers",
     "min_rating",
     "max_rating",
@@ -82,7 +82,7 @@ def build_rollout_config(
     *,
     inner_iters: int,
     max_outer_iters: int,
-    halt_threshold: float = 0.5,
+    halt_after_stable_outer_steps: int = 3,
     gt_reveal: bool = True,
     random_gt_reveal_p_gt: bool = False,
     deep_supervision: bool = True,
@@ -91,7 +91,7 @@ def build_rollout_config(
     return RolloutConfig(
         inner_iters=inner_iters,
         max_outer_iters=max_outer_iters,
-        halt_threshold=halt_threshold,
+        halt_after_stable_outer_steps=halt_after_stable_outer_steps,
         gt_reveal=gt_reveal,
         random_gt_reveal_p_gt=random_gt_reveal_p_gt,
         deep_supervision=deep_supervision,
@@ -107,13 +107,11 @@ def _epoch_desc(epoch: int, epochs: int, phase: str) -> str:
 class TrainEpochStats:
     loss: float
     cell_loss: float = 0.0
-    halt_loss: float = 0.0
     cell_acc: float = 0.0
     puzzle_acc: float = 0.0
-    halt_acc: float = 0.0
     avg_outer_iters: float = 0.0
     avg_steps_per_puzzle: float = 0.0
-    halt_rate: float = 0.0
+    stable_halt_rate: float = 0.0
     completions_per_epoch: int = 0
     group_puzzle_accs: tuple[float | None, ...] = (None,) * NUM_RATING_GROUPS
     group_puzzles_done: tuple[int, ...] = (0,) * NUM_RATING_GROUPS
@@ -123,15 +121,12 @@ class TrainEpochStats:
 class TrainMetricsAccumulator:
     total_loss: torch.Tensor
     total_cell_loss: torch.Tensor
-    total_halt_loss: torch.Tensor
-    halt_correct: torch.Tensor
-    halt_total: torch.Tensor
     correct_cells: torch.Tensor
     total_cells: torch.Tensor
     correct_puzzles_done: torch.Tensor
     puzzles_done: torch.Tensor
     outer_iters_done: torch.Tensor
-    halted_done: torch.Tensor
+    stable_halt_done: torch.Tensor
     n_steps: torch.Tensor
     group_correct_puzzles_done: torch.Tensor
     group_puzzles_done: torch.Tensor
@@ -144,37 +139,27 @@ class TrainMetricsAccumulator:
         return cls(
             total_loss=zero.clone(),
             total_cell_loss=zero.clone(),
-            total_halt_loss=zero.clone(),
-            halt_correct=zero_i.clone(),
-            halt_total=zero_i.clone(),
             correct_cells=zero_i.clone(),
             total_cells=zero_i.clone(),
             correct_puzzles_done=zero_i.clone(),
             puzzles_done=zero_i.clone(),
             outer_iters_done=zero.clone(),
-            halted_done=zero_i.clone(),
+            stable_halt_done=zero_i.clone(),
             n_steps=zero_i.clone(),
             group_correct_puzzles_done=zero_g.clone(),
             group_puzzles_done=zero_g.clone(),
         )
 
     def add_step(self, result: RolloutResult, state: BatchSlotState) -> None:
-        b = state.digit_id.size(0)
         self.n_steps += 1
         self.total_loss += result.loss.detach()
         if result.cell_loss is not None:
             self.total_cell_loss += result.cell_loss.detach()
-        if result.halt_loss is not None:
-            self.total_halt_loss += result.halt_loss.detach()
         assert result.pred is not None
-        assert result.halt_target is not None
         assert result.halted is not None
         assert result.done is not None
 
         done = result.done
-        self.halt_correct += (result.halted == (result.halt_target > 0.5)).sum()
-        self.halt_total += b
-
         mask = cell_acc_mask(state.clues) & done.view(-1, 1, 1)
         self.correct_cells += (result.pred[mask] == state.answer[mask]).sum()
         self.total_cells += mask.sum()
@@ -183,7 +168,7 @@ class TrainMetricsAccumulator:
         self.correct_puzzles_done += (puzzle_ok & done).sum()
         self.puzzles_done += done.sum()
         self.outer_iters_done += (state.outer_count * done.long()).sum()
-        self.halted_done += (result.halted & done).sum()
+        self.stable_halt_done += (result.halted & done).sum()
         if done.any():
             done_groups = state.rating_group[done].long()
             correct_groups = puzzle_ok[done]
@@ -214,23 +199,20 @@ class TrainMetricsAccumulator:
         n = int(self.n_steps.item())
         if n == 0:
             return TrainEpochStats(loss=0.0)
-        halt_total = int(self.halt_total.item())
         total_cells = int(self.total_cells.item())
         puzzles_done = int(self.puzzles_done.item())
-        halted_done = int(self.halted_done.item())
+        stable_halt_done = int(self.stable_halt_done.item())
         avg_outer_iters = self.outer_iters_done.item() / puzzles_done if puzzles_done else 0.0
         group_accs = tuple(self.group_puzzle_accs())
         group_done = tuple(int(self.group_puzzles_done[g].item()) for g in range(NUM_RATING_GROUPS))
         return TrainEpochStats(
             loss=self.total_loss.item() / n,
             cell_loss=self.total_cell_loss.item() / n,
-            halt_loss=self.total_halt_loss.item() / n,
             cell_acc=self.correct_cells.item() / total_cells if total_cells else 0.0,
             puzzle_acc=self.correct_puzzles_done.item() / puzzles_done if puzzles_done else 0.0,
-            halt_acc=self.halt_correct.item() / halt_total if halt_total else 0.0,
             avg_outer_iters=avg_outer_iters,
             avg_steps_per_puzzle=avg_outer_iters,
-            halt_rate=halted_done / puzzles_done if puzzles_done else 0.0,
+            stable_halt_rate=stable_halt_done / puzzles_done if puzzles_done else 0.0,
             completions_per_epoch=puzzles_done,
             group_puzzle_accs=group_accs,
             group_puzzles_done=group_done,
@@ -241,13 +223,11 @@ class TrainMetricsAccumulator:
 class EpochStats:
     loss: float
     cell_loss: float = 0.0
-    halt_loss: float = 0.0
     cell_acc: float = 0.0
     puzzle_acc: float = 0.0
-    halt_acc: float = 0.0
     avg_outer_iters: float = 0.0
     avg_steps_per_puzzle: float = 0.0
-    halt_rate: float = 0.0
+    stable_halt_rate: float = 0.0
     avg_tries: float = 0.0
     group_puzzle_accs: tuple[float | None, ...] = (None,) * NUM_RATING_GROUPS
     group_puzzles_done: tuple[int, ...] = (0,) * NUM_RATING_GROUPS
@@ -257,14 +237,11 @@ class EpochStats:
 class EvalMetricsAccumulator:
     total_loss: torch.Tensor
     total_cell_loss: torch.Tensor
-    total_halt_loss: torch.Tensor
-    halt_correct: torch.Tensor
-    halt_total: torch.Tensor
     correct_cells: torch.Tensor
     total_cells: torch.Tensor
     correct_puzzles: torch.Tensor
     outer_iters_sum: torch.Tensor
-    halted_count: torch.Tensor
+    stable_halt_count: torch.Tensor
     tries_sum: torch.Tensor
     n: torch.Tensor
     group_correct_puzzles_done: torch.Tensor
@@ -278,14 +255,11 @@ class EvalMetricsAccumulator:
         return cls(
             total_loss=zero.clone(),
             total_cell_loss=zero.clone(),
-            total_halt_loss=zero.clone(),
-            halt_correct=zero_i.clone(),
-            halt_total=zero_i.clone(),
             correct_cells=zero_i.clone(),
             total_cells=zero_i.clone(),
             correct_puzzles=zero_i.clone(),
             outer_iters_sum=zero.clone(),
-            halted_count=zero_i.clone(),
+            stable_halt_count=zero_i.clone(),
             tries_sum=zero.clone(),
             n=zero_i.clone(),
             group_correct_puzzles_done=zero_g.clone(),
@@ -304,7 +278,6 @@ class EvalMetricsAccumulator:
         self.n += batch_size
         self.total_loss += result.loss.detach() * batch_size
         self.total_cell_loss += result.cell_loss.detach() * batch_size
-        self.total_halt_loss += result.halt_loss.detach() * batch_size
 
         preds = result.pred.unsqueeze(0) if result.pred.dim() == 2 else result.pred
         answers = answer.unsqueeze(0) if answer.dim() == 2 else answer
@@ -314,12 +287,10 @@ class EvalMetricsAccumulator:
         self.total_cells += mask.sum()
         self.correct_puzzles += (preds == answers).all(dim=(-2, -1)).sum()
 
-        self.halt_correct += result.halt_correct_rounds
-        self.halt_total += result.halt_total_rounds
         outer_steps = result.outer_steps.unsqueeze(0) if result.outer_steps.dim() == 0 else result.outer_steps
         self.outer_iters_sum += outer_steps.sum()
         halted = result.halted.unsqueeze(0) if result.halted.dim() == 0 else result.halted
-        self.halted_count += halted.sum()
+        self.stable_halt_count += halted.sum()
         tries = result.tries.unsqueeze(0) if result.tries.dim() == 0 else result.tries
         self.tries_sum += tries.sum()
 
@@ -351,7 +322,6 @@ class EvalMetricsAccumulator:
         n = int(self.n.item())
         if n == 0:
             return EpochStats(loss=0.0)
-        halt_total = int(self.halt_total.item())
         total_cells = int(self.total_cells.item())
         avg_outer_iters = self.outer_iters_sum.item() / n
         group_accs = tuple(self.group_puzzle_accs())
@@ -359,13 +329,11 @@ class EvalMetricsAccumulator:
         return EpochStats(
             loss=self.total_loss.item() / n,
             cell_loss=self.total_cell_loss.item() / n,
-            halt_loss=self.total_halt_loss.item() / n,
             cell_acc=self.correct_cells.item() / total_cells if total_cells else 0.0,
             puzzle_acc=self.correct_puzzles.item() / n,
-            halt_acc=self.halt_correct.item() / halt_total if halt_total else 0.0,
             avg_outer_iters=avg_outer_iters,
             avg_steps_per_puzzle=avg_outer_iters,
-            halt_rate=self.halted_count.item() / n,
+            stable_halt_rate=self.stable_halt_count.item() / n,
             avg_tries=self.tries_sum.item() / n,
             group_puzzle_accs=group_accs,
             group_puzzles_done=group_done,
@@ -620,7 +588,6 @@ def train_epoch(
     epochs: int,
     rollout_config: RolloutConfig,
     batches_per_epoch: int,
-    halt_loss_weight: float,
     refill_generator: torch.Generator,
     gt_reveal_p_gt_caps: torch.Tensor | None = None,
     profiler: TrainProfiler | None = None,
@@ -644,7 +611,6 @@ def train_epoch(
                     model,
                     state,
                     rollout_config,
-                    halt_loss_weight=halt_loss_weight,
                     backward=False,
                 )
         with torch.profiler.record_function("optimizer_step"):
@@ -677,7 +643,6 @@ def train_epoch(
     progress.set_postfix(
         loss=f"{stats.loss:.4f}",
         cell_loss=f"{stats.cell_loss:.4f}",
-        halt_loss=f"{stats.halt_loss:.4f}",
         refresh=False,
     )
     progress.close()
@@ -698,7 +663,6 @@ def _accumulate_static_eval_batches(
     *,
     slot_batch_size: int,
     rollout_config: RolloutConfig,
-    halt_loss_weight: float,
     use_cuda: bool,
     seed: int | None,
     amp: AmpConfig,
@@ -718,7 +682,6 @@ def _accumulate_static_eval_batches(
                 batch_clues,
                 batch_answers,
                 config=rollout_config,
-                halt_loss_weight=halt_loss_weight,
                 init_seed=seed,
                 max_tries=max_tries,
             )
@@ -735,7 +698,6 @@ def _accumulate_stream_eval(
     *,
     slot_batch_size: int,
     rollout_config: RolloutConfig,
-    halt_loss_weight: float,
     use_cuda: bool,
     seed: int | None,
     amp: AmpConfig,
@@ -753,7 +715,6 @@ def _accumulate_stream_eval(
             answers,
             slot_batch_size=slot_batch_size,
             config=rollout_config,
-            halt_loss_weight=halt_loss_weight,
             init_seed=seed,
             max_tries=max_tries,
         ):
@@ -784,7 +745,6 @@ def measure_split(
     epochs: int,
     phase: str,
     rollout_config: RolloutConfig,
-    halt_loss_weight: float,
     use_cuda: bool,
     seed: int | None = None,
     amp: AmpConfig | None = None,
@@ -814,7 +774,6 @@ def measure_split(
             device,
             slot_batch_size=slot_batch_size,
             rollout_config=rollout_config,
-            halt_loss_weight=halt_loss_weight,
             use_cuda=use_cuda,
             seed=seed,
             amp=amp,
@@ -830,7 +789,6 @@ def measure_split(
             device,
             slot_batch_size=slot_batch_size,
             rollout_config=rollout_config,
-            halt_loss_weight=halt_loss_weight,
             use_cuda=use_cuda,
             seed=seed,
             amp=amp,
@@ -875,10 +833,13 @@ def build_train_parser() -> argparse.ArgumentParser:
         help="Optimizer steps (= outer rounds) per epoch",
     )
     parser.add_argument(
-        "--halt-loss-weight",
-        type=float,
-        default=1.0,
-        help="Weight for halt BCE loss",
+        "--halt-after-stable-outer-steps",
+        type=int,
+        default=3,
+        help=(
+            "Stop when the post-commit digit grid is unchanged for this many "
+            "consecutive outer rounds (minimum 2 = one repeat of the same grid)"
+        ),
     )
     parser.add_argument(
         "--val-batch-size",
@@ -944,7 +905,7 @@ def build_train_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-deep-supervision",
         action="store_true",
-        help="Use final inner loop step only for cell and halt loss (default: average all steps)",
+        help="Use final inner loop step only for cell loss (default: average all inner steps)",
     )
     parser.add_argument("--no-augment", action="store_true", help="Disable training data augmentations")
     parser.add_argument("--aug-digit-proba", type=float, default=0.5)
@@ -1047,9 +1008,12 @@ def train_run(
                 logit_step=curriculum_logit_step,
                 logit_decay=curriculum_logit_decay,
             )
+    if args.halt_after_stable_outer_steps < 2:
+        raise ValueError("--halt-after-stable-outer-steps must be >= 2")
     rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.train_max_outer_iters,
+        halt_after_stable_outer_steps=args.halt_after_stable_outer_steps,
         gt_reveal=gt_reveal,
         random_gt_reveal_p_gt=random_gt_reveal_p_gt,
         deep_supervision=deep_supervision,
@@ -1058,6 +1022,7 @@ def train_run(
     eval_rollout_config = build_rollout_config(
         inner_iters=args.inner_iters,
         max_outer_iters=args.eval_max_outer_iters,
+        halt_after_stable_outer_steps=args.halt_after_stable_outer_steps,
         gt_reveal=False,
         random_init=random_init,
     )
@@ -1116,7 +1081,6 @@ def train_run(
             epochs=args.epochs,
             rollout_config=rollout_config,
             batches_per_epoch=args.batches_per_epoch,
-            halt_loss_weight=args.halt_loss_weight,
             refill_generator=refill_generator,
             gt_reveal_p_gt_caps=gt_reveal_p_gt_caps,
             profiler=profiler,
@@ -1135,7 +1099,6 @@ def train_run(
             epochs=args.epochs,
             phase="val",
             rollout_config=eval_rollout_config,
-            halt_loss_weight=args.halt_loss_weight,
             use_cuda=use_cuda,
             seed=args.seed,
             amp=amp,
@@ -1185,17 +1148,15 @@ def train_run(
             save_checkpoint(run_dir / "best.pt", **ckpt_kwargs)
         train_msg = (
             f"train_loss={train.loss:.4f} train_cell_loss={train.cell_loss:.4f} "
-            f"train_halt_loss={train.halt_loss:.4f} train_halt_acc={train.halt_acc:.4f} "
             f"train_cell_acc={train.cell_acc:.4f} train_puzzle_acc={train.puzzle_acc:.4f} "
-            f"train_halt_rate={train.halt_rate:.4f} "
+            f"train_stable_halt_rate={train.stable_halt_rate:.4f} "
             f"train_steps_per_puzzle={train.avg_steps_per_puzzle:.1f}"
         )
         print(
             f"epoch {epoch}/{args.epochs}: "
             f"{train_msg} val_loss={val.loss:.4f} val_cell_loss={val.cell_loss:.4f} "
-            f"val_halt_loss={val.halt_loss:.4f} val_halt_acc={val.halt_acc:.4f} "
             f"val_cell_acc={val.cell_acc:.4f} val_puzzle_acc={val.puzzle_acc:.4f} "
-            f"val_halt_rate={val.halt_rate:.4f} val_steps_per_puzzle={val.avg_steps_per_puzzle:.1f}"
+            f"val_stable_halt_rate={val.stable_halt_rate:.4f} val_steps_per_puzzle={val.avg_steps_per_puzzle:.1f}"
             + (
                 f" p_gt_cap={curriculum_state.format_p_gt_cap_log()}"
                 if curriculum_state is not None
