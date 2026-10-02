@@ -39,8 +39,15 @@ def test_encode_input_adds_clue_type_embed():
     digit_only = model.encoder.digit_embed(digit_id.reshape(1, 81))
     clue_embed = model.encoder.clue_type_embed(torch.tensor([1]))
     non_clue_embed = model.encoder.clue_type_embed(torch.tensor([0]))
-    assert torch.allclose(encoded[0, 0], digit_only[0, 0] + clue_embed[0])
-    assert torch.allclose(encoded[0, 1], digit_only[0, 1] + non_clue_embed[0])
+    viol_embed = model.encoder.constraint_violation_embed(torch.tensor([1]))
+    assert torch.allclose(
+        encoded[0, 0],
+        digit_only[0, 0] + clue_embed[0] + viol_embed[0],
+    )
+    assert torch.allclose(
+        encoded[0, 1],
+        digit_only[0, 1] + non_clue_embed[0] + viol_embed[0],
+    )
     assert not torch.allclose(encoded[0, 0], encoded[0, 1])
 
 

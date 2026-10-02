@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from encoding import GRID_SIZE, NUM_VOCAB, SEQ_LEN
+from encoding import GRID_SIZE, NUM_VOCAB, SEQ_LEN, constraint_violation_mask
 
 SWIGLU_EXPANSION = 4
 
@@ -36,13 +36,16 @@ class StateEncoder(nn.Module):
         super().__init__()
         self.digit_embed = nn.Embedding(NUM_VOCAB, dim)
         self.clue_type_embed = nn.Embedding(2, dim)
+        self.constraint_violation_embed = nn.Embedding(2, dim)
 
     def encode_input(self, digit_id: torch.Tensor, clue_pin: torch.Tensor) -> torch.Tensor:
         """digit_id, clue_pin: (B, 9, 9) -> (B, 81, D). clue_pin: 0 = non-clue, 1 = clue."""
         b = digit_id.size(0)
+        flat_digits = digit_id.reshape(b, SEQ_LEN)
         clue_type = clue_pin.reshape(b, SEQ_LEN).long()
-        h = self.digit_embed(digit_id.reshape(b, SEQ_LEN))
-        return h + self.clue_type_embed(clue_type)
+        violation = constraint_violation_mask(digit_id).reshape(b, SEQ_LEN).long()
+        h = self.digit_embed(flat_digits)
+        return h + self.clue_type_embed(clue_type) + self.constraint_violation_embed(violation)
 
 
 class MixerBlock(nn.Module):
